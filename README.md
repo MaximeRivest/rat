@@ -3,7 +3,7 @@
 **Run AnyThing.** One binary. Every REPL language. Every client shares one namespace.
 
 ```bash
-curl -fsSL https://rat.dev/install.sh | sh
+curl -fsSL https://runanything.dev/install.sh | sh
 rat install py
 rat py
 ```
@@ -61,7 +61,7 @@ The protocol is MCP. Any MCP client can connect. The kernel is just an MCP serve
 ### macOS and Linux
 
 ```bash
-curl -fsSL https://rat.dev/install.sh | sh
+curl -fsSL https://runanything.dev/install.sh | sh
 ```
 
 Downloads the `rat` binary. That's it. One binary, no dependencies.
@@ -69,12 +69,12 @@ Downloads the `rat` binary. That's it. One binary, no dependencies.
 ### Windows
 
 ```powershell
-irm https://rat.dev/install.ps1 | iex
+irm https://runanything.dev/install.ps1 | iex
 ```
 
 ### Non-technical users (Claude Desktop / Cursor)
 
-Go to [rat.dev](https://rat.dev). Click "Download." Open the installer. It installs `rat`, installs Python if needed, configures Claude Desktop and Cursor automatically. Restart Claude. Done. No terminal required.
+Go to [runanything.dev](https://runanything.dev). Click "Download." Open the installer. It installs `rat`, installs Python if needed, configures Claude Desktop and Cursor automatically. Restart Claude. Done. No terminal required.
 
 ---
 
