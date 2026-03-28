@@ -148,6 +148,49 @@ def make_rat_shell(server_url):
             super().__init__(*args, **kwargs)
             self._mcp_url = server_url
             self._mcp_initialized = False
+            self._patch_completer()
+
+        def _patch_completer(self):
+            """Replace IPython's completer with one that queries the MCP kernel."""
+            from IPython.core.completer import Completion
+
+            original_completions = self.Completer.completions
+
+            mcp_url = self._mcp_url
+
+            def mcp_completions(text, offset):
+                """Query the shared kernel for completions."""
+                # Ask the MCP kernel
+                result = mcp_tool(mcp_url, "look", {
+                    "code": text,
+                    "cursor": offset,
+                })
+
+                content = result.get("content", [])
+                matches = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        for line in item.get("text", "").split("\n"):
+                            line = line.strip()
+                            if line and not line.startswith("No completions"):
+                                label = line.split()[0]
+                                if label:
+                                    matches.append(label)
+
+                if matches:
+                    # Find the start of the token being completed
+                    # Walk back from cursor to the last dot or whitespace/delimiter
+                    start = offset
+                    while start > 0 and text[start - 1] not in " \t\n(,=[{.":
+                        start -= 1
+
+                    for m in matches:
+                        yield Completion(start, offset, m)
+                else:
+                    # Fall back to IPython's local completions (for magics, paths, etc.)
+                    yield from original_completions(text, offset)
+
+            self.Completer.completions = mcp_completions
 
         def _ensure_mcp(self):
             if not self._mcp_initialized:
