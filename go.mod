@@ -7,6 +7,7 @@ require (
 	github.com/mark3labs/mcp-go v0.46.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
