@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -219,7 +220,21 @@ For full kernel restart, use: rat restart <name>
 For direct MCP access:       mcp2cli rat-<name> ctl --op reset`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("reset not yet implemented for %q (needs MCP client)", args[0])
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		session, err := connectToKernel(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+
+		result, err := session.Ctl(ctx, "reset")
+		if err != nil {
+			return err
+		}
+		fmt.Println(extractText(result))
+		return nil
 	},
 }
 
@@ -228,7 +243,21 @@ var cancelCmd = &cobra.Command{
 	Short: "Cancel running execution on a kernel",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("cancel not yet implemented for %q (needs MCP client)", args[0])
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		session, err := connectToKernel(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+
+		result, err := session.Ctl(ctx, "cancel")
+		if err != nil {
+			return err
+		}
+		fmt.Println(extractText(result))
+		return nil
 	},
 }
 

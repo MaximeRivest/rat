@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -19,10 +21,30 @@ var lookCmd = &cobra.Command{
 	Long: `Inspect the state of a running kernel — variables, types, values.
 
 Examples:
-  rat look py             # list all variables
+  rat look sh             # list all variables
   rat look py --at df     # inspect df in detail`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("look not yet implemented for %q", args[0])
+		name := args[0]
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		session, err := connectToKernel(ctx, name)
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+
+		result, err := session.Look(ctx, lookAt)
+		if err != nil {
+			return err
+		}
+
+		text := extractText(result)
+		if text != "" {
+			fmt.Println(text)
+		}
+		return nil
 	},
 }
