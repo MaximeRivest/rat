@@ -482,7 +482,9 @@ func (w *BashWorker) ensureStartedLocked() error {
 	cmd.ExtraFiles = []*os.File{ctlWrite} // child sees this as fd 3
 
 	attrs := &syscall.SysProcAttr{Setsid: true, Setctty: true}
-	ptyFile, err := pty.StartWithAttrs(cmd, nil, attrs)
+	// Set a reasonable default PTY size so commands like `ls` format correctly.
+	winSize := &pty.Winsize{Rows: 24, Cols: 200}
+	ptyFile, err := pty.StartWithAttrs(cmd, winSize, attrs)
 	if err != nil {
 		ctlRead.Close()
 		ctlWrite.Close()
@@ -499,14 +501,21 @@ func (w *BashWorker) ensureStartedLocked() error {
 	w.interruptPty = ptyFile
 	w.interruptMu.Unlock()
 
-	time.Sleep(150 * time.Millisecond)
-	_, _ = w.readAvailableLocked(300 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	_, _ = w.readAvailableLocked(500 * time.Millisecond)
 	w.drainControlLocked()
+	// Set environment, disable prompts. Must come after .bashrc has finished.
 	_ = w.writeCommandLocked("export HISTCONTROL=ignorespace:ignoredups HISTSIZE=50000 HISTFILESIZE=50000; shopt -s cmdhist lithist; set -o history; PS0='' PS1='' PS2='' PS3='' PS4=''; unset PROMPT_COMMAND", true)
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
 	w.drainControlLocked()
-	_ = w.writeCommandLocked("stty -echo; history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true", true)
+	_ = w.writeCommandLocked("history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true", true)
+	time.Sleep(50 * time.Millisecond)
+	_, _ = w.readAvailableLocked(100 * time.Millisecond)
+	w.drainControlLocked()
+	// Force stty -echo as the LAST init step, after everything else that
+	// might reset terminal settings (.bashrc, /etc/profile, etc).
+	_ = w.writeCommandLocked("stty -echo 2>/dev/null || true", true)
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
 	w.drainControlLocked()
@@ -1077,6 +1086,13 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}) string {
 	for _, line := range lines {
 		cleanLine := stripShellNoise(line)
 		cleanLine = stripANSI(cleanLine)
+
+		// Strip the fd 3 control suffix if it got echoed onto the end of a line.
+		// This happens when stty -echo doesn't stick (e.g. .bashrc resets it).
+		if idx := strings.Index(cleanLine, " printf '%s\\n' \"$?\" >&3"); idx >= 0 {
+			cleanLine = cleanLine[:idx]
+		}
+
 		stripped := strings.TrimSpace(cleanLine)
 		if _, ok := codeLineSet[stripped]; ok {
 			continue
@@ -1085,6 +1101,10 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}) string {
 			continue
 		}
 		if looksLikePrompt(stripped) || looksLikeMarkerFragment(stripped) {
+			continue
+		}
+		// Skip pure control lines (fd 3 write, hidden by space prefix)
+		if strings.Contains(stripped, ">&3") {
 			continue
 		}
 		filtered = append(filtered, cleanLine)

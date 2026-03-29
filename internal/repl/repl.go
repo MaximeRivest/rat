@@ -10,14 +10,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/mcpclient"
+	"github.com/maximerivest/rat/internal/state"
 )
 
 // Config for the REPL session.
@@ -33,15 +38,35 @@ func Run(cfg Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	session, err := mcpclient.Connect(ctx, cfg.Port)
+	store := state.DefaultStore()
+
+	connectSessions := func(port int) (*mcpclient.Session, *mcpclient.Session, error) {
+		session, err := mcpclient.Connect(ctx, port)
+		if err != nil {
+			return nil, nil, err
+		}
+		ctlSession, err := mcpclient.Connect(ctx, port)
+		if err != nil {
+			_ = session.Close()
+			return nil, nil, err
+		}
+		return session, ctlSession, nil
+	}
+
+	session, ctlSession, err := connectSessions(cfg.Port)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", cfg.Name, err)
 	}
 	defer session.Close()
+	defer ctlSession.Close()
+
+	sigCh := make(chan os.Signal, 8)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTSTP)
+	defer signal.Stop(sigCh)
 
 	// History file
 	histDir := filepath.Join(configDir(), "history")
-	os.MkdirAll(histDir, 0755)
+	_ = os.MkdirAll(histDir, 0755)
 	histFile := filepath.Join(histDir, cfg.Name+".history")
 
 	// Tab completion via MCP look()
@@ -55,10 +80,9 @@ func Run(cfg Config) error {
 		InterruptPrompt:   "^C",
 		EOFPrompt:         "exit",
 		HistorySearchFold: true,
-		// Disable Ctrl+Z suspension
 		FuncFilterInputRune: func(r rune) (rune, bool) {
 			if r == readline.CharCtrlZ {
-				return r, false // swallow it
+				return r, false
 			}
 			return r, true
 		},
@@ -68,22 +92,46 @@ func Run(cfg Config) error {
 	}
 	defer rl.Close()
 
-	// Print banner
-	fmt.Fprintf(os.Stderr,
-		"\033[1m%s\033[0m | :%d | %s\n",
-		cfg.Name, cfg.Port, cfg.Cwd,
-	)
+	fmt.Fprintf(os.Stderr, "\033[1m%s\033[0m | :%d | %s\n", cfg.Name, cfg.Port, cfg.Cwd)
 	fmt.Fprintf(os.Stderr, "Ctrl+D to exit. Ctrl+C to cancel.\n\n")
 
 	for {
+		// If the kernel was restarted externally or by a hard restart, reconnect.
+		if k, err := store.Get(cfg.Name); err == nil && k != nil && k.Port != cfg.Port {
+			cfg.Port = k.Port
+			_ = session.Close()
+			_ = ctlSession.Close()
+			session, ctlSession, err = connectSessions(cfg.Port)
+			if err != nil {
+				return fmt.Errorf("reconnect to %s: %w", cfg.Name, err)
+			}
+			completer.session = session
+			rl.SetPrompt(shellPrompt(cfg))
+		}
+
+		// Drain any queued signals while idle.
+		draining := true
+		for draining {
+			select {
+			case sig := <-sigCh:
+				if sig == syscall.SIGTSTP {
+					fmt.Fprintln(os.Stderr, "^Z ignored — use Ctrl+D to exit rat sh")
+				} else if sig == os.Interrupt {
+					fmt.Fprintln(os.Stderr, "^C")
+				}
+			default:
+				draining = false
+			}
+		}
+
 		line, err := rl.Readline()
 		if err != nil {
 			if err == readline.ErrInterrupt {
-				// Ctrl+C on empty line — just show new prompt
+				fmt.Fprintln(os.Stderr, "^C")
 				continue
 			}
 			if err == io.EOF {
-				return nil // Ctrl+D
+				return nil
 			}
 			return fmt.Errorf("readline: %w", err)
 		}
@@ -93,12 +141,59 @@ func Run(cfg Config) error {
 			continue
 		}
 
-		// Execute via MCP
 		execCtx, execCancel := context.WithTimeout(ctx, 10*time.Minute)
+		done := make(chan struct{})
+		var hardRestarted atomic.Bool
+
+		go func() {
+			interrupts := 0
+			for {
+				select {
+				case sig := <-sigCh:
+					switch sig {
+					case os.Interrupt:
+						interrupts++
+						switch interrupts {
+						case 1:
+							fmt.Fprintln(os.Stderr, "^C cancelling…")
+							_, _ = ctlSession.Ctl(context.Background(), "cancel")
+						default:
+							fmt.Fprintln(os.Stderr, "^C hard restarting kernel…")
+							if _, err := store.Get(cfg.Name); err == nil {
+								_ = daemon.Stop(store, cfg.Name)
+								if nk, err := daemon.Start(store, daemon.StartOpts{
+									Name: cfg.Name,
+									Lang: cfg.Lang,
+									Cwd:  cfg.Cwd,
+								}); err == nil {
+									cfg.Port = nk.Port
+									hardRestarted.Store(true)
+								}
+							}
+							execCancel()
+						}
+					case syscall.SIGTSTP:
+						fmt.Fprintln(os.Stderr, "^Z ignored — Ctrl+C cancels, Ctrl+C twice hard-restarts")
+					}
+				case <-done:
+					return
+				}
+			}
+		}()
+
 		result, execErr := session.Run(execCtx, line)
+		close(done)
 		execCancel()
 
 		if execErr != nil {
+			if execCtx.Err() == context.Canceled {
+				if hardRestarted.Load() {
+					fmt.Fprintln(os.Stderr, "kernel restarted")
+				} else {
+					fmt.Fprintln(os.Stderr, "execution aborted")
+				}
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "\033[31merror:\033[0m %v\n", execErr)
 			continue
 		}
@@ -135,8 +230,6 @@ func (c *mcpCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		return nil, 0
 	}
 
-	// Parse completion lines: "label    kind"
-	// Find the word being completed to calculate replacement length
 	wordStart := pos
 	for wordStart > 0 && !strings.ContainsRune(" \t\n|&;(){}[]<>'\"", rune(line[wordStart-1])) {
 		wordStart--
@@ -149,13 +242,11 @@ func (c *mcpCompleter) Do(line []rune, pos int) ([][]rune, int) {
 		if l == "" {
 			continue
 		}
-		// First field is the completion label
 		fields := strings.Fields(l)
 		if len(fields) == 0 {
 			continue
 		}
 		label := fields[0]
-		// Only include if it extends beyond what's typed
 		if strings.HasPrefix(label, prefix) {
 			suffix := label[len(prefix):]
 			candidates = append(candidates, []rune(suffix))
@@ -165,7 +256,6 @@ func (c *mcpCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	return candidates, len(prefix)
 }
 
-// resultText extracts all text content from an MCP tool result.
 func resultText(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""

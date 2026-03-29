@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -109,6 +110,9 @@ func isKnownCommand(name string) bool {
 // Ensures the kernel is running (auto-starts if needed), then
 // drops into an interactive session.
 func handleREPL(name string, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("unexpected arguments after %q: %s\nDid you mean 'rat %s' or 'rat %s %s'?", name, strings.Join(args, " "), name, args[0], name)
+	}
 	lang, err := resolveLang(name)
 	if err != nil {
 		return err
