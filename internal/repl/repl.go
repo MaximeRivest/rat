@@ -344,6 +344,14 @@ func waitAndForwardInput(
 			n, err := readWithTimeout(fd, buf, 50*time.Millisecond)
 			if err == nil && n > 0 {
 				text := string(buf[:n])
+				// Echo locally since kernel PTY has stty -echo
+				for _, b := range buf[:n] {
+					if b == '\r' || b == '\n' {
+						os.Stdout.Write([]byte("\r\n"))
+					} else if b >= 0x20 { // printable
+						os.Stdout.Write([]byte{b})
+					}
+				}
 				sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				_, _ = ctlSession.SendInput(sendCtx, text)
 				cancel()
