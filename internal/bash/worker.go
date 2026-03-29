@@ -450,7 +450,25 @@ func (w *BashWorker) Interrupt() bool {
 		return false
 	}
 	_, err := f.Write([]byte{3}) // Ctrl+C
-	return err == nil
+	if err != nil {
+		return false
+	}
+
+	// After Ctrl+C, the terminal driver flushes the PTY input buffer,
+	// which discards the pending "printf ... >&3" control line. We must
+	// re-inject it so readUntilDoneLocked gets the exit code on fd 3
+	// and doesn't hang forever.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		w.interruptMu.Lock()
+		f := w.interruptPty
+		w.interruptMu.Unlock()
+		if f != nil {
+			_, _ = f.Write([]byte(" printf '%s\\n' \"$?\" >&3\n"))
+		}
+	}()
+
+	return true
 }
 
 func (w *BashWorker) Reset() error {
