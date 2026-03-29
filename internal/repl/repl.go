@@ -182,13 +182,7 @@ func Run(cfg Config) error {
 			}
 		}()
 
-		// While the command runs, forward stdin to the kernel.
-		// This makes interactive programs (cat, read, sudo) work.
-		stdinDone := make(chan struct{})
-		go forwardStdin(execCtx, ctlSession, stdinDone)
-
 		result, execErr := session.Run(execCtx, line)
-		close(stdinDone)
 		close(done)
 		execCancel()
 
