@@ -200,15 +200,24 @@ func (w *BashWorker) Complete(code string, cursorPos int) CompleteResult {
 		matches = append(matches, CompletionItem{Label: label, InsertText: &insert, Kind: kind})
 	}
 
+	// Determine if the word is a command (first token) or an argument.
+	isArg := false
+	prefix := strings.TrimSpace(textBefore[:wordStart])
+	if prefix != "" {
+		// There's text before our word — we're completing an argument, not a command
+		isArg = true
+	}
+
 	var completions []string
 	if strings.HasPrefix(word, "$") {
-		prefix := strings.TrimPrefix(word, "$")
-		completions = w.compgenLocked("compgen -A variable -- "+shellQuote(prefix))
+		varPrefix := strings.TrimPrefix(word, "$")
+		completions = w.compgenLocked("compgen -A variable -- " + shellQuote(varPrefix))
 		for _, c := range completions {
 			addMatch("$"+c, "variable")
 		}
-	} else if looksLikePath(word) {
-		completions = w.compgenLocked("compgen -f -- "+shellQuote(word))
+	} else if isArg || looksLikePath(word) {
+		// Argument position or explicit path: complete files and directories
+		completions = w.compgenLocked("compgen -f -- " + shellQuote(word))
 		for _, c := range completions {
 			kind := "file"
 			if strings.HasSuffix(c, "/") {
@@ -217,11 +226,21 @@ func (w *BashWorker) Complete(code string, cursorPos int) CompleteResult {
 			addMatch(c, kind)
 		}
 	} else {
-		completions = w.compgenLocked("compgen -A function -abck -- "+shellQuote(word))
+		// Command position: complete commands, then also files as fallback
+		completions = w.compgenLocked("compgen -A function -abck -- " + shellQuote(word))
 		for _, c := range completions {
 			kind := "function"
 			if isBashKeyword(c) {
 				kind = "keyword"
+			}
+			addMatch(c, kind)
+		}
+		// Also offer files (e.g. ./script.sh)
+		completions = w.compgenLocked("compgen -f -- " + shellQuote(word))
+		for _, c := range completions {
+			kind := "file"
+			if strings.HasSuffix(c, "/") {
+				kind = "folder"
 			}
 			addMatch(c, kind)
 		}
