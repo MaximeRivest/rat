@@ -23,10 +23,8 @@ import (
 )
 
 const (
-	endMarkerPrefix      = "__MRMD_END_MARKER__"
-	exitCodeMarkerPrefix = "__MRMD_EXIT_CODE__"
-	varSeparator         = "\x1f"
-	recordSeparator      = "\x1e"
+	varSeparator    = "\x1f"
+	recordSeparator = "\x1e"
 )
 
 var (
@@ -50,6 +48,8 @@ type BashWorker struct {
 	executionCount int
 	cmd            *exec.Cmd
 	ptyFile        *os.File
+	ctlRead        *os.File
+	ctlBuf         bytes.Buffer
 
 	// interruptPty is a separate reference to the PTY master, protected by
 	// its own mutex so Interrupt() can write Ctrl+C without acquiring w.mu
@@ -107,19 +107,13 @@ func (w *BashWorker) ExecuteStreaming(code string, storeHistory bool, execID str
 	}
 
 	cleanCode := strings.TrimRightFunc(code, unicode.IsSpace)
-	if storeHistory {
-		_ = w.appendHistoryEntryLocked(cleanCode)
-	}
-	nonce := time.Now().UnixNano()
-	endMarker := fmt.Sprintf("%s_%d", endMarkerPrefix, nonce)
-	exitMarker := fmt.Sprintf("%s_%d", exitCodeMarkerPrefix, nonce)
-	wrappedCode := fmt.Sprintf("__exit_code__=0; eval %s; __exit_code__=$?; echo %s$__exit_code__; echo %s", shellQuote(cleanCode), exitMarker, endMarker)
+	w.drainControlLocked()
 
-	if err := w.writeCommandLocked(wrappedCode); err != nil {
+	if err := w.writeCommandSequenceLocked(cleanCode, !storeHistory); err != nil {
 		return failureResult("WriteError", err.Error(), "", execCount, start)
 	}
 
-	stdout, exitCode, err := w.readUntilMarkerLocked(code, endMarker, exitMarker, execID, onOutput, onStdin)
+	stdout, exitCode, err := w.readUntilDoneLocked(code, execID, onOutput, onStdin, false)
 	if err != nil {
 		if errors.Is(err, ErrInputCancelled) {
 			return ExecuteResult{
@@ -480,14 +474,26 @@ func (w *BashWorker) ensureStartedLocked() error {
 	cmd.Dir = w.cwd
 	cmd.Env = envMapToList(w.buildCleanEnv())
 
-	attrs := &syscall.SysProcAttr{Setsid: true, Setctty: true}
-	ptyFile, err := pty.StartWithAttrs(cmd, nil, attrs)
+	// Side channel on fd 3: bash writes one exit code line per completed command.
+	ctlRead, ctlWrite, err := os.Pipe()
 	if err != nil {
 		return err
 	}
+	cmd.ExtraFiles = []*os.File{ctlWrite} // child sees this as fd 3
+
+	attrs := &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	ptyFile, err := pty.StartWithAttrs(cmd, nil, attrs)
+	if err != nil {
+		ctlRead.Close()
+		ctlWrite.Close()
+		return err
+	}
+	_ = ctlWrite.Close() // child owns fd 3 now
 
 	w.cmd = cmd
 	w.ptyFile = ptyFile
+	w.ctlRead = ctlRead
+	w.ctlBuf.Reset()
 
 	w.interruptMu.Lock()
 	w.interruptPty = ptyFile
@@ -495,12 +501,15 @@ func (w *BashWorker) ensureStartedLocked() error {
 
 	time.Sleep(150 * time.Millisecond)
 	_, _ = w.readAvailableLocked(300 * time.Millisecond)
-	_ = w.writeCommandLocked("export HISTCONTROL=ignorespace:ignoredups HISTSIZE=50000 HISTFILESIZE=50000; shopt -s cmdhist lithist; set -o history; PS0='' PS1='' PS2='' PS3='' PS4=''; PROMPT_COMMAND=''; unset PROMPT_COMMAND")
+	w.drainControlLocked()
+	_ = w.writeCommandLocked("export HISTCONTROL=ignorespace:ignoredups HISTSIZE=50000 HISTFILESIZE=50000; shopt -s cmdhist lithist; set -o history; PS0='' PS1='' PS2='' PS3='' PS4=''; unset PROMPT_COMMAND", true)
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
-	_ = w.writeCommandLocked("stty -echo; history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true")
+	w.drainControlLocked()
+	_ = w.writeCommandLocked("stty -echo; history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true", true)
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
+	w.drainControlLocked()
 	return nil
 }
 
@@ -534,11 +543,32 @@ func (w *BashWorker) buildCleanEnv() map[string]string {
 	return env
 }
 
-func (w *BashWorker) writeCommandLocked(command string) error {
+func (w *BashWorker) writeCommandLocked(command string, hideHistory bool) error {
 	if w.ptyFile == nil {
 		return errors.New("bash process not started")
 	}
-	_, err := w.ptyFile.Write([]byte(" " + command + "\n"))
+	prefix := ""
+	if hideHistory {
+		prefix = " " // HISTCONTROL=ignorespace hides internal commands from history
+	}
+	_, err := w.ptyFile.Write([]byte(prefix + command + "\n"))
+	return err
+}
+
+// writeCommandSequenceLocked sends a user-visible command followed by a hidden
+// control line that writes the previous exit code to fd 3. This keeps shell
+// history clean (only the user command is recorded) while giving Go a reliable
+// completion signal on the side channel.
+func (w *BashWorker) writeCommandSequenceLocked(command string, hideHistory bool) error {
+	if w.ptyFile == nil {
+		return errors.New("bash process not started")
+	}
+	prefix := ""
+	if hideHistory {
+		prefix = " "
+	}
+	payload := prefix + command + "\n" + " printf '%s\\n' \"$?\" >&3\n"
+	_, err := w.ptyFile.Write([]byte(payload))
 	return err
 }
 
@@ -563,12 +593,62 @@ func (w *BashWorker) readAvailableLocked(timeout time.Duration) (string, error) 
 	return buf.String(), nil
 }
 
-func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID string, onOutput outputCallback, onStdin stdinCallback) (string, int, error) {
-	if w.ptyFile == nil {
+func (w *BashWorker) drainControlLocked() {
+	for {
+		_, ok, err := w.readControlCodeLocked(10 * time.Millisecond)
+		if err != nil || !ok {
+			return
+		}
+	}
+}
+
+func (w *BashWorker) readControlCodeLocked(timeout time.Duration) (int, bool, error) {
+	if w.ctlRead == nil {
+		return 0, false, nil
+	}
+	// If we already have a full line buffered, parse it immediately.
+	if code, ok := parseControlBuffer(&w.ctlBuf); ok {
+		return code, true, nil
+	}
+	chunk, err := readChunkWithTimeout(w.ctlRead, timeout)
+	if err != nil {
+		if errors.Is(err, errReadTimeout) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	w.ctlBuf.Write(chunk)
+	if code, ok := parseControlBuffer(&w.ctlBuf); ok {
+		return code, true, nil
+	}
+	return 0, false, nil
+}
+
+func parseControlBuffer(buf *bytes.Buffer) (int, bool) {
+	data := buf.String()
+	idx := strings.IndexByte(data, '\n')
+	if idx < 0 {
+		return 0, false
+	}
+	line := strings.TrimSpace(data[:idx])
+	rest := data[idx+1:]
+	buf.Reset()
+	buf.WriteString(rest)
+	if line == "" {
+		return 0, false
+	}
+	code, err := strconv.Atoi(line)
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+func (w *BashWorker) readUntilDoneLocked(code, execID string, onOutput outputCallback, onStdin stdinCallback, raw bool) (string, int, error) {
+	if w.ptyFile == nil || w.ctlRead == nil {
 		return "", 0, errors.New("bash process not started")
 	}
 
-	rawParts := []string{}
 	visibleAccumulated := ""
 	idleCount := 0
 	lastInputVisibleLength := 0
@@ -588,22 +668,38 @@ func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID s
 	}
 
 	for {
+		if exitCode, ok, err := w.readControlCodeLocked(0); err != nil {
+			return visibleAccumulated, 0, err
+		} else if ok {
+			// small final drain for residual PTY output after prompt hook fires
+			if tail, _ := w.readAvailableLocked(30 * time.Millisecond); tail != "" {
+				piece := tail
+				if !raw {
+					piece = filterVisibleChunk(piece, codeLineSet)
+				}
+				if piece != "" {
+					visibleAccumulated += piece
+					if onOutput != nil && !raw {
+						onOutput("stdout", piece, visibleAccumulated)
+					}
+				}
+			}
+			stdout := strings.TrimRight(rawRightVisible(visibleAccumulated), "\n")
+			return stdout, exitCode, nil
+		}
+
 		chunk, err := readChunkWithTimeout(w.ptyFile, 100*time.Millisecond)
 		if err == nil {
 			idleCount = 0
 			piece := string(chunk)
-			rawParts = append(rawParts, piece)
-
-			filtered := filterVisibleChunk(piece, codeLineSet, endMarker, exitMarker)
-			if filtered != "" {
-				visibleAccumulated += filtered
-				if onOutput != nil {
-					onOutput("stdout", filtered, visibleAccumulated)
-				}
+			if !raw {
+				piece = filterVisibleChunk(piece, codeLineSet)
 			}
-
-			if markerSeen(strings.Join(rawParts, ""), endMarker) {
-				break
+			if piece != "" {
+				visibleAccumulated += piece
+				if onOutput != nil && !raw {
+					onOutput("stdout", piece, visibleAccumulated)
+				}
 			}
 			continue
 		}
@@ -616,21 +712,14 @@ func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID s
 		if onStdin == nil || idleCount < 5 {
 			continue
 		}
-		if markerSeen(strings.Join(rawParts, ""), endMarker) {
-			break
-		}
 
 		needsInput := false
 		cleanOutput := strings.TrimRight(stripANSI(visibleAccumulated), "\r\n")
 		detectedPrompt := lastLine(cleanOutput)
-
-		// Syscall-based detection: definitive, works even with zero output
 		if waiting, prompt := processWaitingForInput(w.cmd.Process.Pid, detectedPrompt); waiting {
 			needsInput = true
 			detectedPrompt = prompt
 		}
-
-		// Pattern-based fallback: requires new visible output ending with a prompt
 		if !needsInput && cleanOutput != "" && len(visibleAccumulated) > lastInputVisibleLength {
 			for _, pattern := range promptPatterns {
 				if strings.HasSuffix(cleanOutput, pattern) {
@@ -639,7 +728,6 @@ func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID s
 				}
 			}
 		}
-
 		if !needsInput {
 			continue
 		}
@@ -652,7 +740,6 @@ func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID s
 			}
 			return visibleAccumulated, 0, inputErr
 		}
-
 		userInput = strings.TrimRight(userInput, "\r\n") + "\r"
 		if _, err := w.ptyFile.Write([]byte(userInput)); err != nil {
 			return visibleAccumulated, 0, err
@@ -660,11 +747,6 @@ func (w *BashWorker) readUntilMarkerLocked(code, endMarker, exitMarker, execID s
 		lastInputVisibleLength = len(visibleAccumulated)
 		idleCount = 0
 	}
-
-	rawOutput := strings.Join(rawParts, "")
-	exitCode := parseExitCode(rawOutput, exitMarker)
-	stdout := strings.TrimRight(rawRightVisible(visibleAccumulated), "\n")
-	return stdout, exitCode, nil
 }
 
 func (w *BashWorker) compgenLocked(command string) []string {
@@ -789,99 +871,20 @@ func (w *BashWorker) runProbeLocked(command string) (string, int, error) {
 	if err := w.ensureStartedLocked(); err != nil {
 		return "", 0, err
 	}
-	// Drain any residual PTY output from previous commands
 	_, _ = w.readAvailableLocked(50 * time.Millisecond)
-	endMarker := fmt.Sprintf("%s_%d", endMarkerPrefix, time.Now().UnixNano())
-	exitMarker := fmt.Sprintf("%s_%d", exitCodeMarkerPrefix, time.Now().UnixNano())
-	wrapped := fmt.Sprintf("__exit_code__=0; %s; __exit_code__=$?; echo %s$__exit_code__; echo %s", command, exitMarker, endMarker)
-	if err := w.writeCommandLocked(wrapped); err != nil {
+	w.drainControlLocked()
+	if err := w.writeCommandSequenceLocked(command, true); err != nil {
 		return "", 0, err
 	}
-	return w.readUntilMarkerRawLocked(endMarker, exitMarker)
-}
-
-// readUntilMarkerRawLocked reads PTY output until the end marker appears,
-// returning raw output without any filtering. Used by probes that need
-// to see exact output (variable values, compgen results, etc).
-func (w *BashWorker) readUntilMarkerRawLocked(endMarker, exitMarker string) (string, int, error) {
-	if w.ptyFile == nil {
-		return "", 0, errors.New("bash process not started")
-	}
-
-	var rawParts []string
-	for {
-		chunk, err := readChunkWithTimeout(w.ptyFile, 100*time.Millisecond)
-		if err != nil {
-			if errors.Is(err, errReadTimeout) {
-				continue
-			}
-			return strings.Join(rawParts, ""), 0, err
-		}
-		rawParts = append(rawParts, string(chunk))
-		combined := strings.Join(rawParts, "")
-		if markerSeen(combined, endMarker) {
-			break
-		}
-	}
-
-	rawOutput := strings.Join(rawParts, "")
-	exitCode := parseExitCode(rawOutput, exitMarker)
-
-	// Extract just the output between the command and the exit marker
-	// Strip marker lines and command echo
-	output := stripProbeOutput(rawOutput, endMarker, exitMarker)
-	return output, exitCode, nil
-}
-
-// stripProbeOutput extracts clean output from raw PTY output of a probe command.
-func stripProbeOutput(raw, endMarker, exitMarker string) string {
-	raw = strings.ReplaceAll(raw, "\r\n", "\n")
-	raw = strings.ReplaceAll(raw, "\r", "\n")
-	raw = stripANSI(raw)
-
-	// First, truncate at marker positions (they may be mid-line)
-	if idx := strings.Index(raw, exitMarker); idx >= 0 {
-		raw = raw[:idx]
-	}
-	if idx := strings.Index(raw, endMarker); idx >= 0 {
-		raw = raw[:idx]
-	}
-	// Also catch partial markers
-	if idx := strings.Index(raw, exitCodeMarkerPrefix); idx >= 0 {
-		raw = raw[:idx]
-	}
-	if idx := strings.Index(raw, endMarkerPrefix); idx >= 0 {
-		raw = raw[:idx]
-	}
-
-	lines := strings.Split(raw, "\n")
-	var clean []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		// Skip internal command fragments
-		if strings.HasPrefix(trimmed, "__exit_code__") ||
-			strings.HasPrefix(trimmed, "echo ") {
-			continue
-		}
-		clean = append(clean, line)
-	}
-	return strings.Join(clean, "\n")
-}
-
-func (w *BashWorker) appendHistoryEntryLocked(code string) error {
-	if strings.TrimSpace(code) == "" {
-		return nil
-	}
-	_, _, err := w.runProbeLocked("history -s -- " + shellQuote(code) + "; history -a")
-	return err
+	return w.readUntilDoneLocked(command, "", nil, nil, true)
 }
 
 func (w *BashWorker) killProcessLocked() {
 	if w.ptyFile != nil {
 		_ = w.ptyFile.Close()
+	}
+	if w.ctlRead != nil {
+		_ = w.ctlRead.Close()
 	}
 	if w.cmd != nil && w.cmd.Process != nil {
 		if pgid, err := syscall.Getpgid(w.cmd.Process.Pid); err == nil {
@@ -908,6 +911,8 @@ func (w *BashWorker) killProcessLocked() {
 	}
 	w.cmd = nil
 	w.ptyFile = nil
+	w.ctlRead = nil
+	w.ctlBuf.Reset()
 
 	w.interruptMu.Lock()
 	w.interruptPty = nil
@@ -1064,51 +1069,14 @@ func parseExitCode(output, marker string) int {
 	return value
 }
 
-func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker, exitMarker string) string {
+func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}) string {
 	normalized := strings.ReplaceAll(chunk, "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 	lines := strings.Split(normalized, "\n")
 	filtered := make([]string, 0, len(lines))
 	for _, line := range lines {
-		originalStripped := strings.TrimSpace(stripANSI(line))
-		if originalStripped == "" && line == "" {
-			filtered = append(filtered, line)
-			continue
-		}
-		switch {
-		case strings.HasPrefix(originalStripped, "echo "+endMarker), strings.HasPrefix(originalStripped, "echo "+exitMarker):
-			continue
-		case strings.HasPrefix(originalStripped, "__exit_code__="):
-			continue
-		case strings.Contains(originalStripped, "MRMD_END_MARKER"),
-			strings.Contains(originalStripped, "_END_MARKER_"),
-			strings.Contains(originalStripped, "__exit_code__"),
-			strings.Contains(originalStripped, "$__exit_code__"):
-			continue
-		case strings.Contains(originalStripped, "MRMD_EXIT_CODE"),
-			strings.Contains(originalStripped, "_EXIT_CODE_"):
-			continue
-		case looksLikeMarkerFragment(originalStripped):
-			continue
-		}
-
 		cleanLine := stripShellNoise(line)
-		// Strip all ANSI escape sequences from output
 		cleanLine = stripANSI(cleanLine)
-		if idx := strings.Index(cleanLine, exitMarker); idx >= 0 {
-			cleanLine = cleanLine[:idx]
-		}
-		if idx := strings.Index(cleanLine, endMarker); idx >= 0 {
-			cleanLine = cleanLine[:idx]
-		}
-		// Catch partial markers from chunk-boundary splits
-		if idx := strings.Index(cleanLine, "MRMD_END_MARKER"); idx >= 0 {
-			cleanLine = cleanLine[:idx]
-		}
-		if idx := strings.Index(cleanLine, "MRMD_EXIT_CODE"); idx >= 0 {
-			cleanLine = cleanLine[:idx]
-		}
-
 		stripped := strings.TrimSpace(cleanLine)
 		if _, ok := codeLineSet[stripped]; ok {
 			continue
@@ -1116,8 +1084,7 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker
 		if stripped == "" {
 			continue
 		}
-		// Skip lines that look like a bare bash prompt (user@host:path$)
-		if looksLikePrompt(stripped) {
+		if looksLikePrompt(stripped) || looksLikeMarkerFragment(stripped) {
 			continue
 		}
 		filtered = append(filtered, cleanLine)
