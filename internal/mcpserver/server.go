@@ -62,8 +62,10 @@ func New(name string, k kernel.Kernel) *server.MCPServer {
 		}
 
 		if input != "" {
-			// TODO: input handling for interactive prompts
-			return mcp.NewToolResultError("input not yet supported in rat"), nil
+			if err := k.SendInput(input); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("send input: %v", err)), nil
+			}
+			return mcp.NewToolResultText("input sent"), nil
 		}
 
 		result := k.Run(code)

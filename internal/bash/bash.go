@@ -62,6 +62,14 @@ func (b *Bash) Run(code string) kernel.RunResult {
 	}
 }
 
+// SendInput writes text directly to the bash PTY.
+// This does NOT acquire the execution lock — it can be called while
+// a command is running (which is the whole point: the running command
+// is waiting for input).
+func (b *Bash) SendInput(text string) error {
+	return b.worker.SendInput(text)
+}
+
 // Look inspects the bash session: variables, completions, or symbol info.
 func (b *Bash) Look(req kernel.LookRequest) kernel.LookResult {
 	// Completions

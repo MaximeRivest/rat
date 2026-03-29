@@ -435,6 +435,19 @@ func (w *BashWorker) GetHistory(n int, pattern string, before *int) HistoryResul
 	return HistoryResult{Entries: entries, HasMore: start > 0}
 }
 
+// SendInput writes text to the PTY without acquiring the execution lock.
+// Safe to call while a command is running — that's the intended use case.
+func (w *BashWorker) SendInput(text string) error {
+	w.interruptMu.Lock()
+	f := w.interruptPty
+	w.interruptMu.Unlock()
+	if f == nil {
+		return fmt.Errorf("bash process not started")
+	}
+	_, err := f.Write([]byte(text))
+	return err
+}
+
 func (w *BashWorker) Interrupt() bool {
 	// Write Ctrl+C (ETX, 0x03) to the PTY master. The terminal driver
 	// delivers SIGINT to the foreground process group, which correctly
@@ -454,12 +467,11 @@ func (w *BashWorker) Interrupt() bool {
 		return false
 	}
 
-	// After Ctrl+C, the terminal driver flushes the PTY input buffer,
-	// which discards the pending "printf ... >&3" control line. We must
-	// re-inject it so readUntilDoneLocked gets the exit code on fd 3
-	// and doesn't hang forever.
+	// After Ctrl+C kills the foreground process, bash shows a new prompt,
+	// which fires PROMPT_COMMAND. But if PROMPT_COMMAND was already consumed
+	// or unset, we re-inject it as a fallback so fd 3 gets written.
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond)
 		w.interruptMu.Lock()
 		f := w.interruptPty
 		w.interruptMu.Unlock()
@@ -613,8 +625,17 @@ func (w *BashWorker) writeCommandSequenceLocked(command string, hideHistory bool
 	if hideHistory {
 		prefix = " "
 	}
-	payload := prefix + command + "\n" + " printf '%s\\n' \"$?\" >&3\n"
-	_, err := w.ptyFile.Write([]byte(payload))
+	// We need to know when the user command finishes WITHOUT polluting
+	// stdin (which would break `read`, `cat`, etc). Solution: set a trap
+	// on the same line as the command. The trap fires when the command
+	// exits but doesn't interfere with stdin.
+	//
+	// PROMPT_COMMAND fires after each command completes, before the next
+	// prompt. By setting it on the SAME line as the user command (using ;),
+	// bash processes them as one unit. PROMPT_COMMAND only fires after
+	// the entire line completes.
+	line := fmt.Sprintf(" PROMPT_COMMAND='__pc(){ printf \"%%s\\n\" \"$1\" >&3; unset PROMPT_COMMAND; };__pc $?'; %s%s", prefix, command)
+	_, err := w.ptyFile.Write([]byte(line + "\n"))
 	return err
 }
 
@@ -919,7 +940,12 @@ func (w *BashWorker) runProbeLocked(command string) (string, int, error) {
 	}
 	_, _ = w.readAvailableLocked(50 * time.Millisecond)
 	w.drainControlLocked()
-	if err := w.writeCommandSequenceLocked(command, true); err != nil {
+	// Probes never read stdin, so we can safely write command + control line together.
+	if w.ptyFile == nil {
+		return "", 0, fmt.Errorf("bash process not started")
+	}
+	payload := " " + command + "\n printf '%s\\n' \"$?\" >&3\n"
+	if _, err := w.ptyFile.Write([]byte(payload)); err != nil {
 		return "", 0, err
 	}
 	return w.readUntilDoneLocked(command, "", nil, nil, true)
@@ -1140,8 +1166,8 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}) string {
 		if looksLikePrompt(stripped) || looksLikeMarkerFragment(stripped) {
 			continue
 		}
-		// Skip pure control lines (fd 3 write, hidden by space prefix)
-		if strings.Contains(stripped, ">&3") {
+		// Skip control lines (fd 3 write, PROMPT_COMMAND setup)
+		if strings.Contains(stripped, ">&3") || strings.Contains(stripped, "PROMPT_COMMAND") {
 			continue
 		}
 		filtered = append(filtered, cleanLine)

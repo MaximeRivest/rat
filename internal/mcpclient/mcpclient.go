@@ -71,6 +71,11 @@ func (s *Session) LookComplete(ctx context.Context, code string, cursor int) (*m
 	})
 }
 
+// SendInput writes text to the running command's stdin via MCP run(input=...).
+func (s *Session) SendInput(ctx context.Context, text string) (*mcp.CallToolResult, error) {
+	return s.callTool(ctx, "run", map[string]any{"input": text})
+}
+
 // Ctl sends a control operation (reset, cancel, restart, status).
 func (s *Session) Ctl(ctx context.Context, op string) (*mcp.CallToolResult, error) {
 	return s.callTool(ctx, "ctl", map[string]any{"op": op})

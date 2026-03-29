@@ -19,6 +19,7 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/mark3labs/mcp-go/mcp"
+	"golang.org/x/sys/unix"
 
 	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/mcpclient"
@@ -181,7 +182,13 @@ func Run(cfg Config) error {
 			}
 		}()
 
+		// While the command runs, forward stdin to the kernel.
+		// This makes interactive programs (cat, read, sudo) work.
+		stdinDone := make(chan struct{})
+		go forwardStdin(execCtx, ctlSession, stdinDone)
+
 		result, execErr := session.Run(execCtx, line)
+		close(stdinDone)
 		close(done)
 		execCancel()
 
@@ -284,6 +291,72 @@ func shellPrompt(cfg Config) string {
 	default:
 		return cfg.Name + "> "
 	}
+}
+
+// forwardStdin reads from os.Stdin in raw mode and sends each chunk
+// to the kernel via MCP run(input=...). This runs in a goroutine while
+// a command is executing, enabling interactive programs.
+func forwardStdin(ctx context.Context, session *mcpclient.Session, done <-chan struct{}) {
+	// Put terminal in raw mode so we get keystrokes immediately
+	fd := int(os.Stdin.Fd())
+	oldState, err := makeRaw(fd)
+	if err != nil {
+		return // not a terminal, skip
+	}
+	defer restoreTerminal(fd, oldState)
+
+	buf := make([]byte, 256)
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Non-blocking-ish read with a short timeout via select(2)
+		n, err := readWithTimeout(fd, buf, 100*time.Millisecond)
+		if err != nil || n == 0 {
+			continue
+		}
+
+		text := string(buf[:n])
+		sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, _ = session.SendInput(sendCtx, text)
+		cancel()
+	}
+}
+
+func makeRaw(fd int) (*unix.Termios, error) {
+	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return nil, err
+	}
+	old := *termios
+	// Raw mode: no echo, no canonical processing, no signals
+	termios.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG
+	termios.Cc[unix.VMIN] = 0
+	termios.Cc[unix.VTIME] = 1 // 100ms timeout
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
+		return nil, err
+	}
+	return &old, nil
+}
+
+func restoreTerminal(fd int, state *unix.Termios) {
+	_ = unix.IoctlSetTermios(fd, unix.TCSETS, state)
+}
+
+func readWithTimeout(fd int, buf []byte, timeout time.Duration) (int, error) {
+	var rfds unix.FdSet
+	rfds.Bits[fd/64] |= 1 << (uint(fd) % 64)
+	tv := unix.NsecToTimeval(timeout.Nanoseconds())
+	n, err := unix.Select(fd+1, &rfds, nil, nil, &tv)
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	return unix.Read(fd, buf)
 }
 
 func configDir() string {

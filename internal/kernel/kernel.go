@@ -13,6 +13,11 @@ type Kernel interface {
 	// stdout/stderr are captured. State persists between calls.
 	Run(code string) RunResult
 
+	// SendInput writes text to the running process's stdin.
+	// Used for interactive prompts (passwords, confirmations, read).
+	// The text is written directly to the PTY — no execution wrapper.
+	SendInput(text string) error
+
 	// Look inspects the runtime state.
 	// No args: variable overview. At="x": inspect x. Code+Cursor: completions.
 	Look(req LookRequest) LookResult
