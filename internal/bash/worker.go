@@ -1008,6 +1008,10 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker
 			continue
 		case strings.HasPrefix(originalStripped, "__exit_code__="):
 			continue
+		case strings.Contains(originalStripped, "MRMD_END_MARKER"):
+			continue
+		case strings.Contains(originalStripped, "MRMD_EXIT_CODE"):
+			continue
 		}
 
 		cleanLine := stripShellNoise(line)
@@ -1015,6 +1019,13 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker
 			cleanLine = cleanLine[:idx]
 		}
 		if idx := strings.Index(cleanLine, endMarker); idx >= 0 {
+			cleanLine = cleanLine[:idx]
+		}
+		// Catch partial markers from chunk-boundary splits
+		if idx := strings.Index(cleanLine, "MRMD_END_MARKER"); idx >= 0 {
+			cleanLine = cleanLine[:idx]
+		}
+		if idx := strings.Index(cleanLine, "MRMD_EXIT_CODE"); idx >= 0 {
 			cleanLine = cleanLine[:idx]
 		}
 

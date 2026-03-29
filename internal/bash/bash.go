@@ -79,8 +79,25 @@ func (b *Bash) Look(req kernel.LookRequest) kernel.LookResult {
 
 	// Inspect a specific symbol
 	if req.At != "" {
-		// Hover(code, cursorPos) — pass the symbol as code, cursor at end
-		hr := b.worker.Hover(req.At, len(req.At))
+		sym := req.At
+		// Strip leading $ if present — user might type "look --at $MY_VAR" or "look --at MY_VAR"
+		sym = strings.TrimPrefix(sym, "$")
+
+		// Try as a variable first (most common case for "look --at")
+		detail := b.worker.GetVariableDetail(sym, nil, 1000)
+		if detail.Type != "undefined" {
+			text := fmt.Sprintf("%s (%s)", sym, detail.Type)
+			if detail.Value != "" {
+				text += fmt.Sprintf(" = %s", detail.Value)
+			}
+			if detail.Truncated {
+				text += " [truncated]"
+			}
+			return kernel.LookResult{Text: text}
+		}
+
+		// Fall back to command type lookup
+		hr := b.worker.Hover(sym, len(sym))
 		if !hr.Found {
 			return kernel.LookResult{Text: fmt.Sprintf("%s: not found", req.At)}
 		}
