@@ -498,7 +498,7 @@ func (w *BashWorker) ensureStartedLocked() error {
 	_ = w.writeCommandLocked("export HISTCONTROL=ignorespace:ignoredups HISTSIZE=50000 HISTFILESIZE=50000; shopt -s cmdhist lithist; set -o history; PS0='' PS1='' PS2='' PS3='' PS4=''; PROMPT_COMMAND=''; unset PROMPT_COMMAND")
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
-	_ = w.writeCommandLocked("history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true")
+	_ = w.writeCommandLocked("stty -echo; history -c; history -r; bind 'set enable-bracketed-paste off' 2>/dev/null || true")
 	time.Sleep(50 * time.Millisecond)
 	_, _ = w.readAvailableLocked(100 * time.Millisecond)
 	return nil
@@ -742,7 +742,7 @@ func (w *BashWorker) getVariableValueLocked(name string) (string, bool) {
 	command := fmt.Sprintf(`if [[ -v %s ]]; then printf '\x1e%%s' "${%s}"; fi`, name, name)
 	output, _, err := w.runProbeLocked(command)
 	if err != nil {
-		return "", false
+			return "", false
 	}
 	output = stripShellNoise(output)
 	output = strings.TrimLeft(output, "\r\n")
@@ -797,7 +797,78 @@ func (w *BashWorker) runProbeLocked(command string) (string, int, error) {
 	if err := w.writeCommandLocked(wrapped); err != nil {
 		return "", 0, err
 	}
-	return w.readUntilMarkerLocked(command, endMarker, exitMarker, "", nil, nil)
+	return w.readUntilMarkerRawLocked(endMarker, exitMarker)
+}
+
+// readUntilMarkerRawLocked reads PTY output until the end marker appears,
+// returning raw output without any filtering. Used by probes that need
+// to see exact output (variable values, compgen results, etc).
+func (w *BashWorker) readUntilMarkerRawLocked(endMarker, exitMarker string) (string, int, error) {
+	if w.ptyFile == nil {
+		return "", 0, errors.New("bash process not started")
+	}
+
+	var rawParts []string
+	for {
+		chunk, err := readChunkWithTimeout(w.ptyFile, 100*time.Millisecond)
+		if err != nil {
+			if errors.Is(err, errReadTimeout) {
+				continue
+			}
+			return strings.Join(rawParts, ""), 0, err
+		}
+		rawParts = append(rawParts, string(chunk))
+		combined := strings.Join(rawParts, "")
+		if markerSeen(combined, endMarker) {
+			break
+		}
+	}
+
+	rawOutput := strings.Join(rawParts, "")
+	exitCode := parseExitCode(rawOutput, exitMarker)
+
+	// Extract just the output between the command and the exit marker
+	// Strip marker lines and command echo
+	output := stripProbeOutput(rawOutput, endMarker, exitMarker)
+	return output, exitCode, nil
+}
+
+// stripProbeOutput extracts clean output from raw PTY output of a probe command.
+func stripProbeOutput(raw, endMarker, exitMarker string) string {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	raw = stripANSI(raw)
+
+	// First, truncate at marker positions (they may be mid-line)
+	if idx := strings.Index(raw, exitMarker); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if idx := strings.Index(raw, endMarker); idx >= 0 {
+		raw = raw[:idx]
+	}
+	// Also catch partial markers
+	if idx := strings.Index(raw, exitCodeMarkerPrefix); idx >= 0 {
+		raw = raw[:idx]
+	}
+	if idx := strings.Index(raw, endMarkerPrefix); idx >= 0 {
+		raw = raw[:idx]
+	}
+
+	lines := strings.Split(raw, "\n")
+	var clean []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Skip internal command fragments
+		if strings.HasPrefix(trimmed, "__exit_code__") ||
+			strings.HasPrefix(trimmed, "echo ") {
+			continue
+		}
+		clean = append(clean, line)
+	}
+	return strings.Join(clean, "\n")
 }
 
 func (w *BashWorker) appendHistoryEntryLocked(code string) error {
@@ -995,6 +1066,7 @@ func parseExitCode(output, marker string) int {
 
 func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker, exitMarker string) string {
 	normalized := strings.ReplaceAll(chunk, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 	lines := strings.Split(normalized, "\n")
 	filtered := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -1008,13 +1080,21 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker
 			continue
 		case strings.HasPrefix(originalStripped, "__exit_code__="):
 			continue
-		case strings.Contains(originalStripped, "MRMD_END_MARKER"):
+		case strings.Contains(originalStripped, "MRMD_END_MARKER"),
+			strings.Contains(originalStripped, "_END_MARKER_"),
+			strings.Contains(originalStripped, "__exit_code__"),
+			strings.Contains(originalStripped, "$__exit_code__"):
 			continue
-		case strings.Contains(originalStripped, "MRMD_EXIT_CODE"):
+		case strings.Contains(originalStripped, "MRMD_EXIT_CODE"),
+			strings.Contains(originalStripped, "_EXIT_CODE_"):
+			continue
+		case looksLikeMarkerFragment(originalStripped):
 			continue
 		}
 
 		cleanLine := stripShellNoise(line)
+		// Strip all ANSI escape sequences from output
+		cleanLine = stripANSI(cleanLine)
 		if idx := strings.Index(cleanLine, exitMarker); idx >= 0 {
 			cleanLine = cleanLine[:idx]
 		}
@@ -1029,11 +1109,15 @@ func filterVisibleChunk(chunk string, codeLineSet map[string]struct{}, endMarker
 			cleanLine = cleanLine[:idx]
 		}
 
-		stripped := strings.TrimSpace(stripANSI(cleanLine))
+		stripped := strings.TrimSpace(cleanLine)
 		if _, ok := codeLineSet[stripped]; ok {
 			continue
 		}
-		if stripped == "" && cleanLine == "" {
+		if stripped == "" {
+			continue
+		}
+		// Skip lines that look like a bare bash prompt (user@host:path$)
+		if looksLikePrompt(stripped) {
 			continue
 		}
 		filtered = append(filtered, cleanLine)
@@ -1073,6 +1157,46 @@ func splitNonEmptyLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// looksLikeMarkerFragment detects partial marker/nonce fragments that
+// leak through PTY chunk boundaries. These are typically long digit strings
+// or fragments of the wrapped eval command.
+func looksLikeMarkerFragment(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	// Fragments of the wrapped command: "eval '...';" or "__exit_code__" or nonce digits
+	if strings.Contains(s, "eval ") && strings.Contains(s, "__exit_code__") {
+		return true
+	}
+	// Pure nonce fragment: just digits (or digits with a few prefix chars from the marker)
+	digits := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits++
+		}
+	}
+	// If >60% of the string is digits and it's short, it's likely a nonce fragment
+	if len(s) < 80 && digits > 0 && float64(digits)/float64(len(s)) > 0.6 {
+		return true
+	}
+	return false
+}
+
+// looksLikePrompt detects bare bash prompt lines like "user@host:~/path$"
+// that leak through when PS1 isn't fully suppressed.
+func looksLikePrompt(s string) bool {
+	s = strings.TrimSpace(s)
+	// user@host:path$ pattern
+	if strings.Contains(s, "@") && (strings.HasSuffix(s, "$") || strings.HasSuffix(s, "$ ") || strings.HasSuffix(s, "#")) {
+		// Must not contain spaces (actual output would)
+		if !strings.Contains(strings.TrimRight(s, "$ #"), " ") {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikePath(s string) bool {

@@ -1,28 +1,21 @@
 // Package repl implements the interactive REPL for rat.
 //
-// For bash, this is a readline-style loop that sends each line to the
-// shared kernel via MCP. The user gets a prompt, line editing (from
-// the terminal), and history (from readline/libedit via stdin).
-//
-// Every command goes through MCP run(), which means it shares the
-// namespace with Claude, Cursor, notebooks — whoever else is connected.
-// Interactive TUI programs (vim, top) won't work through this REPL —
-// use a real terminal for those. Everything else works.
+// Uses chzyer/readline for line editing, history, and tab completion.
+// Every command goes through MCP run(), sharing the namespace with
+// Claude, Cursor, notebooks — whoever else is connected.
 package repl
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
+	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/mark3labs/mcp-go/mcp"
-	"golang.org/x/sys/unix"
 
 	"github.com/maximerivest/rat/internal/mcpclient"
 )
@@ -46,10 +39,34 @@ func Run(cfg Config) error {
 	}
 	defer session.Close()
 
-	// Handle Ctrl+C — send cancel to kernel, don't exit REPL
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT)
-	defer signal.Stop(sigCh)
+	// History file
+	histDir := filepath.Join(configDir(), "history")
+	os.MkdirAll(histDir, 0755)
+	histFile := filepath.Join(histDir, cfg.Name+".history")
+
+	// Tab completion via MCP look()
+	completer := &mcpCompleter{session: session, ctx: ctx}
+
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:            shellPrompt(cfg),
+		HistoryFile:       histFile,
+		HistoryLimit:      10000,
+		AutoComplete:      completer,
+		InterruptPrompt:   "^C",
+		EOFPrompt:         "exit",
+		HistorySearchFold: true,
+		// Disable Ctrl+Z suspension
+		FuncFilterInputRune: func(r rune) (rune, bool) {
+			if r == readline.CharCtrlZ {
+				return r, false // swallow it
+			}
+			return r, true
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("readline: %w", err)
+	}
+	defer rl.Close()
 
 	// Print banner
 	fmt.Fprintf(os.Stderr,
@@ -58,51 +75,31 @@ func Run(cfg Config) error {
 	)
 	fmt.Fprintf(os.Stderr, "Ctrl+D to exit. Ctrl+C to cancel.\n\n")
 
-	prompt := shellPrompt(cfg)
-	reader := bufio.NewReader(os.Stdin)
-	interactive := isTerminal(os.Stdin)
-
 	for {
-		if interactive {
-			fmt.Fprint(os.Stdout, prompt)
-		}
-
-		line, err := readLine(reader, sigCh)
+		line, err := rl.Readline()
 		if err != nil {
-			if err == io.EOF {
-				if interactive {
-					fmt.Fprintln(os.Stdout) // newline after ^D
-				}
-				return nil
-			}
-			if err == errInterrupted {
-				fmt.Fprintln(os.Stdout) // newline after ^C
+			if err == readline.ErrInterrupt {
+				// Ctrl+C on empty line — just show new prompt
 				continue
 			}
-			return fmt.Errorf("read: %w", err)
+			if err == io.EOF {
+				return nil // Ctrl+D
+			}
+			return fmt.Errorf("readline: %w", err)
 		}
 
-		if strings.TrimSpace(line) == "" {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
-		// Execute via MCP with a generous timeout
+		// Execute via MCP
 		execCtx, execCancel := context.WithTimeout(ctx, 10*time.Minute)
-
-		// Forward Ctrl+C as cancel during execution
-		go func() {
-			select {
-			case <-sigCh:
-				session.Ctl(ctx, "cancel")
-			case <-execCtx.Done():
-			}
-		}()
-
 		result, execErr := session.Run(execCtx, line)
 		execCancel()
 
 		if execErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", execErr)
+			fmt.Fprintf(os.Stderr, "\033[31merror:\033[0m %v\n", execErr)
 			continue
 		}
 
@@ -113,27 +110,59 @@ func Run(cfg Config) error {
 	}
 }
 
-var errInterrupted = fmt.Errorf("interrupted")
+// mcpCompleter implements readline.AutoCompleter using MCP look().
+type mcpCompleter struct {
+	session *mcpclient.Session
+	ctx     context.Context
+}
 
-// readLine reads a line, returning errInterrupted if Ctrl+C is pressed.
-func readLine(reader *bufio.Reader, sigCh <-chan os.Signal) (string, error) {
-	// We read in a goroutine so we can also listen for signals
-	type readResult struct {
-		line string
-		err  error
+func (c *mcpCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	code := string(line)
+	if code == "" {
+		return nil, 0
 	}
-	ch := make(chan readResult, 1)
-	go func() {
-		line, err := reader.ReadString('\n')
-		ch <- readResult{strings.TrimRight(line, "\r\n"), err}
-	}()
 
-	select {
-	case r := <-ch:
-		return r.line, r.err
-	case <-sigCh:
-		return "", errInterrupted
+	ctx, cancel := context.WithTimeout(c.ctx, 2*time.Second)
+	defer cancel()
+
+	result, err := c.session.LookComplete(ctx, code, pos)
+	if err != nil {
+		return nil, 0
 	}
+
+	text := resultText(result)
+	if text == "" || text == "No completions." {
+		return nil, 0
+	}
+
+	// Parse completion lines: "label    kind"
+	// Find the word being completed to calculate replacement length
+	wordStart := pos
+	for wordStart > 0 && !strings.ContainsRune(" \t\n|&;(){}[]<>'\"", rune(line[wordStart-1])) {
+		wordStart--
+	}
+	prefix := string(line[wordStart:pos])
+
+	var candidates [][]rune
+	for _, l := range strings.Split(text, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		// First field is the completion label
+		fields := strings.Fields(l)
+		if len(fields) == 0 {
+			continue
+		}
+		label := fields[0]
+		// Only include if it extends beyond what's typed
+		if strings.HasPrefix(label, prefix) {
+			suffix := label[len(prefix):]
+			candidates = append(candidates, []rune(suffix))
+		}
+	}
+
+	return candidates, len(prefix)
 }
 
 // resultText extracts all text content from an MCP tool result.
@@ -167,7 +196,10 @@ func shellPrompt(cfg Config) string {
 	}
 }
 
-func isTerminal(f *os.File) bool {
-	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
-	return err == nil
+func configDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "rat")
 }

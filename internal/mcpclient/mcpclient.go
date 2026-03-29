@@ -63,6 +63,14 @@ func (s *Session) Look(ctx context.Context, at string) (*mcp.CallToolResult, err
 	return s.callTool(ctx, "look", args)
 }
 
+// LookComplete requests completions for code at cursor position.
+func (s *Session) LookComplete(ctx context.Context, code string, cursor int) (*mcp.CallToolResult, error) {
+	return s.callTool(ctx, "look", map[string]any{
+		"code":   code,
+		"cursor": cursor,
+	})
+}
+
 // Ctl sends a control operation (reset, cancel, restart, status).
 func (s *Session) Ctl(ctx context.Context, op string) (*mcp.CallToolResult, error) {
 	return s.callTool(ctx, "ctl", map[string]any{"op": op})

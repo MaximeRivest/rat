@@ -3,6 +3,7 @@ module github.com/maximerivest/rat
 go 1.26.1
 
 require (
+	github.com/chzyer/readline v1.5.1
 	github.com/creack/pty v1.1.24
 	github.com/mark3labs/mcp-go v0.46.0
 	github.com/spf13/cobra v1.10.2
