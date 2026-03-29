@@ -48,7 +48,7 @@ A REPL is a REPL. It shouldn't matter whether you're typing in a terminal, talki
 Three tools. That's the entire kernel API:
 - **`run`** — execute code or provide input
 - **`look`** — inspect variables, complete code, see state
-- **`ctl`** — reset, cancel, restart
+- **`ctl`** — reset, cancel, restart (MCP tool; from the CLI: `rat reset`, `rat cancel`, `rat restart`)
 
 Same three tools for every language. Same three tools whether you're a human in a terminal, an LLM in Claude, or a notebook app rendering cells.
 
@@ -191,7 +191,7 @@ rat run python 'look(at="df")'
 #   ▸ dtypes   dict   {'region': 'object', 'revenue': 'int64', ...}
 #     shape    tuple  (1000, 5)
 
-rat run python 'ctl --op reset'
+rat reset python
 # RESET | namespace cleared | 0 vars
 ```
 
@@ -504,7 +504,8 @@ rat rm <name>                   # unregister
 rat <name>                      # REPL — auto-starts kernel
 rat run <name> '<code>'         # run code — auto-starts kernel
 rat look <name> [--at <sym>]    # inspect — auto-starts kernel
-rat ctl <name> --op <op>        # control: reset, cancel, restart
+rat reset <name>                # clear namespace
+rat cancel <name>               # cancel running execution
 
 # Manage
 rat ls                          # list all runtimes and their state
@@ -541,6 +542,8 @@ rat serve <name> --http [--port PORT]  # MCP HTTP server (shared access)
 Any language runtime
     ↓ wrap in MCP (rat serve py, rat serve r, ...)
 MCP Server (3 tools: run, look, ctl)
+    ↓ rat CLI wraps these ergonomically
+    ↓ mcp2cli gives generic CLI access to any MCP tool
     ↓ connect from anywhere
 ├── rat py              → IPython REPL in your terminal
 ├── rat run py          → one-liners from shell scripts
