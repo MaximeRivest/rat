@@ -39,20 +39,13 @@ const (
 	reset = "\033[0m"
 	cyan  = "\033[36m"
 	green = "\033[32m"
-	dim   = "\033[2m"
 )
-
-const banner = bold + `
-                ▗      
-  ▄▄▄  ▄▄▄  ▗▄▟▄▖
-  █▀▀▌ ▀▄▄▀  ▐▌  
-  █   ▘▄▄▄▀  ▝▀▘ ` + reset + dim + `  run anything` + reset + `
-`
 
 var rootCmd = &cobra.Command{
 	Use:   "rat",
 	Short: bold + "R" + reset + "un " + bold + "A" + reset + "ny" + bold + "T" + reset + "hing — one binary, every REPL language",
-	Long: banner + `
+	Long: bold + "r" + reset + "un " + bold + "a" + reset + "ny" + bold + "t" + reset + "hing" + ` — one binary, every REPL language
+
 ` + green + `  rat serve sh --http` + reset + `     Start an MCP HTTP server for bash
 ` + green + `  rat run py 'x = 42'` + reset + `    Run code on the Python kernel
 ` + green + `  rat py` + reset + `                  Drop into IPython connected to the shared kernel
