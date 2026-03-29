@@ -123,7 +123,8 @@ func handleREPL(name string, args []string) error {
 	if err != nil {
 		return err
 	}
-	session.Close() // we just needed to ensure it's running + get the port
+	_, _ = session.Ctl(ctx, "status") // ensure shared shell session exists
+	session.Close()
 
 	// Get the kernel info from state
 	k, err := store().Get(name)

@@ -22,8 +22,8 @@ import (
 )
 
 const (
-	BasePort   = 8717
-	StartupMax = 5 * time.Second
+	BasePort     = 8717
+	StartupMax   = 5 * time.Second
 	PollInterval = 100 * time.Millisecond
 )
 
@@ -60,8 +60,8 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	self, _ = filepath.EvalSymlinks(self)
 
-	// Build the command: rat serve <lang> --http --port <port> --cwd <cwd>
-	args := []string{"serve", opts.Lang, "--http", "--port", strconv.Itoa(port)}
+	// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd>
+	args := []string{"serve", opts.Name, "--lang", opts.Lang, "--kernel-name", opts.Name, "--http", "--port", strconv.Itoa(port)}
 	if opts.Cwd != "" {
 		args = append(args, "--cwd", opts.Cwd)
 	}

@@ -22,12 +22,16 @@ var (
 	serveHTTPFlag bool
 	servePort     int
 	serveCwd      string
+	serveLangFlag string
+	serveNameFlag string
 )
 
 func init() {
 	serveCmd.Flags().BoolVar(&serveHTTPFlag, "http", false, "Run as HTTP server (default: stdio)")
 	serveCmd.Flags().IntVar(&servePort, "port", 8720, "HTTP port")
 	serveCmd.Flags().StringVar(&serveCwd, "cwd", "", "Working directory (default: current)")
+	serveCmd.Flags().StringVar(&serveLangFlag, "lang", "", "Canonical language (for named runtimes)")
+	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
 
 	rootCmd.AddCommand(serveCmd)
 }
@@ -51,9 +55,18 @@ Examples:
 }
 
 func runServe(input string) error {
-	lang, err := resolveLang(input)
-	if err != nil {
-		return err
+	name := input
+	if serveNameFlag != "" {
+		name = serveNameFlag
+	}
+
+	lang := serveLangFlag
+	var err error
+	if lang == "" {
+		lang, err = resolveLang(input)
+		if err != nil {
+			return err
+		}
 	}
 
 	cwd := serveCwd
@@ -70,7 +83,7 @@ func runServe(input string) error {
 
 	switch lang {
 	case "sh":
-		k, err = bash.New(cwd)
+		k, err = bash.New(name, cwd)
 	// Future:
 	// case "py":
 	//     k, err = python.New(cwd, venv)
@@ -89,13 +102,13 @@ func runServe(input string) error {
 	}
 	defer k.Shutdown()
 
-	name := fmt.Sprintf("rat-%s", lang)
-	mcpSrv := mcpserver.New(name, k)
+	serverName := fmt.Sprintf("rat-%s", name)
+	mcpSrv := mcpserver.New(serverName, k)
 
 	if serveHTTPFlag {
-		return runHTTPServer(mcpSrv, servePort, name)
+		return runHTTPServer(mcpSrv, servePort, serverName)
 	}
-	return runStdioServer(mcpSrv, name)
+	return runStdioServer(mcpSrv, serverName)
 }
 
 func runStdioServer(mcpSrv *server.MCPServer, name string) error {

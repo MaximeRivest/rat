@@ -265,7 +265,8 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Run diagnostics",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("doctor not yet implemented")
+		printShellDoctor(inspectShellEnv())
+		return nil
 	},
 }
 
