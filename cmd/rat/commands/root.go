@@ -21,10 +21,13 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/maximerivest/rat/internal/repl"
 )
 
 // Version is set at build time via ldflags.
@@ -103,10 +106,31 @@ func isKnownCommand(name string) bool {
 }
 
 // handleREPL launches the REPL for a given runtime name.
-// For now it's a stub — the REPL architecture doc describes
-// how this will work (IPython subclass, radian, Julia REPL, etc).
+// Ensures the kernel is running (auto-starts if needed), then
+// drops into an interactive session.
 func handleREPL(name string, args []string) error {
-	fmt.Fprintf(os.Stderr, "rat %s: REPL not yet implemented\n", name)
-	fmt.Fprintf(os.Stderr, "Try: rat serve %s --http\n", name)
-	return fmt.Errorf("REPL not yet implemented for %q", name)
+	lang, err := resolveLang(name)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	session, err := connectToKernel(ctx, name)
+	if err != nil {
+		return err
+	}
+	session.Close() // we just needed to ensure it's running + get the port
+
+	// Get the kernel info from state
+	k, err := store().Get(name)
+	if err != nil || k == nil {
+		return fmt.Errorf("kernel %s not found in state after connect", name)
+	}
+
+	return repl.Run(repl.Config{
+		Name: k.Name,
+		Lang: lang,
+		Port: k.Port,
+		Cwd:  k.Cwd,
+	})
 }
