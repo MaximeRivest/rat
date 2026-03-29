@@ -18,6 +18,10 @@ type Kernel interface {
 	// The text is written directly to the PTY — no execution wrapper.
 	SendInput(text string) error
 
+	// IsWaitingForInput returns true if the running process is blocked
+	// waiting for stdin. Lock-free — safe to call during execution.
+	IsWaitingForInput() bool
+
 	// Look inspects the runtime state.
 	// No args: variable overview. At="x": inspect x. Code+Cursor: completions.
 	Look(req LookRequest) LookResult

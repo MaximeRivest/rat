@@ -62,6 +62,11 @@ func (b *Bash) Run(code string) kernel.RunResult {
 	}
 }
 
+// IsWaitingForInput checks if the running command needs stdin.
+func (b *Bash) IsWaitingForInput() bool {
+	return b.worker.IsWaitingForInput()
+}
+
 // SendInput writes text directly to the bash PTY.
 // This does NOT acquire the execution lock — it can be called while
 // a command is running (which is the whole point: the running command
@@ -175,7 +180,11 @@ func (b *Bash) Ctl(op string) kernel.CtlResult {
 		b.worker = w
 		return kernel.CtlResult{Text: "RESTARTED | fresh bash session"}
 	case "status":
-		return kernel.CtlResult{Text: "bash idle"}
+		waiting := b.worker.IsWaitingForInput()
+		if waiting {
+			return kernel.CtlResult{Text: "waiting_for_input"}
+		}
+		return kernel.CtlResult{Text: "idle"}
 	default:
 		return kernel.CtlResult{Text: fmt.Sprintf("ERROR: unknown op '%s'. Use reset, cancel, restart, or status.", op)}
 	}

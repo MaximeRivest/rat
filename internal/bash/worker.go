@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -50,6 +51,8 @@ type BashWorker struct {
 	ptyFile        *os.File
 	ctlRead        *os.File
 	ctlBuf         bytes.Buffer
+
+	executing atomic.Bool // true while a user command is in flight
 
 	// interruptPty is a separate reference to the PTY master, protected by
 	// its own mutex so Interrupt() can write Ctrl+C without acquiring w.mu
@@ -113,7 +116,9 @@ func (w *BashWorker) ExecuteStreaming(code string, storeHistory bool, execID str
 		return failureResult("WriteError", err.Error(), "", execCount, start)
 	}
 
+	w.executing.Store(true)
 	stdout, exitCode, err := w.readUntilDoneLocked(code, execID, onOutput, onStdin, false)
+	w.executing.Store(false)
 	if err != nil {
 		if errors.Is(err, ErrInputCancelled) {
 			return ExecuteResult{
@@ -433,6 +438,22 @@ func (w *BashWorker) GetHistory(n int, pattern string, before *int) HistoryResul
 	}
 	entries := append([]HistoryEntry(nil), filtered[start:]...)
 	return HistoryResult{Entries: entries, HasMore: start > 0}
+}
+
+// IsWaitingForInput checks if a running command needs stdin input.
+// Returns true only when a command is executing AND (bash or a child
+// is blocked reading stdin). When idle (no command running), bash is
+// always reading stdin for the next command — that doesn't count.
+// Lock-free — safe to call during execution.
+func (w *BashWorker) IsWaitingForInput() bool {
+	if !w.executing.Load() {
+		return false // idle — bash reading next command, not user input
+	}
+	if w.cmd == nil || w.cmd.Process == nil {
+		return false
+	}
+	waiting, _ := processWaitingForInput(w.cmd.Process.Pid, "")
+	return waiting
 }
 
 // SendInput writes text to the PTY without acquiring the execution lock.

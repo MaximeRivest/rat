@@ -182,7 +182,21 @@ func Run(cfg Config) error {
 			}
 		}()
 
-		result, execErr := session.Run(execCtx, line)
+		// Drain any pending bytes in stdin (e.g. leftover newline from
+		// readline's Enter key) so they don't get consumed by commands
+		// that read stdin (read, cat, sudo).
+		drainStdin()
+
+		// Run in background so we can forward stdin while it executes.
+		resultCh := make(chan runResultMsg, 1)
+		go func() {
+			r, e := session.Run(execCtx, line)
+			resultCh <- runResultMsg{r, e}
+		}()
+
+		// Main execution loop: poll for completion, detect stdin needs,
+		// forward keystrokes when the process is waiting for input.
+		result, execErr := waitAndForwardInput(execCtx, resultCh, ctlSession)
 		close(done)
 		execCancel()
 
@@ -287,59 +301,100 @@ func shellPrompt(cfg Config) string {
 	}
 }
 
-// forwardStdin reads from os.Stdin in raw mode and sends each chunk
-// to the kernel via MCP run(input=...). This runs in a goroutine while
-// a command is executing, enabling interactive programs.
-func forwardStdin(ctx context.Context, session *mcpclient.Session, done <-chan struct{}) {
-	// Put terminal in raw mode so we get keystrokes immediately
-	fd := int(os.Stdin.Fd())
-	oldState, err := makeRaw(fd)
-	if err != nil {
-		return // not a terminal, skip
-	}
-	defer restoreTerminal(fd, oldState)
+type runResultMsg struct {
+	result *mcp.CallToolResult
+	err    error
+}
 
-	buf := make([]byte, 256)
+// waitAndForwardInput waits for the run() result while forwarding stdin
+// to the kernel when the process is waiting for input. This is the core
+// of making interactive commands (read, cat, sudo) work in the REPL.
+func waitAndForwardInput(
+	ctx context.Context,
+	resultCh <-chan runResultMsg,
+	ctlSession *mcpclient.Session,
+) (*mcp.CallToolResult, error) {
+	fd := int(os.Stdin.Fd())
+	inRawMode := false
+	var oldTermios *unix.Termios
+
+	restore := func() {
+		if inRawMode && oldTermios != nil {
+			_ = unix.IoctlSetTermios(fd, unix.TCSETS, oldTermios)
+			inRawMode = false
+		}
+	}
+	defer restore()
+
+	pollTicker := time.NewTicker(200 * time.Millisecond)
+	defer pollTicker.Stop()
+
 	for {
+		// Check if run() completed
 		select {
-		case <-done:
-			return
-		case <-ctx.Done():
-			return
+		case r := <-resultCh:
+			restore()
+			return r.result, r.err
 		default:
 		}
 
-		// Non-blocking-ish read with a short timeout via select(2)
-		n, err := readWithTimeout(fd, buf, 100*time.Millisecond)
-		if err != nil || n == 0 {
-			continue
+		if inRawMode {
+			// Read stdin and forward to kernel
+			buf := make([]byte, 256)
+			n, err := readWithTimeout(fd, buf, 50*time.Millisecond)
+			if err == nil && n > 0 {
+				text := string(buf[:n])
+				sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				_, _ = ctlSession.SendInput(sendCtx, text)
+				cancel()
+			}
+
+			// Check if run completed after forwarding
+			select {
+			case r := <-resultCh:
+				restore()
+				return r.result, r.err
+			default:
+			}
+		} else {
+			// Not in raw mode — wait a bit, check if we should switch
+			select {
+			case r := <-resultCh:
+				return r.result, r.err
+			case <-pollTicker.C:
+				// Check if process needs input
+				checkCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+				needsInput := ctlSession.IsWaitingForInput(checkCtx)
+				cancel()
+				if needsInput {
+					termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+					if err == nil {
+						oldTermios = termios
+						raw := *termios
+						raw.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG
+						raw.Cc[unix.VMIN] = 0
+						raw.Cc[unix.VTIME] = 0
+						if err := unix.IoctlSetTermios(fd, unix.TCSETS, &raw); err == nil {
+							inRawMode = true
+						}
+					}
+				}
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
-
-		text := string(buf[:n])
-		sendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		_, _ = session.SendInput(sendCtx, text)
-		cancel()
 	}
 }
 
-func makeRaw(fd int) (*unix.Termios, error) {
-	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
-	if err != nil {
-		return nil, err
+func drainStdin() {
+	fd := int(os.Stdin.Fd())
+	buf := make([]byte, 256)
+	for {
+		n, err := readWithTimeout(fd, buf, 5*time.Millisecond)
+		if err != nil || n == 0 {
+			return
+		}
 	}
-	old := *termios
-	// Raw mode: no echo, no canonical processing, no signals
-	termios.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG
-	termios.Cc[unix.VMIN] = 0
-	termios.Cc[unix.VTIME] = 1 // 100ms timeout
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, termios); err != nil {
-		return nil, err
-	}
-	return &old, nil
-}
-
-func restoreTerminal(fd int, state *unix.Termios) {
-	_ = unix.IoctlSetTermios(fd, unix.TCSETS, state)
 }
 
 func readWithTimeout(fd int, buf []byte, timeout time.Duration) (int, error) {

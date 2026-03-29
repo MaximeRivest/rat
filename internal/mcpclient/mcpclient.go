@@ -76,6 +76,22 @@ func (s *Session) SendInput(ctx context.Context, text string) (*mcp.CallToolResu
 	return s.callTool(ctx, "run", map[string]any{"input": text})
 }
 
+// IsWaitingForInput checks if the kernel process is waiting for stdin.
+func (s *Session) IsWaitingForInput(ctx context.Context) bool {
+	result, err := s.Ctl(ctx, "status")
+	if err != nil {
+		return false
+	}
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			if tc.Text == "waiting_for_input" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Ctl sends a control operation (reset, cancel, restart, status).
 func (s *Session) Ctl(ctx context.Context, op string) (*mcp.CallToolResult, error) {
 	return s.callTool(ctx, "ctl", map[string]any{"op": op})
