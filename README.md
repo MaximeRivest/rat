@@ -169,21 +169,21 @@ Full IPython. Syntax highlighting, tab completion, `?` help, `%magic` commands, 
 ### Terminal — one-liners
 
 ```bash
-rat py run 'x = 42; print(x)'
+rat run python 'x = 42; print(x)'
 # 42
 # ✓ 3ms | 1 var
 
-rat py run 'print(f"x is {x}")'
+rat run python 'print(f"x is {x}")'
 # x is 42
 # ✓ 2ms | 1 var
 
-rat py look
+rat run python 'look()'
 # python idle | 2 vars | exec #2
 #
 # x   int        42
 # df  DataFrame  (1000, 5)
 
-rat py look --at df
+rat run python 'look(at="df")'
 # df: DataFrame (1000 rows × 5 columns)
 #   = ...
 #
@@ -191,7 +191,7 @@ rat py look --at df
 #   ▸ dtypes   dict   {'region': 'object', 'revenue': 'int64', ...}
 #     shape    tuple  (1000, 5)
 
-rat py ctl --op reset
+rat run python 'ctl --op reset'
 # RESET | namespace cleared | 0 vars
 ```
 
@@ -220,7 +220,7 @@ West    38000
 ### Other languages
 
 ```bash
-rat r
+rat r 
 # R 4.4.1 | rat r kernel @ http://127.0.0.1:8718/mcp
 # >
 
@@ -232,9 +232,9 @@ rat sh
 # bash 5.2.15 | rat sh kernel @ http://127.0.0.1:8720/mcp
 # $
 
-rat r run 'summary(mtcars)'
-rat ju run 'using Statistics; mean([1,2,3])'
-rat sh run 'ls -la'
+rat run r 'summary(mtcars)'
+rat run ju 'using Statistics; mean([1,2,3])'
+rat run sh 'ls -la'
 ```
 
 Same pattern. Same three tools. Same shared namespace per kernel.
@@ -249,13 +249,13 @@ Default runtime uses auto-detected venv and cwd. Named runtimes let you have mul
 rat add py-ml --venv ~/ml/.venv --cwd ~/ml
 rat add py-web --venv ~/web/.venv --cwd ~/web
 
-rat py-ml run 'import torch; print(torch.cuda.is_available())'
+rat run py-ml 'import torch; print(torch.cuda.is_available())'
 # True
 
-rat py-web run 'import flask; print(flask.__version__)'
+rat run py-web 'import flask; print(flask.__version__)'
 # 3.0.0
 
-rat py run 'import pandas'
+rat run py 'import pandas'
 # default runtime, default venv — separate from py-ml and py-web
 ```
 
@@ -284,9 +284,9 @@ Out[1]: True
 Kernels auto-start on first use and stay warm. You never need to think about start/stop for normal use.
 
 ```bash
-rat py run 'x = 42'       # not running? starts automatically, then runs
+rat run py'x = 42'       # not running? starts automatically, then runs
 rat py                      # not running? starts automatically, then REPL
-rat py look                 # not running? starts automatically, then inspects
+rat look py           # not running? starts automatically, then inspects
 ```
 
 When you need control:
@@ -382,15 +382,6 @@ await py.callTool("look", { code: "df.des", cursor: 6 });
 await py.callTool("ctl", { op: "reset" });
 ```
 
-### Or via mcp2py (Python app)
-
-```python
-from mcp2py import connect
-py = connect("http://localhost:8717/mcp")
-py.run(code="x = 42")
-py.look(at="x")
-```
-
 ### Or via mcp2r (R app)
 
 ```r
@@ -398,6 +389,15 @@ library(mcp2r)
 py <- mcp_connect("http://localhost:8717/mcp")
 py$run(code = "x = 42")
 py$look(at = "x")
+```
+
+### Or via mcp2py (Python app)
+
+```python
+from mcp2py import connect
+py = connect("http://localhost:8717/mcp")
+py.run(code="x = 42")
+py.look(at="x")
 ```
 
 ### Kernel picker for multi-language notebooks
@@ -502,9 +502,9 @@ rat rm <name>                   # unregister
 
 # Daily use
 rat <name>                      # REPL — auto-starts kernel
-rat <name> run '<code>'         # run code — auto-starts kernel
-rat <name> look [--at <sym>]    # inspect — auto-starts kernel
-rat <name> ctl --op <op>        # control: reset, cancel, restart
+rat run <name> '<code>'         # run code — auto-starts kernel
+rat look <name> [--at <sym>]    # inspect — auto-starts kernel
+rat ctl <name> --op <op>        # control: reset, cancel, restart
 
 # Manage
 rat ls                          # list all runtimes and their state
@@ -543,7 +543,7 @@ Any language runtime
 MCP Server (3 tools: run, look, ctl)
     ↓ connect from anywhere
 ├── rat py              → IPython REPL in your terminal
-├── rat py run          → one-liners from shell scripts
+├── rat run py          → one-liners from shell scripts
 ├── Claude Desktop      → LLM runs code in your environment
 ├── Cursor              → coding agent with live runtime
 ├── notebook app        → cells, variable explorer, completions
