@@ -346,6 +346,30 @@ Out[1]: 42    # ← same namespace
 
 Claude Desktop, Cursor, notebook apps — all attached automatically. There's nothing to do.
 
+### Who's connected?
+
+The MCP server tracks connected clients in memory. `rat ls` shows them:
+
+```bash
+rat ls
+# NAME  LANG  PORT   STATE    CLIENTS                        CWD
+# py    py    8717   running  terminal, claude-desktop (2)   ~/project
+# sh    sh    8720   idle     —                              ~/project
+```
+
+Each client is identified by type (terminal, claude-desktop, cursor, mcp2cli, mcp2py, notebook), source host, connection time, and last activity. This helps decide whether to stop a kernel — if Claude is mid-execution, don't.
+
+```bash
+rat ls py --clients
+# py @ http://127.0.0.1:8717/mcp | running | 2 clients
+#
+#   TYPE              HOST    CONNECTED  LAST CALL  CALLS
+#   terminal          local   2m ago     5s ago     12
+#   claude-desktop    local   10m ago    5s ago     3
+```
+
+Auto-idle: kernels with no client activity for a configurable duration can auto-stop to free resources.
+
 ---
 
 ## For app builders
