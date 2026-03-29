@@ -76,8 +76,15 @@ function displayMcpResult(result: Record<string, unknown>) {
 
 function localEval(code: string): unknown {
   try {
+    // Rewrite const/let to var so variables persist across eval calls.
+    // In a real kernel, the subprocess maintains one continuous scope.
+    // This is a proof-of-concept workaround for eval()'s block scoping.
+    const patched = code.replace(
+      /^([ \t]*)(const|let)([ \t]+)/gm,
+      "$1var$3",
+    );
     // Indirect eval — runs in global scope
-    const result = (0, eval)(code);
+    const result = (0, eval)(patched);
     return result;
   } catch (e) {
     if (e instanceof Error) {
