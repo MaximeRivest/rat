@@ -16,6 +16,7 @@ import (
 	"github.com/maximerivest/rat/internal/bash"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
+	"github.com/maximerivest/rat/internal/python"
 )
 
 var (
@@ -24,6 +25,7 @@ var (
 	serveCwd      string
 	serveLangFlag string
 	serveNameFlag string
+	serveVenvFlag string
 )
 
 func init() {
@@ -32,6 +34,7 @@ func init() {
 	serveCmd.Flags().StringVar(&serveCwd, "cwd", "", "Working directory (default: current)")
 	serveCmd.Flags().StringVar(&serveLangFlag, "lang", "", "Canonical language (for named runtimes)")
 	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
+	serveCmd.Flags().StringVar(&serveVenvFlag, "venv", "", "Python venv path (py only)")
 
 	rootCmd.AddCommand(serveCmd)
 }
@@ -84,9 +87,9 @@ func runServe(input string) error {
 	switch lang {
 	case "sh":
 		k, err = bash.New(name, cwd)
+	case "py":
+		k, err = python.New(name, cwd, serveVenvFlag)
 	// Future:
-	// case "py":
-	//     k, err = python.New(cwd, venv)
 	// case "r":
 	//     k, err = rlang.New(cwd)
 	// case "ju":

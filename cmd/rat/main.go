@@ -6,6 +6,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/maximerivest/rat/cmd/rat/commands"
@@ -13,6 +14,7 @@ import (
 
 func main() {
 	if err := commands.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "rat: %s\n", err)
 		os.Exit(1)
 	}
 }

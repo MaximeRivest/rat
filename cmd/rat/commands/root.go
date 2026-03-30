@@ -24,11 +24,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/maximerivest/rat/internal/daemon"
+	"github.com/maximerivest/rat/internal/mcpclient"
 	"github.com/maximerivest/rat/internal/repl"
+	"github.com/maximerivest/rat/internal/state"
 )
 
 // Version is set at build time via ldflags.
@@ -82,8 +86,11 @@ func Execute() error {
 	// unknown subcommands.
 	if len(os.Args) > 1 {
 		first := os.Args[1]
-		if !isKnownCommand(first) && first[0] != '-' && isLangAlias(first) {
-			return handleREPL(first, os.Args[2:])
+		if !isKnownCommand(first) && first[0] != '-' {
+			// Check if it's a language alias, saved runtime, or running kernel.
+			if isLangAlias(first) || isSavedRuntime(first) || isRunningKernel(first) {
+				return handleREPL(first, os.Args[2:])
+			}
 		}
 	}
 
@@ -109,25 +116,56 @@ func isKnownCommand(name string) bool {
 // handleREPL launches the REPL for a given runtime name.
 // Ensures the kernel is running (auto-starts if needed), then
 // drops into an interactive session.
+
+// isSavedRuntime checks if name is a registered named runtime.
+func isSavedRuntime(name string) bool {
+	rt, _ := store().GetRuntime(name)
+	return rt != nil
+}
+
+// isRunningKernel checks if name is a currently running kernel.
+func isRunningKernel(name string) bool {
+	k, _ := store().Get(name)
+	return k != nil
+}
+
 func handleREPL(name string, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("unexpected arguments after %q: %s\nDid you mean 'rat %s' or 'rat %s %s'?", name, strings.Join(args, " "), name, args[0], name)
 	}
-	lang, err := resolveLang(name)
-	if err != nil {
-		return err
+
+	s := store()
+
+	// Named runtime (from `rat add`): connect directly, no project magic.
+	if rt, _ := s.GetRuntime(name); rt != nil {
+		return handleNamedREPL(s, name, rt.Lang)
 	}
 
+	// Language alias (py, sh, etc.): project-aware resolution.
+	if isLangAlias(name) {
+		lang, _ := resolveLang(name)
+		return handleProjectREPL(s, lang)
+	}
+
+	// Running kernel by exact name (e.g., "py@autoprogramming").
+	if k, _ := s.Get(name); k != nil {
+		return launchREPL(s, k, k.Lang)
+	}
+
+	return fmt.Errorf("unknown runtime %q — use a language name (py, sh, r, ju, js) or 'rat add %s' to register it", name, name)
+}
+
+// handleNamedREPL connects to a named runtime (from `rat add`).
+func handleNamedREPL(s *state.Store, name, lang string) error {
 	ctx := context.Background()
 	session, err := connectToKernel(ctx, name)
 	if err != nil {
 		return err
 	}
-	_, _ = session.Ctl(ctx, "status") // ensure shared shell session exists
+	_, _ = session.Ctl(ctx, "status")
 	session.Close()
 
-	// Get the kernel info from state
-	k, err := store().Get(name)
+	k, err := s.Get(name)
 	if err != nil || k == nil {
 		return fmt.Errorf("kernel %s not found in state after connect", name)
 	}
@@ -137,5 +175,85 @@ func handleREPL(name string, args []string) error {
 		Lang: lang,
 		Port: k.Port,
 		Cwd:  k.Cwd,
+		Venv: k.Venv,
+	})
+}
+
+// handleProjectREPL implements project-aware kernel resolution.
+// When `rat py` is run from a project directory, it finds or creates
+// a kernel specific to that project (detecting venv automatically).
+func handleProjectREPL(s *state.Store, lang string) error {
+	cwd, _ := os.Getwd()
+	cwd, _ = filepath.Abs(cwd)
+	root, isProject := findProjectRoot(cwd)
+
+	// Find a running kernel for this project.
+	kernels, _ := s.List()
+	for _, k := range kernels {
+		if k.Lang != lang {
+			continue
+		}
+		kRoot, _ := findProjectRoot(k.Cwd)
+		if kRoot == root {
+			// Found a kernel for this project — connect.
+			return launchREPL(s, &k, lang)
+		}
+	}
+
+	// No kernel matches. Determine the name for the new one.
+	kernelName := lang
+	existing, _ := s.Get(lang)
+	if existing != nil {
+		// Bare name taken by another project — use project-qualified name.
+		if isProject {
+			kernelName = lang + "@" + projectName(root)
+		} else {
+			kernelName = lang + "@" + projectName(cwd)
+		}
+		fmt.Fprintf(os.Stderr, "%s running at %s — starting %s for this project.\n",
+			lang, shortPath(existing.Cwd), kernelName)
+	}
+
+	// Auto-detect venv for Python.
+	venv := ""
+	if lang == "py" {
+		venv = findVenv(cwd)
+	}
+
+	k, err := daemon.Start(s, daemon.StartOpts{
+		Name: kernelName,
+		Lang: lang,
+		Cwd:  root,
+		Venv: venv,
+	})
+	if err != nil {
+		return err
+	}
+	venvMsg := ""
+	if k.Venv != "" {
+		venvMsg = fmt.Sprintf(" venv=%s", shortPath(k.Venv))
+	}
+	fmt.Fprintf(os.Stderr, "%s started on http://127.0.0.1:%d/mcp (PID %d)%s\n",
+		k.Name, k.Port, k.PID, venvMsg)
+
+	return launchREPL(s, k, lang)
+}
+
+// launchREPL opens the interactive REPL for a running kernel.
+func launchREPL(s *state.Store, k *state.Kernel, lang string) error {
+	ctx := context.Background()
+	session, err := mcpclient.Connect(ctx, k.Port)
+	if err != nil {
+		return err
+	}
+	_, _ = session.Ctl(ctx, "status")
+	session.Close()
+
+	return repl.Run(repl.Config{
+		Name: k.Name,
+		Lang: lang,
+		Port: k.Port,
+		Cwd:  k.Cwd,
+		Venv: k.Venv,
 	})
 }

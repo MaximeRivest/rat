@@ -1,6 +1,9 @@
 package commands
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // langAliases maps all accepted language names to their canonical short form.
 var langAliases = map[string]string{
@@ -29,4 +32,38 @@ func resolveLang(name string) (string, error) {
 func isLangAlias(name string) bool {
 	_, ok := langAliases[name]
 	return ok
+}
+
+// inferLangFromName tries to guess the language from a runtime name.
+// It first splits at '-' or '_' separators, then tries known prefixes.
+// Returns (canonical lang, true) on success, ("", false) on failure.
+func inferLangFromName(name string) (string, bool) {
+	// 1. Exact match
+	if canon, ok := langAliases[name]; ok {
+		return canon, true
+	}
+
+	// 2. Split at '-' or '_' separator: "py-ml" → "py"
+	for _, sep := range []string{"-", "_"} {
+		if i := strings.Index(name, sep); i > 0 {
+			prefix := name[:i]
+			if canon, ok := langAliases[prefix]; ok {
+				return canon, true
+			}
+		}
+	}
+
+	// 3. Try known aliases as prefixes (longer first to avoid
+	//    "py" matching before "python").
+	prefixes := []string{
+		"python", "javascript", "julia", "bash", "node",
+		"py", "sh", "js", "ju",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) && len(name) > len(p) {
+			return langAliases[p], true
+		}
+	}
+
+	return "", false
 }

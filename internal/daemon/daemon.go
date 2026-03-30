@@ -60,10 +60,13 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	self, _ = filepath.EvalSymlinks(self)
 
-	// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd>
+	// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd> [--venv <venv>]
 	args := []string{"serve", opts.Name, "--lang", opts.Lang, "--kernel-name", opts.Name, "--http", "--port", strconv.Itoa(port)}
 	if opts.Cwd != "" {
 		args = append(args, "--cwd", opts.Cwd)
+	}
+	if opts.Venv != "" {
+		args = append(args, "--venv", opts.Venv)
 	}
 
 	cmd := exec.Command(self, args...)

@@ -1,0 +1,543 @@
+package python
+
+import (
+	"bufio"
+	"bytes"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/maximerivest/rat/internal/kernel"
+)
+
+// activityEntry is a JSON line written to the activity log so that
+// frontends can display what other MCP clients executed.
+type activityEntry struct {
+	N      int    `json:"n"`
+	Code   string `json:"code"`
+	Output string `json:"output"`
+	OK     bool   `json:"ok"`
+	Time   int64  `json:"t"`
+}
+
+//go:embed kernel.py
+var kernelScript string
+
+type request struct {
+	Op         string `json:"op"`
+	Code       string `json:"code,omitempty"`
+	At         string `json:"at,omitempty"`
+	Cursor     int    `json:"cursor,omitempty"`
+	Text       string `json:"text,omitempty"`
+	AllowStdin bool   `json:"allow_stdin,omitempty"`
+}
+
+type response struct {
+	Op      string `json:"op,omitempty"`
+	Success bool   `json:"success,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Text    string `json:"text,omitempty"`
+	OK      bool   `json:"ok,omitempty"`
+	Vars    int    `json:"vars,omitempty"`
+}
+
+// partialBuf accumulates output_chunk messages during execution
+// so Ctl("output") can return partial output to streaming clients.
+type partialBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *partialBuf) Append(s string) {
+	b.mu.Lock()
+	b.buf.WriteString(s)
+	b.mu.Unlock()
+}
+
+func (b *partialBuf) Get() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *partialBuf) Reset() {
+	b.mu.Lock()
+	b.buf.Reset()
+	b.mu.Unlock()
+}
+
+// Python implements kernel.Kernel for a persistent Python subprocess.
+type Python struct {
+	name       string
+	cwd        string
+	cmdPath    string
+	cmdArgs    []string
+	scriptPath string
+
+	mu             sync.Mutex
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout         *bufio.Reader
+	stderrBuf      bytes.Buffer
+	executionCount int
+	executing        atomic.Bool
+	waitingForInput  atomic.Bool
+	writeMu          sync.Mutex
+	partial          partialBuf // live output during execution
+
+	interruptMu   sync.Mutex
+	interruptProc *os.Process
+}
+
+// New creates a new Python kernel. If venv is non-empty, it is used
+// as the virtual environment (its python binary is preferred).
+func New(name, cwd, venv string) (*Python, error) {
+	cmdPath, cmdArgs, err := detectPythonCommand(venv)
+	if err != nil {
+		return nil, err
+	}
+	if cwd == "" {
+		cwd, err = os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+	}
+	cwd, _ = filepath.Abs(cwd)
+
+	scriptPath, err := writeKernelScript(name)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &Python{
+		name:       name,
+		cwd:        cwd,
+		cmdPath:    cmdPath,
+		cmdArgs:    cmdArgs,
+		scriptPath: scriptPath,
+	}
+	if err := p.ensureStartedLocked(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// Run executes Python code in the persistent kernel.
+func (p *Python) Run(code string) kernel.RunResult {
+	start := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.ensureStartedLocked(); err != nil {
+		return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: p.executionCount, Duration: int(time.Since(start).Milliseconds())}
+	}
+
+	p.executionCount++
+	execCount := p.executionCount
+	p.executing.Store(true)
+	defer p.executing.Store(false)
+
+	p.partial.Reset()
+
+	if err := p.sendLocked(request{Op: "run", Code: code, AllowStdin: true}); err != nil {
+		return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: execCount, Duration: int(time.Since(start).Milliseconds())}
+	}
+
+	// Read responses in a loop: output_chunk messages stream partial
+	// output that Ctl("output") can return to polling clients.
+	var resp response
+	for {
+		var err error
+		resp, err = p.readLocked()
+		if err != nil {
+			return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: execCount, Duration: int(time.Since(start).Milliseconds())}
+		}
+		switch resp.Op {
+		case "output_chunk":
+			p.partial.Append(resp.Text)
+			continue
+		case "input_request":
+			p.waitingForInput.Store(true)
+			continue
+		case "input_delivered":
+			p.waitingForInput.Store(false)
+			continue
+		}
+		// Any other message is the final result.
+		p.waitingForInput.Store(false)
+		break
+	}
+
+	output := strings.TrimSpace(resp.Output)
+	if !resp.Success {
+		errText := strings.TrimSpace(resp.Error)
+		if output != "" {
+			errText = strings.TrimSpace(output + "\n" + errText)
+		}
+		if errText == "" {
+			errText = "execution failed"
+		}
+		errResult := kernel.RunResult{
+			Success:   false,
+			Output:    output,
+			Error:     errText,
+			ExecCount: execCount,
+			Duration:  int(time.Since(start).Milliseconds()),
+			Vars:      resp.Vars,
+		}
+		p.logActivity(code, errResult)
+		return errResult
+	}
+
+	result := kernel.RunResult{
+		Success:   true,
+		Output:    output,
+		ExecCount: execCount,
+		Duration:  int(time.Since(start).Milliseconds()),
+		Vars:      resp.Vars,
+	}
+	p.logActivity(code, result)
+	return result
+}
+
+// SendInput responds to a waiting Python input() call.
+func (p *Python) SendInput(text string) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if p.stdin == nil {
+		return fmt.Errorf("python kernel not started")
+	}
+	data, err := json.Marshal(request{Op: "input", Text: text})
+	if err != nil {
+		return err
+	}
+	if _, err := p.stdin.Write(append(data, '\n')); err != nil {
+		p.killLocked()
+		return fmt.Errorf("write input to python kernel: %w", err)
+	}
+	return nil
+}
+
+// IsWaitingForInput returns true when the running code is blocked on input().
+func (p *Python) IsWaitingForInput() bool {
+	return p.waitingForInput.Load()
+}
+
+// Look inspects the Python runtime.
+func (p *Python) Look(req kernel.LookRequest) kernel.LookResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if err := p.ensureStartedLocked(); err != nil {
+		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
+	}
+
+	var err error
+	switch {
+	case req.Code != "":
+		err = p.sendLocked(request{Op: "complete", Code: req.Code, Cursor: req.Cursor})
+	case req.At != "":
+		err = p.sendLocked(request{Op: "look_at", At: req.At})
+	default:
+		err = p.sendLocked(request{Op: "look_overview"})
+	}
+	if err != nil {
+		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
+	}
+
+	resp, err := p.readLocked()
+	if err != nil {
+		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
+	}
+	if resp.Text != "" {
+		return kernel.LookResult{Text: resp.Text}
+	}
+	if resp.Error != "" {
+		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %s", strings.TrimSpace(resp.Error))}
+	}
+	return kernel.LookResult{Text: ""}
+}
+
+// Ctl controls the Python runtime.
+func (p *Python) Ctl(op string) kernel.CtlResult {
+	switch op {
+	case "reset", "restart":
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.killLocked()
+		p.executionCount = 0
+		// Clear activity log so frontends don't show stale entries.
+		if path := p.ActivityLogPath(); path != "" {
+			_ = os.Truncate(path, 0)
+		}
+		if err := p.ensureStartedLocked(); err != nil {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+		}
+		if op == "reset" {
+			return kernel.CtlResult{Text: "RESET | namespace cleared | 0 vars"}
+		}
+		return kernel.CtlResult{Text: "RESTARTED | fresh python session"}
+	case "cancel":
+		if err := p.interrupt(); err != nil {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+		}
+		return kernel.CtlResult{Text: "CANCELLED"}
+	case "status":
+		if !p.executing.Load() {
+			return kernel.CtlResult{Text: "idle"}
+		}
+		if p.waitingForInput.Load() {
+			return kernel.CtlResult{Text: "waiting_for_input"}
+		}
+		return kernel.CtlResult{Text: "busy"}
+	case "output":
+		// Return partial stdout accumulated during the current execution.
+		// Lock-free relative to p.mu so it doesn't block Run().
+		return kernel.CtlResult{Text: p.partial.Get()}
+	default:
+		return kernel.CtlResult{Text: fmt.Sprintf("ERROR: unknown op '%s'. Use reset, cancel, restart, or status.", op)}
+	}
+}
+
+// Shutdown tears down the Python kernel process.
+func (p *Python) Shutdown() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.killLocked()
+	if p.scriptPath != "" {
+		_ = os.Remove(p.scriptPath)
+	}
+	return nil
+}
+
+func (p *Python) ensureStartedLocked() error {
+	if p.cmd != nil && p.cmd.Process != nil && p.cmd.ProcessState == nil {
+		return nil
+	}
+
+	args := append(append([]string{}, p.cmdArgs...), p.scriptPath)
+	cmd := exec.Command(p.cmdPath, args...)
+	cmd.Dir = p.cwd
+	cmd.Env = os.Environ()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("python stdin: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return fmt.Errorf("python stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return fmt.Errorf("python stderr: %w", err)
+	}
+
+	p.stderrBuf.Reset()
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		return fmt.Errorf("start python kernel: %w", err)
+	}
+	go func() {
+		_, _ = io.Copy(&p.stderrBuf, stderr)
+	}()
+
+	p.cmd = cmd
+	p.stdin = stdin
+	p.stdout = bufio.NewReader(stdout)
+	p.interruptMu.Lock()
+	p.interruptProc = cmd.Process
+	p.interruptMu.Unlock()
+
+	if err := p.sendLocked(request{Op: "ping"}); err != nil {
+		p.killLocked()
+		return err
+	}
+	resp, err := p.readLocked()
+	if err != nil {
+		p.killLocked()
+		return err
+	}
+	if !resp.OK {
+		p.killLocked()
+		return fmt.Errorf("python kernel failed to initialize: %s", strings.TrimSpace(resp.Error))
+	}
+
+	return nil
+}
+
+func (p *Python) sendLocked(req request) error {
+	if p.stdin == nil {
+		return fmt.Errorf("python kernel not started")
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if _, err := p.stdin.Write(append(data, '\n')); err != nil {
+		p.killLocked()
+		return fmt.Errorf("write to python kernel: %w", err)
+	}
+	return nil
+}
+
+func (p *Python) readLocked() (response, error) {
+	if p.stdout == nil {
+		return response{}, fmt.Errorf("python kernel not started")
+	}
+	line, err := p.stdout.ReadBytes('\n')
+	if err != nil {
+		stderr := strings.TrimSpace(p.stderrBuf.String())
+		p.killLocked()
+		if stderr != "" {
+			return response{}, fmt.Errorf("read from python kernel: %w: %s", err, stderr)
+		}
+		return response{}, fmt.Errorf("read from python kernel: %w", err)
+	}
+	var resp response
+	if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
+		return response{}, fmt.Errorf("decode python kernel response: %w", err)
+	}
+	return resp, nil
+}
+
+func (p *Python) interrupt() error {
+	p.interruptMu.Lock()
+	proc := p.interruptProc
+	p.interruptMu.Unlock()
+	if proc == nil {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return proc.Kill()
+	}
+	return proc.Signal(syscall.SIGINT)
+}
+
+func (p *Python) killLocked() {
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+		p.stdin = nil
+	}
+	if p.cmd != nil {
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		_ = p.cmd.Wait()
+		p.cmd = nil
+	}
+	p.interruptMu.Lock()
+	p.interruptProc = nil
+	p.interruptMu.Unlock()
+	p.stdout = nil
+}
+
+// logActivity appends an execution record to the activity log so
+// frontends can see what other MCP clients executed.
+func (p *Python) logActivity(code string, r kernel.RunResult) {
+	if p.scriptPath == "" {
+		return
+	}
+	path := filepath.Join(filepath.Dir(p.scriptPath), "activity.jsonl")
+	e := activityEntry{
+		N:      r.ExecCount,
+		Code:   truncateLog(code, 500),
+		Output: truncateLog(r.Output, 500),
+		OK:     r.Success,
+		Time:   time.Now().Unix(),
+	}
+	data, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(append(data, '\n'))
+}
+
+// ActivityLogPath returns the path to the activity log for this kernel.
+func (p *Python) ActivityLogPath() string {
+	if p.scriptPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(p.scriptPath), "activity.jsonl")
+}
+
+func truncateLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func detectPythonCommand(venv string) (string, []string, error) {
+	if v := os.Getenv("RAT_PYTHON"); v != "" {
+		return v, nil, nil
+	}
+	// Explicit venv parameter (from --venv or auto-detected).
+	if venv != "" {
+		path := filepath.Join(venv, "bin", "python")
+		if runtime.GOOS == "windows" {
+			path = filepath.Join(venv, "Scripts", "python.exe")
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil, nil
+		}
+		// venv specified but python not found — fall through
+	}
+	// VIRTUAL_ENV environment variable.
+	if envVenv := os.Getenv("VIRTUAL_ENV"); envVenv != "" {
+		path := filepath.Join(envVenv, "bin", "python")
+		if runtime.GOOS == "windows" {
+			path = filepath.Join(envVenv, "Scripts", "python.exe")
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil, nil
+		}
+	}
+	for _, candidate := range []string{"python3", "python"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil, nil
+		}
+	}
+	if path, err := exec.LookPath("py"); err == nil {
+		return path, []string{"-3"}, nil
+	}
+	return "", nil, fmt.Errorf("python not found (tried RAT_PYTHON, active venv, python3, python, py -3)")
+}
+
+func writeKernelScript(name string) (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir, err = os.UserConfigDir()
+		if err != nil {
+			dir = filepath.Join(os.Getenv("HOME"), ".cache")
+		}
+	}
+	path := filepath.Join(dir, "rat", "kernels", name, "python-kernel.py")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(kernelScript), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}

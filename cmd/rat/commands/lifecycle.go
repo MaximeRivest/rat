@@ -45,12 +45,91 @@ var setupCmd = &cobra.Command{
 	},
 }
 
+var (
+	addVenv string
+	addCwd  string
+	addLang string
+)
+
+func init() {
+	addCmd.Flags().StringVar(&addVenv, "venv", "", "Python venv path")
+	addCmd.Flags().StringVar(&addCwd, "cwd", "", "Working directory (default: current)")
+	addCmd.Flags().StringVar(&addLang, "lang", "", "Language (default: inferred from name prefix)")
+}
+
 var addCmd = &cobra.Command{
-	Use:   "add <name> [--venv PATH] [--cwd PATH]",
+	Use:   "add <name> [<dir>] [--lang py] [--venv PATH] [--cwd PATH]",
 	Short: "Register a named runtime",
-	Args:  cobra.ExactArgs(1),
+	Long: `Register a named runtime with a specific venv and working directory.
+
+The language is inferred from the name (pyauto → py, py-ml → py, r-stats → r)
+or can be set explicitly with --lang.
+
+The optional second argument sets the working directory (same as --cwd).
+If a Python venv (.venv/) is found in the directory, it is used automatically.
+
+Examples:
+  rat add pyauto .                    # register for current dir, auto-detect venv
+  rat add py-ml --venv ~/ml/.venv --cwd ~/ml
+  rat add py-web ~/web               # auto-detect venv in ~/web
+  rat add r-bio --lang r --cwd ~/bio`,
+	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("add not yet implemented for %q", args[0])
+		name := args[0]
+
+		// Second positional arg is cwd (shorthand for --cwd).
+		if len(args) > 1 && addCwd == "" {
+			addCwd = args[1]
+		}
+
+		// Infer language from name prefix or --lang flag.
+		lang := addLang
+		if lang == "" {
+			if inferred, ok := inferLangFromName(name); ok {
+				lang = inferred
+			} else {
+				return fmt.Errorf("cannot infer language from %q — use --lang", name)
+			}
+		} else {
+			var err error
+			lang, err = resolveLang(lang)
+			if err != nil {
+				return err
+			}
+		}
+
+		cwd := addCwd
+		if cwd == "" {
+			cwd, _ = os.Getwd()
+		}
+		cwd, _ = filepath.Abs(cwd)
+
+		venv := addVenv
+		if venv != "" {
+			venv, _ = filepath.Abs(venv)
+		}
+
+		// Auto-detect venv for Python if not explicitly set.
+		if venv == "" && lang == "py" {
+			venv = findVenv(cwd)
+		}
+
+		if err := store().PutRuntime(state.Runtime{
+			Name: name,
+			Lang: lang,
+			Cwd:  cwd,
+			Venv: venv,
+		}); err != nil {
+			return err
+		}
+
+		fmt.Fprintf(os.Stderr, "Added %s (lang=%s cwd=%s", name, lang, shortPath(cwd))
+		if venv != "" {
+			fmt.Fprintf(os.Stderr, " venv=%s", shortPath(venv))
+		}
+		fmt.Fprintln(os.Stderr, ")")
+		fmt.Fprintf(os.Stderr, "Start it: rat start %s\n", name)
+		return nil
 	},
 }
 
@@ -59,7 +138,25 @@ var rmCmd = &cobra.Command{
 	Short: "Unregister a named runtime",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("rm not yet implemented for %q", args[0])
+		name := args[0]
+		s := store()
+
+		// Stop the kernel if running.
+		if k, _ := s.Get(name); k != nil {
+			_ = daemon.Stop(s, name)
+			fmt.Fprintf(os.Stderr, "%s stopped.\n", name)
+		}
+
+		// Remove the saved config.
+		found, err := s.RemoveRuntime(name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("runtime %q not found", name)
+		}
+		fmt.Fprintf(os.Stderr, "%s removed.\n", name)
+		return nil
 	},
 }
 
@@ -78,12 +175,16 @@ var lsCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tLANG\tPORT\tSTATE\tCWD\tSTARTED")
+		fmt.Fprintln(w, "NAME\tLANG\tPORT\tSTATE\tVENV\tCWD\tSTARTED")
 		for _, k := range kernels {
 			cwd := shortPath(k.Cwd)
+			venv := shortPath(k.Venv)
+			if venv == "" {
+				venv = "—"
+			}
 			ago := timeAgo(k.Started)
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
-				k.Name, k.Lang, k.Port, "running", cwd, ago)
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+				k.Name, k.Lang, k.Port, "running", venv, cwd, ago)
 		}
 		w.Flush()
 		return nil
@@ -97,6 +198,7 @@ var startCmd = &cobra.Command{
 
 The name can be a language (sh, py, r) or a named runtime (py-ml).
 Auto-assigns a port and records in ~/.config/rat/state.yaml.
+Auto-detects venv for Python projects.
 
 Examples:
   rat start sh
@@ -104,24 +206,48 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		lang, err := resolveLang(name)
-		if err != nil {
-			return err
+		s := store()
+
+		// Check for a saved runtime first.
+		rt, _ := s.GetRuntime(name)
+		var lang, cwd, venv string
+		if rt != nil {
+			lang = rt.Lang
+			cwd = rt.Cwd
+			venv = rt.Venv
+		} else {
+			var err error
+			lang, err = resolveLang(name)
+			if err != nil {
+				return err
+			}
 		}
 
-		cwd, _ := os.Getwd()
+		if cwd == "" {
+			cwd, _ = os.Getwd()
+		}
 		cwd, _ = filepath.Abs(cwd)
 
-		k, err := daemon.Start(store(), daemon.StartOpts{
+		// Auto-detect venv for Python if not set.
+		if venv == "" && lang == "py" {
+			venv = findVenv(cwd)
+		}
+
+		k, err := daemon.Start(s, daemon.StartOpts{
 			Name: name,
 			Lang: lang,
 			Cwd:  cwd,
+			Venv: venv,
 		})
 		if err != nil {
 			return err
 		}
 
-		fmt.Fprintf(os.Stderr, "%s started on http://127.0.0.1:%d/mcp (PID %d)\n", k.Name, k.Port, k.PID)
+		venvMsg := ""
+		if k.Venv != "" {
+			venvMsg = fmt.Sprintf(" venv=%s", shortPath(k.Venv))
+		}
+		fmt.Fprintf(os.Stderr, "%s started on http://127.0.0.1:%d/mcp (PID %d)%s\n", k.Name, k.Port, k.PID, venvMsg)
 		return nil
 	},
 }
@@ -262,10 +388,29 @@ var cancelCmd = &cobra.Command{
 }
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor",
+	Use:   "doctor [<lang>]",
 	Short: "Run diagnostics",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		printShellDoctor(inspectShellEnv())
+		if len(args) == 0 {
+			// Show all diagnostics.
+			printShellDoctor(inspectShellEnv())
+			fmt.Println("")
+			printPythonDoctor(inspectPythonEnv())
+			return nil
+		}
+		lang, err := resolveLang(args[0])
+		if err != nil {
+			return err
+		}
+		switch lang {
+		case "sh":
+			printShellDoctor(inspectShellEnv())
+		case "py":
+			printPythonDoctor(inspectPythonEnv())
+		default:
+			return fmt.Errorf("doctor not yet implemented for %s", lang)
+		}
 		return nil
 	},
 }
