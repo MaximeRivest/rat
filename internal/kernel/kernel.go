@@ -41,6 +41,7 @@ type RunResult struct {
 	Error     string // error message if !Success
 	ExecCount int    // how many executions so far
 	Duration  int    // milliseconds
+	Vars      int    // number of user-visible variables (0 = unknown)
 }
 
 // LookRequest is the input to Look.

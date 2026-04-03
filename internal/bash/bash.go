@@ -290,6 +290,9 @@ func (b *Bash) Ctl(op string) kernel.CtlResult {
 			return kernel.CtlResult{Text: "busy"}
 		}
 		return kernel.CtlResult{Text: "idle"}
+	case "output":
+		// Bash doesn't stream partial output (tmux captures to file).
+		return kernel.CtlResult{Text: ""}
 	default:
 		return kernel.CtlResult{Text: fmt.Sprintf("ERROR: unknown op '%s'. Use reset, cancel, restart, or status.", op)}
 	}

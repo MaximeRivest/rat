@@ -38,13 +38,19 @@ type StartOpts struct {
 // Start launches a kernel in the background and records it in state.
 // Returns the state entry on success.
 func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
-	// Check if already running
+	// Check if already running and actually responding.
 	existing, err := store.Get(opts.Name)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
-		return existing, nil // already running
+		// PID is alive — but is the HTTP endpoint actually responding?
+		// A stopped (Ctrl-Z) or hung process still has a live PID.
+		if err := waitReady(existing.Port, 2*time.Second); err == nil {
+			return existing, nil // truly running and healthy
+		}
+		// Not responding — kill the stale process and start fresh.
+		stopKernel(store, existing)
 	}
 
 	// Find a free port

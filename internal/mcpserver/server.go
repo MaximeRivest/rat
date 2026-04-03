@@ -11,6 +11,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -140,11 +142,61 @@ func formatRunResult(r kernel.RunResult) *mcp.CallToolResult {
 		if text == "" {
 			text = "execution failed"
 		}
-		text += fmt.Sprintf("\n\n✗ %dms", r.Duration)
+		text += "\n\n" + formatHint(false, r.Duration, r.Vars)
 		return mcp.NewToolResultError(text)
 	}
 
-	text := r.Output
-	text += fmt.Sprintf("\n\n✓ %dms", r.Duration)
+	text := cleanOutput(r.Output)
+	text += "\n\n" + formatHint(true, r.Duration, r.Vars)
 	return mcp.NewToolResultText(text)
+}
+
+func formatHint(ok bool, durationMs, vars int) string {
+	mark := "✓"
+	if !ok {
+		mark = "✗"
+	}
+	var dur string
+	if durationMs < 1000 {
+		dur = fmt.Sprintf("%dms", durationMs)
+	} else {
+		dur = fmt.Sprintf("%.1fs", float64(durationMs)/1000)
+	}
+	if vars > 0 {
+		noun := "var"
+		if vars != 1 {
+			noun = "vars"
+		}
+		return fmt.Sprintf("%s %s | %d %s", mark, dur, vars, noun)
+	}
+	return fmt.Sprintf("%s %s", mark, dur)
+}
+
+// cleanOutput strips ANSI escapes and processes \r so that
+// progress-bar output (tqdm, etc.) shows only the final frame
+// and terminal colours don't leak into MCP text results.
+func cleanOutput(s string) string {
+	s = stripANSI(s)
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "\r") {
+			parts := strings.Split(line, "\r")
+			for j := len(parts) - 1; j >= 0; j-- {
+				if parts[j] != "" {
+					lines[i] = parts[j]
+					break
+				}
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+var ansiRe = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Z0-9]|[0-9A-Za-z=<>])`)
+
+func stripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
 }

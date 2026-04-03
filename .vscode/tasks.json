@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "watch",
+      "path": "vscode-rat",
+      "label": "npm: watch - vscode-rat",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "esbuild",
+        "source": "esbuild",
+        "pattern": {
+          "regexp": "^✘ \\[ERROR\\] (.+)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\s*$",
+          "endsPattern": "^watching\\.\\.\\."
+        }
+      },
+      "group": "build"
+    }
+  ]
+}

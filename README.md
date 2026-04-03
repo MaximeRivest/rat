@@ -115,11 +115,11 @@ Every language:
 ```bash
 rat install py              # Python
 rat install r               # R
-rat install ju              # Julia
+rat install jl              # Julia
 rat install sh              # Shell / Bash
 rat install js              # JavaScript / Node
 
-rat install py r ju sh      # multiple at once
+rat install py r jl sh      # multiple at once
 ```
 
 Interactive wizard for first-timers:
@@ -224,8 +224,8 @@ rat r
 # R 4.4.1 | rat r kernel @ http://127.0.0.1:8718/mcp
 # >
 
-rat ju
-# Julia 1.11.0 | rat ju kernel @ http://127.0.0.1:8719/mcp
+rat jl
+# Julia 1.11.0 | rat jl kernel @ http://127.0.0.1:8719/mcp
 # julia>
 
 rat sh
@@ -233,7 +233,7 @@ rat sh
 # $
 
 rat run r 'summary(mtcars)'
-rat run ju 'using Statistics; mean([1,2,3])'
+rat run jl 'using Statistics; mean([1,2,3])'
 rat run sh 'ls -la'
 ```
 
@@ -518,7 +518,7 @@ No pip install of rat itself. The kernel script is embedded in the Go binary. Th
 
 ```bash
 # Setup (once)
-rat install <lang>              # install runtime: py, r, ju, sh, js
+rat install <lang>              # install runtime: py, r, jl, sh, js
 rat install <lang> --with-<lang>  # also install the language itself
 rat setup                       # interactive wizard
 rat add <name> [--venv] [--cwd] # register a named runtime
@@ -554,7 +554,7 @@ rat serve <name> --http [--port PORT]  # MCP HTTP server (shared access)
 |------|--------------|-----------------------------------|------------------|
 | `py` | IPython      | ipython, jedi into venv           | kernel.py        |
 | `r`  | R console    | R kernel packages                 | kernel.R         |
-| `ju` | Julia REPL   | Julia kernel packages             | kernel.jl        |
+| `jl` | Julia REPL   | Julia kernel packages             | kernel.jl        |
 | `sh` | bash         | nothing (built-in)                | direct PTY       |
 | `js` | Node.js REPL | nothing (uses system Node)        | kernel.js        |
 

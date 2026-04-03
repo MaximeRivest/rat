@@ -22,18 +22,30 @@ import (
 
 // Kernel represents a single kernel entry in the state file.
 type Kernel struct {
-	Name    string    `yaml:"name"`              // unique name: "sh", "py", "py-ml"
-	Lang    string    `yaml:"lang"`              // canonical language: "sh", "py", "r", "ju", "js"
-	Port    int       `yaml:"port"`              // HTTP port the MCP server listens on
-	PID     int       `yaml:"pid"`               // OS process ID of the rat serve process
-	Cwd     string    `yaml:"cwd"`               // working directory
-	Venv    string    `yaml:"venv,omitempty"`     // Python venv path (py only)
-	Started time.Time `yaml:"started"`            // when the kernel was started
+	Name    string    `yaml:"name"`           // unique name: "sh", "py", "py-ml"
+	Lang    string    `yaml:"lang"`           // canonical language: "sh", "py", "r", "ju", "js"
+	Port    int       `yaml:"port"`           // HTTP port the MCP server listens on
+	PID     int       `yaml:"pid"`            // OS process ID of the rat serve process
+	Cwd     string    `yaml:"cwd"`            // working directory
+	Venv    string    `yaml:"venv,omitempty"` // Python venv path (py only)
+	Started time.Time `yaml:"started"`        // when the kernel was started
+}
+
+// Runtime is a saved named runtime configuration (from `rat add`).
+// Unlike Kernel (which tracks a running process), Runtime persists
+// across restarts and is used by auto-start to know which venv/cwd
+// to use for a given name.
+type Runtime struct {
+	Name string `yaml:"name"`           // unique name: "py-ml", "py-web"
+	Lang string `yaml:"lang"`           // canonical language: "py", "r", ...
+	Cwd  string `yaml:"cwd,omitempty"`  // working directory
+	Venv string `yaml:"venv,omitempty"` // venv path (py only)
 }
 
 // File is the top-level state file structure.
 type File struct {
-	Kernels []Kernel `yaml:"kernels"`
+	Kernels  []Kernel  `yaml:"kernels"`
+	Runtimes []Runtime `yaml:"runtimes,omitempty"`
 }
 
 // Store manages reading and writing the state file.
@@ -47,7 +59,8 @@ type Store struct {
 func DefaultPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
+		fmt.Fprintf(os.Stderr, "rat: cannot determine config directory: %v\n", err)
+		os.Exit(1)
 	}
 	return filepath.Join(dir, "rat", "state.yaml")
 }
@@ -177,6 +190,78 @@ func (s *Store) NextPort(base int) (int, error) {
 	}
 
 	return 0, fmt.Errorf("no available port in range %d-%d", base, base+99)
+}
+
+// ── Runtimes (saved configurations) ─────────────────────────
+
+// GetRuntime returns a saved runtime config by name, or nil.
+func (s *Store) GetRuntime(name string) (*Runtime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range f.Runtimes {
+		if f.Runtimes[i].Name == name {
+			return &f.Runtimes[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// PutRuntime adds or updates a runtime config.
+func (s *Store) PutRuntime(r Runtime) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return err
+	}
+	filtered := make([]Runtime, 0, len(f.Runtimes))
+	for _, existing := range f.Runtimes {
+		if existing.Name != r.Name {
+			filtered = append(filtered, existing)
+		}
+	}
+	filtered = append(filtered, r)
+	f.Runtimes = filtered
+	return s.writeLocked(f)
+}
+
+// RemoveRuntime deletes a saved runtime config. Returns true if found.
+func (s *Store) RemoveRuntime(name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return false, err
+	}
+	filtered := make([]Runtime, 0, len(f.Runtimes))
+	found := false
+	for _, r := range f.Runtimes {
+		if r.Name == name {
+			found = true
+		} else {
+			filtered = append(filtered, r)
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	f.Runtimes = filtered
+	return true, s.writeLocked(f)
+}
+
+// ListRuntimes returns all saved runtime configs.
+func (s *Store) ListRuntimes() ([]Runtime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := s.readLocked()
+	if err != nil {
+		return nil, err
+	}
+	return f.Runtimes, nil
 }
 
 // ── internal ────────────────────────────────────────────────

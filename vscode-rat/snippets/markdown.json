@@ -1,0 +1,47 @@
+{
+  "Python cell": {
+    "prefix": "py",
+    "body": [
+      "```python",
+      "$0",
+      "```"
+    ],
+    "description": "Insert a Python code cell"
+  },
+  "Shell cell": {
+    "prefix": "sh",
+    "body": [
+      "```bash",
+      "$0",
+      "```"
+    ],
+    "description": "Insert a Shell/Bash code cell"
+  },
+  "R cell": {
+    "prefix": "r",
+    "body": [
+      "```r",
+      "$0",
+      "```"
+    ],
+    "description": "Insert an R code cell"
+  },
+  "Julia cell": {
+    "prefix": "ju",
+    "body": [
+      "```julia",
+      "$0",
+      "```"
+    ],
+    "description": "Insert a Julia code cell"
+  },
+  "JavaScript cell": {
+    "prefix": "js",
+    "body": [
+      "```javascript",
+      "$0",
+      "```"
+    ],
+    "description": "Insert a JavaScript code cell"
+  }
+}

@@ -10,8 +10,9 @@ var langAliases = map[string]string{
 	"py":         "py",
 	"python":     "py",
 	"r":          "r",
-	"ju":         "ju",
-	"julia":      "ju",
+	"jl":         "jl",
+	"ju":         "jl",
+	"julia":      "jl",
 	"sh":         "sh",
 	"bash":       "sh",
 	"js":         "js",
@@ -25,7 +26,7 @@ func resolveLang(name string) (string, error) {
 	if canon, ok := langAliases[name]; ok {
 		return canon, nil
 	}
-	return "", fmt.Errorf("unknown language %q (supported: py, r, ju, sh, js)", name)
+	return "", fmt.Errorf("unknown language %q (supported: py, r, jl, sh, js)", name)
 }
 
 // isLangAlias returns true if name is a known language name or alias.
@@ -57,7 +58,7 @@ func inferLangFromName(name string) (string, bool) {
 	//    "py" matching before "python").
 	prefixes := []string{
 		"python", "javascript", "julia", "bash", "node",
-		"py", "sh", "js", "ju",
+		"py", "sh", "js", "jl", "ju",
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(name, p) && len(name) > len(p) {

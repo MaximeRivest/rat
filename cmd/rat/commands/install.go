@@ -21,7 +21,7 @@ var installCmd = &cobra.Command{
 	Short: "Install a language runtime",
 	Long: `Install one or more language runtimes.
 
-For shell/bass, rat checks the host prerequisites (tmux, bash, stty),
+For shell/bash, rat checks the host prerequisites (tmux, bash, stty),
 starts the shared shell kernel, and prints the next steps.
 
 Examples:
@@ -44,6 +44,10 @@ Examples:
 			switch lang {
 			case "sh":
 				if err := installShellRuntime(); err != nil {
+					return err
+				}
+			case "py":
+				if err := installPythonRuntime(); err != nil {
 					return err
 				}
 			default:
