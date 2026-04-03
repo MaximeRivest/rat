@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/maximerivest/rat/internal/state"
 )
 
 // projectMarkers are files/dirs whose presence indicates a project root.
@@ -44,6 +46,39 @@ func findProjectRoot(dir string) (root string, found bool) {
 // projectName returns the base directory name of a path.
 func projectName(root string) string {
 	return filepath.Base(root)
+}
+
+// resolveProjectKernelName determines the kernel name for a language
+// in the given directory. If the bare name (e.g. "py") is already
+// taken by a different project, returns a project-qualified name
+// (e.g. "py@myproject"). If an existing kernel matches this project,
+// returns its name.
+func resolveProjectKernelName(s *state.Store, lang, cwd string) string {
+	root, isProject := findProjectRoot(cwd)
+
+	// Check for an existing kernel that belongs to this project.
+	kernels, _ := s.List()
+	for _, k := range kernels {
+		if k.Lang != lang {
+			continue
+		}
+		kRoot, _ := findProjectRoot(k.Cwd)
+		if kRoot == root {
+			return k.Name
+		}
+	}
+
+	// No match — is the bare name free?
+	existing, _ := s.Get(lang)
+	if existing == nil {
+		return lang // bare name available
+	}
+
+	// Bare name taken by another project — qualify with project name.
+	if isProject {
+		return lang + "@" + projectName(root)
+	}
+	return lang + "@" + projectName(cwd)
 }
 
 // findVenv looks for a Python virtual environment in the given directory

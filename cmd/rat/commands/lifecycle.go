@@ -192,7 +192,7 @@ var lsCmd = &cobra.Command{
 }
 
 var startCmd = &cobra.Command{
-	Use:   "start <name>",
+	Use:   "start <name> [dir]",
 	Short: "Start a kernel explicitly",
 	Long: `Start a kernel in the background.
 
@@ -200,31 +200,38 @@ The name can be:
   • A language:       py, r, jl, sh, js
   • A named runtime:  py-ml, r-stats (registered with 'rat add')
 
+An optional directory argument enables project-aware naming:
+  rat start py            Start a global "py" kernel (cwd = here)
+  rat start py .          Start a project-scoped kernel (e.g. py@myproject)
+  rat start py ~/ml       Start a project-scoped kernel for ~/ml
+
 Auto-assigns a port and records in ~/.config/rat/state.yaml.
 Auto-detects venv for Python projects.
 
 Examples:
-  rat start sh          Start a bash kernel
-  rat start py          Start Python with auto-detected venv
-  rat start py-ml       Start a named runtime (from 'rat add py-ml')`,
+  rat start sh            Start a bash kernel
+  rat start py            Start Python (global name "py")
+  rat start py .          Start Python for this project (e.g. py@myproject)
+  rat start py-ml         Start a named runtime (from 'rat add py-ml')`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			return fmt.Errorf("missing runtime name\n\nUsage: rat start <name>\n\nExamples:\n  rat start py\n  rat start sh\n  rat start py-ml\n\nSee 'rat start --help' for details.")
+			return fmt.Errorf("missing runtime name\n\nUsage: rat start <name> [dir]\n\nExamples:\n  rat start py\n  rat start py .\n  rat start py-ml\n\nSee 'rat start --help' for details.")
 		}
-		if len(args) > 1 {
-			return fmt.Errorf("accepts 1 runtime name, got %d\n\nUsage: rat start <name>", len(args))
+		if len(args) > 2 {
+			return fmt.Errorf("too many arguments (max 2: name and optional directory)\n\nUsage: rat start <name> [dir]")
 		}
 		return nil
 	},
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		if len(args) != 0 {
-			return nil, cobra.ShellCompDirectiveNoFileComp
+		if len(args) == 0 {
+			completions := []string{"py", "r", "jl", "sh", "js"}
+			for _, rt := range func() []state.Runtime { rts, _ := store().ListRuntimes(); return rts }() {
+				completions = append(completions, rt.Name)
+			}
+			return completions, cobra.ShellCompDirectiveNoFileComp
 		}
-		completions := []string{"py", "r", "jl", "sh", "js"}
-		for _, rt := range func() []state.Runtime { rts, _ := store().ListRuntimes(); return rts }() {
-			completions = append(completions, rt.Name)
-		}
-		return completions, cobra.ShellCompDirectiveNoFileComp
+		// Second arg is a directory
+		return nil, cobra.ShellCompDirectiveFilterDirs
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -242,6 +249,17 @@ Examples:
 			lang, err = resolveLang(name)
 			if err != nil {
 				return fmt.Errorf("unknown runtime %q — use a language (py, r, jl, sh, js) or a named runtime from 'rat add'\n\nFor help: rat start --help", name)
+			}
+		}
+
+		// Optional directory argument → project-aware naming.
+		if len(args) > 1 {
+			dir := args[1]
+			dir, _ = filepath.Abs(dir)
+			cwd = dir
+			// Only do project resolution for language names, not saved runtimes.
+			if rt == nil {
+				name = resolveProjectKernelName(s, lang, cwd)
 			}
 		}
 

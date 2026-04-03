@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,9 +45,11 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 		return nil, err
 	}
 	if existing != nil {
-		// PID is alive — but is the HTTP endpoint actually responding?
-		// A stopped (Ctrl-Z) or hung process still has a live PID.
-		if err := waitReady(existing.Port, 2*time.Second); err == nil {
+		// PID is alive — but is the kernel actually functional?
+		// A stopped (Ctrl-Z) or hung process still has a live PID,
+		// and the Go HTTP server may respond even if the Python
+		// subprocess is wedged.  Do a real health check.
+		if err := healthCheck(existing.Port, 3*time.Second); err == nil {
 			return existing, nil // truly running and healthy
 		}
 		// Not responding — kill the stale process and start fresh.
@@ -204,6 +207,63 @@ func waitReady(port int, timeout time.Duration) error {
 	}
 
 	return fmt.Errorf("timeout after %s", timeout)
+}
+
+// healthCheck does a full MCP round-trip: initialize → ctl(status).
+// This verifies the Go server AND the language subprocess are both
+// functional. A simple HTTP probe only tests the Go server.
+func healthCheck(port int, timeout time.Duration) error {
+	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
+	client := &http.Client{Timeout: timeout}
+
+	// 1. Initialize MCP session
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"rat-health","version":"0.1.0"}}}`
+	resp, err := client.Post(url, "application/json", strings.NewReader(initBody))
+	if err != nil {
+		return err
+	}
+	body, _ := readBody(resp)
+	resp.Body.Close()
+
+	// Extract session ID
+	sessionID := resp.Header.Get("Mcp-Session-Id")
+
+	// Send initialized notification
+	notifyBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
+	req, _ := http.NewRequest("POST", url, strings.NewReader(notifyBody))
+	req.Header.Set("Content-Type", "application/json")
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	nr, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	nr.Body.Close()
+
+	// 2. Call ctl(status) — this exercises the language subprocess
+	statusBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ctl","arguments":{"op":"status"}}}`
+	req2, _ := http.NewRequest("POST", url, strings.NewReader(statusBody))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Accept", "application/json, text/event-stream")
+	if sessionID != "" {
+		req2.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return err
+	}
+	resp2.Body.Close()
+
+	_ = body // used for init check
+	return nil
+}
+
+func readBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	return buf[:n], nil
 }
 
 func isAlive(pid int) bool {

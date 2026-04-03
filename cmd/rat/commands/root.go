@@ -185,33 +185,21 @@ func handleNamedREPL(s *state.Store, name, lang string) error {
 func handleProjectREPL(s *state.Store, lang string) error {
 	cwd, _ := os.Getwd()
 	cwd, _ = filepath.Abs(cwd)
-	root, isProject := findProjectRoot(cwd)
 
-	// Find a running kernel for this project.
-	kernels, _ := s.List()
-	for _, k := range kernels {
-		if k.Lang != lang {
-			continue
-		}
-		kRoot, _ := findProjectRoot(k.Cwd)
-		if kRoot == root {
-			// Found a kernel for this project — connect.
-			return launchREPL(s, &k, lang)
-		}
+	root, _ := findProjectRoot(cwd)
+	kernelName := resolveProjectKernelName(s, lang, cwd)
+
+	// If an existing kernel matches, connect directly.
+	if k, _ := s.Get(kernelName); k != nil {
+		return launchREPL(s, k, lang)
 	}
 
-	// No kernel matches. Determine the name for the new one.
-	kernelName := lang
-	existing, _ := s.Get(lang)
-	if existing != nil {
-		// Bare name taken by another project — use project-qualified name.
-		if isProject {
-			kernelName = lang + "@" + projectName(root)
-		} else {
-			kernelName = lang + "@" + projectName(cwd)
+	// Inform user if bare name is taken by another project.
+	if kernelName != lang {
+		if existing, _ := s.Get(lang); existing != nil {
+			fmt.Fprintf(os.Stderr, "%s running at %s — starting %s for this project.\n",
+				lang, shortPath(existing.Cwd), kernelName)
 		}
-		fmt.Fprintf(os.Stderr, "%s running at %s — starting %s for this project.\n",
-			lang, shortPath(existing.Cwd), kernelName)
 	}
 
 	// Auto-detect venv for Python.

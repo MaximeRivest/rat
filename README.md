@@ -1,3 +1,6 @@
+> [!WARNING]
+> In early development. Subject to change. Use with caution.
+
 # rat
 
 **Run AnyThing.** One binary. Every REPL language. Every client shares one namespace.

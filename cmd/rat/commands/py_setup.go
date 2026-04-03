@@ -239,15 +239,18 @@ func installPythonRuntime() error {
 		return fmt.Errorf("IPython installation failed — try manually: %s -m pip install ipython jedi", py)
 	}
 
-	// Start the kernel.
+	// Start the kernel (project-aware, like `rat py`).
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 	cwd, _ = filepath.Abs(cwd)
 
-	k, err := daemon.Start(store(), daemon.StartOpts{
-		Name: "py",
+	s := store()
+	kernelName := resolveProjectKernelName(s, "py", cwd)
+
+	k, err := daemon.Start(s, daemon.StartOpts{
+		Name: kernelName,
 		Lang: "py",
 		Cwd:  cwd,
 		Venv: check.VenvPath,
@@ -259,7 +262,7 @@ func installPythonRuntime() error {
 	// Smoke test.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, err := connectToKernel(ctx, "py")
+	session, err := connectToKernel(ctx, kernelName)
 	if err != nil {
 		return err
 	}
