@@ -11,12 +11,17 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/maximerivest/rat/internal/idle"
 	"github.com/maximerivest/rat/internal/kernel"
 )
 
@@ -25,7 +30,7 @@ import (
 // Go concept: functions are first-class. server.AddTool takes a function
 // as its second argument — the handler. We create closures that capture
 // the kernel variable.
-func New(name string, k kernel.Kernel) *server.MCPServer {
+func New(name string, k kernel.Kernel, tracker *idle.Tracker) *server.MCPServer {
 	s := server.NewMCPServer(name, "0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(fmt.Sprintf(
@@ -64,12 +69,14 @@ func New(name string, k kernel.Kernel) *server.MCPServer {
 		}
 
 		if input != "" {
+			tracker.Touch()
 			if err := k.SendInput(input); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("send input: %v", err)), nil
 			}
 			return mcp.NewToolResultText("input sent"), nil
 		}
 
+		tracker.Touch()
 		result := k.Run(code)
 		return formatRunResult(result), nil
 	})
@@ -103,6 +110,7 @@ func New(name string, k kernel.Kernel) *server.MCPServer {
 			cursor = v
 		}
 
+		tracker.Touch()
 		result := k.Look(kernel.LookRequest{
 			At:     at,
 			Code:   code,
@@ -128,7 +136,13 @@ func New(name string, k kernel.Kernel) *server.MCPServer {
 
 	s.AddTool(ctlTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op, _ := req.GetArguments()["op"].(string)
+		if op != "status" {
+			tracker.Touch()
+		}
 		result := k.Ctl(op)
+		if op == "status" {
+			result.Text = enrichStatusText(result.Text, tracker)
+		}
 		return mcp.NewToolResultText(result.Text), nil
 	})
 
@@ -199,4 +213,163 @@ var ansiRe = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\
 
 func stripANSI(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
+}
+
+func enrichStatusText(state string, tracker *idle.Tracker) string {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		state = "unknown"
+	}
+	idleSeconds := int(tracker.IdleFor().Seconds())
+	return fmt.Sprintf("%s\nidle_seconds: %d\nmemory_mb: %d\npid: %d", state, idleSeconds, currentMemoryMB(), os.Getpid())
+}
+
+// currentMemoryMB returns the total RSS of this process and all its
+// descendants (the Go server + the language subprocess tree).
+// Works on Linux/WSL (/proc), macOS/BSDs (ps), and Windows (wmic).
+// Returns 0 if measurement fails.
+func currentMemoryMB() int {
+	switch runtime.GOOS {
+	case "linux":
+		return processTreeMemoryLinux(os.Getpid())
+	case "darwin", "freebsd", "openbsd", "netbsd":
+		return processTreeMemoryPS(os.Getpid())
+	case "windows":
+		return processTreeMemoryWMIC(os.Getpid())
+	default:
+		return 0
+	}
+}
+
+// ── Shared tree-walk logic ───────────────────────────────────
+
+type procStat struct {
+	PID      int
+	ParentID int
+	RSSKB    int
+}
+
+func sumTree(stats []procStat, rootPID int) int {
+	children := make(map[int][]int, len(stats))
+	memoryKB := make(map[int]int, len(stats))
+	for _, stat := range stats {
+		children[stat.ParentID] = append(children[stat.ParentID], stat.PID)
+		memoryKB[stat.PID] = stat.RSSKB
+	}
+
+	seen := make(map[int]bool, len(stats))
+	var walk func(int) int
+	walk = func(pid int) int {
+		if seen[pid] {
+			return 0
+		}
+		seen[pid] = true
+		total := memoryKB[pid]
+		for _, child := range children[pid] {
+			total += walk(child)
+		}
+		return total
+	}
+
+	return walk(rootPID) / 1024
+}
+
+// ── Linux: read /proc directly (fast, no exec) ──────────────
+
+func processTreeMemoryLinux(rootPID int) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+
+	stats := make([]procStat, 0, len(entries))
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		if stat, ok := readProcStatus(pid); ok {
+			stats = append(stats, stat)
+		}
+	}
+	return sumTree(stats, rootPID)
+}
+
+func readProcStatus(pid int) (procStat, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return procStat{}, false
+	}
+
+	stat := procStat{PID: pid}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "PPid:":
+			stat.ParentID, _ = strconv.Atoi(fields[1])
+		case "VmRSS:":
+			stat.RSSKB, _ = strconv.Atoi(fields[1])
+		}
+	}
+	return stat, true
+}
+
+// ── macOS / BSD: parse `ps` output ──────────────────────────
+
+func processTreeMemoryPS(rootPID int) int {
+	out, err := exec.Command("ps", "-ax", "-o", "pid,ppid,rss").Output()
+	if err != nil {
+		return 0
+	}
+
+	lines := strings.Split(string(out), "\n")
+	stats := make([]procStat, 0, len(lines))
+	for _, line := range lines[1:] { // skip header
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		rss, err3 := strconv.Atoi(fields[2])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		stats = append(stats, procStat{PID: pid, ParentID: ppid, RSSKB: rss})
+	}
+	return sumTree(stats, rootPID)
+}
+
+// ── Windows: parse `wmic` output ────────────────────────────
+//
+// wmic outputs CSV with columns: Node, ParentProcessId, ProcessId, WorkingSetSize
+// WorkingSetSize is in bytes (not KB), so we convert.
+
+func processTreeMemoryWMIC(rootPID int) int {
+	out, err := exec.Command("wmic", "process", "get",
+		"ParentProcessId,ProcessId,WorkingSetSize", "/FORMAT:CSV").Output()
+	if err != nil {
+		return 0
+	}
+
+	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
+	stats := make([]procStat, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Split(strings.TrimSpace(line), ",")
+		// CSV columns: Node, ParentProcessId, ProcessId, WorkingSetSize
+		if len(fields) < 4 {
+			continue
+		}
+		ppid, err1 := strconv.Atoi(fields[1])
+		pid, err2 := strconv.Atoi(fields[2])
+		bytes, err3 := strconv.Atoi(fields[3])
+		if err1 != nil || err2 != nil || err3 != nil {
+			continue
+		}
+		stats = append(stats, procStat{PID: pid, ParentID: ppid, RSSKB: bytes / 1024})
+	}
+	return sumTree(stats, rootPID)
 }

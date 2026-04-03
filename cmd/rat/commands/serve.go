@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maximerivest/rat/internal/bash"
+	"github.com/maximerivest/rat/internal/idle"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
 	"github.com/maximerivest/rat/internal/python"
@@ -107,7 +108,8 @@ func runServe(input string) error {
 	defer k.Shutdown()
 
 	serverName := fmt.Sprintf("rat-%s", name)
-	mcpSrv := mcpserver.New(serverName, k)
+	tracker := idle.New()
+	mcpSrv := mcpserver.New(serverName, k, tracker)
 
 	if serveHTTPFlag {
 		return runHTTPServer(mcpSrv, servePort, serverName)

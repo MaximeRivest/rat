@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maximerivest/rat/internal/daemon"
+	"github.com/maximerivest/rat/internal/mcpclient"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -202,11 +203,17 @@ var statusCmd = &cobra.Command{
 	GroupID: "daily",
 	Long: `Show all known runtimes: running, stopped, and saved named runtimes.
 
-Columns:
-  NAME    Resolved runtime name
-  STATUS  running or stopped
-  CWD     Working directory
-  VENV    Python virtual environment (if any)`,
+For running kernels, queries each one for idle time and memory usage.
+Kernels idle for more than 24 hours are flagged with a ⚠ warning.
+A summary line shows total memory and suggests cleanup.
+
+Example:
+  NAME             STATUS   CWD                   VENV
+  py@myproject     running  ~/Projects/myproject   .venv
+  py@old-thing     running  ~/Projects/old-thing   .venv   ⚠ idle 3d
+  sh@myproject     stopped  ~/Projects/myproject   —
+
+  2 kernels using ~185MB. Stop idle ones? rat stop py@old-thing`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rows, err := buildStatusRows(store())
 		if err != nil {
@@ -218,6 +225,8 @@ Columns:
 			return nil
 		}
 
+		enrichStatusRows(rows)
+
 		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(w, "NAME\tSTATUS\tCWD\tVENV")
 		for _, row := range rows {
@@ -225,9 +234,10 @@ Columns:
 			if venv == "" {
 				venv = "—"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", row.Name, row.Status, shortPath(row.Cwd), venv)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\n", row.Name, row.Status, shortPath(row.Cwd), venv, formatStatusNote(row))
 		}
 		w.Flush()
+		printStatusSummary(rows)
 		return nil
 	},
 }
@@ -422,7 +432,7 @@ var doctorCmd = &cobra.Command{
 
 Checks runtime detection, environment/tooling, writable directories,
 and the health of running kernels when applicable.`,
-	Args:  cobra.MaximumNArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			printShellDoctor(inspectShellEnv())
@@ -455,11 +465,17 @@ var updateCmd = &cobra.Command{
 	},
 }
 
+const idleWarningAfter = 24 * time.Hour
+
 type statusRow struct {
-	Name   string
-	Status string
-	Cwd    string
-	Venv   string
+	Name         string
+	Status       string
+	Cwd          string
+	Venv         string
+	Port         int
+	RuntimeState string
+	IdleSeconds  int
+	MemoryMB     int
 }
 
 func buildStatusRows(s *state.Store) ([]statusRow, error) {
@@ -487,6 +503,7 @@ func buildStatusRows(s *state.Store) ([]statusRow, error) {
 			Status: k.Status,
 			Cwd:    k.Cwd,
 			Venv:   k.Venv,
+			Port:   k.Port,
 		}
 	}
 
@@ -501,6 +518,99 @@ func buildStatusRows(s *state.Store) ([]statusRow, error) {
 		out = append(out, rows[name])
 	}
 	return out, nil
+}
+
+func enrichStatusRows(rows []statusRow) {
+	for i := range rows {
+		if rows[i].Status != state.StatusRunning || rows[i].Port == 0 {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		session, err := mcpclient.Connect(ctx, rows[i].Port)
+		if err != nil {
+			cancel()
+			continue
+		}
+
+		status, err := session.Status(ctx)
+		_ = session.Close()
+		cancel()
+		if err != nil {
+			continue
+		}
+
+		rows[i].RuntimeState = status.State
+		rows[i].IdleSeconds = status.IdleSeconds
+		rows[i].MemoryMB = status.MemoryMB
+	}
+}
+
+func formatStatusNote(row statusRow) string {
+	if row.Status != state.StatusRunning {
+		return ""
+	}
+	if row.RuntimeState == "busy" {
+		return "  busy"
+	}
+	if row.RuntimeState == "waiting_for_input" {
+		return "  waiting for input"
+	}
+	if row.IdleSeconds >= int(idleWarningAfter.Seconds()) {
+		return fmt.Sprintf("  ⚠ idle %s", formatCompactDuration(time.Duration(row.IdleSeconds)*time.Second))
+	}
+	return ""
+}
+
+func printStatusSummary(rows []statusRow) {
+	running := 0
+	totalMem := 0
+	firstIdle := ""
+	for _, row := range rows {
+		if row.Status != state.StatusRunning {
+			continue
+		}
+		running++
+		totalMem += row.MemoryMB
+		if firstIdle == "" && row.IdleSeconds >= int(idleWarningAfter.Seconds()) {
+			firstIdle = row.Name
+		}
+	}
+	if running == 0 {
+		return
+	}
+
+	noun := "kernels"
+	if running == 1 {
+		noun = "kernel"
+	}
+
+	fmt.Println("")
+	if totalMem > 0 {
+		fmt.Printf("%d %s using ~%dMB.", running, noun, totalMem)
+	} else {
+		fmt.Printf("%d %s running.", running, noun)
+	}
+	if firstIdle != "" {
+		fmt.Printf(" Stop idle ones? rat stop %s", firstIdle)
+	}
+	fmt.Println("")
+}
+
+func formatCompactDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 48*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	if d < 14*24*time.Hour {
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+	return fmt.Sprintf("%dw", int(d.Hours()/(24*7)))
 }
 
 func confirmRemove(name string) (bool, error) {

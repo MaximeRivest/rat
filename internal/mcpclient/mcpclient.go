@@ -9,6 +9,8 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -17,6 +19,15 @@ import (
 
 // DefaultTimeout for CLI operations.
 const DefaultTimeout = 30 * time.Second
+
+// Status is parsed from ctl(status). The first line is always the runtime
+// state (idle, busy, waiting_for_input). Additional metadata is optional.
+type Status struct {
+	State       string
+	IdleSeconds int
+	MemoryMB    int
+	PID         int
+}
 
 // Session is an initialized MCP connection to a kernel.
 type Session struct {
@@ -76,20 +87,22 @@ func (s *Session) SendInput(ctx context.Context, text string) (*mcp.CallToolResu
 	return s.callTool(ctx, "run", map[string]any{"input": text})
 }
 
+// Status queries ctl(status) and parses the text response.
+func (s *Session) Status(ctx context.Context) (Status, error) {
+	result, err := s.Ctl(ctx, "status")
+	if err != nil {
+		return Status{}, err
+	}
+	return parseStatus(extractText(result)), nil
+}
+
 // IsWaitingForInput checks if the kernel process is waiting for stdin.
 func (s *Session) IsWaitingForInput(ctx context.Context) bool {
-	result, err := s.Ctl(ctx, "status")
+	status, err := s.Status(ctx)
 	if err != nil {
 		return false
 	}
-	for _, c := range result.Content {
-		if tc, ok := c.(mcp.TextContent); ok {
-			if tc.Text == "waiting_for_input" {
-				return true
-			}
-		}
-	}
-	return false
+	return status.State == "waiting_for_input"
 }
 
 // Ctl sends a control operation (reset, cancel, restart, status).
@@ -115,4 +128,50 @@ func (s *Session) callTool(ctx context.Context, name string, args map[string]any
 		return nil, fmt.Errorf("call %s: %w", name, err)
 	}
 	return result, nil
+}
+
+func extractText(result *mcp.CallToolResult) string {
+	if result == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(result.Content))
+	for _, c := range result.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			if tc.Text != "" {
+				parts = append(parts, tc.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func parseStatus(text string) Status {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return Status{}
+	}
+
+	lines := strings.Split(text, "\n")
+	status := Status{State: strings.TrimSpace(lines[0])}
+	for _, line := range lines[1:] {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			continue
+		}
+		switch key {
+		case "idle_seconds":
+			status.IdleSeconds = n
+		case "memory_mb":
+			status.MemoryMB = n
+		case "pid":
+			status.PID = n
+		}
+	}
+	return status
 }
