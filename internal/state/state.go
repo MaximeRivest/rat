@@ -1,12 +1,9 @@
 // Package state manages persistent kernel state.
 //
-// State is stored in ~/.config/rat/state.yaml. It tracks which kernels
-// are running, their ports, PIDs, and configuration. Every CLI command
-// that talks to a kernel reads this file to find (or auto-start) it.
-//
-// The state file is the single source of truth for "what's running."
-// On every read, we verify PIDs are actually alive — dead entries get
-// cleaned up automatically so users never see stale state.
+// State is stored in ~/.config/rat/state.yaml. It tracks known runtimes,
+// whether they are currently running, their ports, PIDs, and configuration.
+// Every CLI command that talks to a kernel reads this file to resolve names
+// and locate live processes.
 package state
 
 import (
@@ -20,21 +17,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Status constants for kernel state.
+const (
+	StatusRunning = "running"
+	StatusStopped = "stopped"
+)
+
 // Kernel represents a single kernel entry in the state file.
 type Kernel struct {
-	Name    string    `yaml:"name"`           // unique name: "sh", "py", "py-ml"
-	Lang    string    `yaml:"lang"`           // canonical language: "sh", "py", "r", "ju", "js"
-	Port    int       `yaml:"port"`           // HTTP port the MCP server listens on
-	PID     int       `yaml:"pid"`            // OS process ID of the rat serve process
-	Cwd     string    `yaml:"cwd"`            // working directory
-	Venv    string    `yaml:"venv,omitempty"` // Python venv path (py only)
-	Started time.Time `yaml:"started"`        // when the kernel was started
+	Name    string    `yaml:"name"`              // unique name: "sh@proj", "py@proj", "py-ml"
+	Lang    string    `yaml:"lang"`              // canonical language: "sh", "py", "r", "jl", "js"
+	Port    int       `yaml:"port"`              // HTTP port the MCP server listens on
+	PID     int       `yaml:"pid"`               // OS process ID of the rat serve process
+	Cwd     string    `yaml:"cwd"`               // working directory
+	Venv    string    `yaml:"venv,omitempty"`    // Python venv path (py only)
+	Status  string    `yaml:"status"`            // "running" or "stopped"
+	Started time.Time `yaml:"started"`           // when the kernel was started
+	Stopped time.Time `yaml:"stopped,omitempty"` // when the kernel was stopped (zero if running)
 }
 
 // Runtime is a saved named runtime configuration (from `rat add`).
 // Unlike Kernel (which tracks a running process), Runtime persists
-// across restarts and is used by auto-start to know which venv/cwd
-// to use for a given name.
+// across restarts and is used by resolution/auto-start to know which
+// cwd/venv to use for a given name.
 type Runtime struct {
 	Name string `yaml:"name"`           // unique name: "py-ml", "py-web"
 	Lang string `yaml:"lang"`           // canonical language: "py", "r", ...
@@ -80,9 +85,10 @@ func (s *Store) Path() string {
 	return s.path
 }
 
-// List returns all kernels, removing any with dead PIDs.
-// This is the primary read method — always returns clean state.
-func (s *Store) List() ([]Kernel, error) {
+// ListKnown returns all kernels (running + stopped), normalizing stale state
+// as a side effect. Dead running PIDs are marked stopped, and legacy entries
+// with missing status are normalized.
+func (s *Store) ListKnown() ([]Kernel, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -91,19 +97,33 @@ func (s *Store) List() ([]Kernel, error) {
 		return nil, err
 	}
 
-	alive, dead := partitionAlive(f.Kernels)
-	if len(dead) > 0 {
-		f.Kernels = alive
+	changed := normalizeKernels(f.Kernels)
+	if changed {
 		_ = s.writeLocked(f) // best-effort cleanup
 	}
 
-	return alive, nil
+	return f.Kernels, nil
 }
 
-// Get returns a kernel by name, or nil if not found.
-// Dead PIDs are cleaned up as a side effect.
-func (s *Store) Get(name string) (*Kernel, error) {
-	kernels, err := s.List()
+// ListRunning returns only kernels with status "running" and a live PID.
+func (s *Store) ListRunning() ([]Kernel, error) {
+	all, err := s.ListKnown()
+	if err != nil {
+		return nil, err
+	}
+	var running []Kernel
+	for _, k := range all {
+		if k.Status == StatusRunning {
+			running = append(running, k)
+		}
+	}
+	return running, nil
+}
+
+// GetKnown returns a known kernel by name, whether running or stopped.
+// State is normalized as a side effect.
+func (s *Store) GetKnown(name string) (*Kernel, error) {
+	kernels, err := s.ListKnown()
 	if err != nil {
 		return nil, err
 	}
@@ -115,9 +135,49 @@ func (s *Store) Get(name string) (*Kernel, error) {
 	return nil, nil
 }
 
+// GetRunning returns a running kernel by name, or nil if it is absent or stopped.
+func (s *Store) GetRunning(name string) (*Kernel, error) {
+	kernels, err := s.ListRunning()
+	if err != nil {
+		return nil, err
+	}
+	for i := range kernels {
+		if kernels[i].Name == name {
+			return &kernels[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// MarkStopped changes a kernel's status to stopped. Returns true if found.
+func (s *Store) MarkStopped(name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := s.readLocked()
+	if err != nil {
+		return false, err
+	}
+
+	for i := range f.Kernels {
+		if f.Kernels[i].Name == name {
+			f.Kernels[i].Status = StatusStopped
+			f.Kernels[i].PID = 0
+			f.Kernels[i].Port = 0
+			f.Kernels[i].Stopped = time.Now()
+			return true, s.writeLocked(f)
+		}
+	}
+	return false, nil
+}
+
 // Put adds or updates a kernel entry. If a kernel with the same name
-// exists, it is replaced.
+// exists, it is replaced. Status defaults to "running" if not set.
 func (s *Store) Put(k Kernel) error {
+	if k.Status == "" {
+		k.Status = StatusRunning
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -126,7 +186,6 @@ func (s *Store) Put(k Kernel) error {
 		return err
 	}
 
-	// Remove existing entry with same name
 	filtered := make([]Kernel, 0, len(f.Kernels))
 	for _, existing := range f.Kernels {
 		if existing.Name != k.Name {
@@ -277,7 +336,7 @@ func (s *Store) readLocked() (*File, error) {
 
 	var f File
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		// Corrupted file — start fresh rather than error out
+		// Corrupted file — start fresh rather than error out.
 		return &File{}, nil
 	}
 	return &f, nil
@@ -294,7 +353,6 @@ func (s *Store) writeLocked(f *File) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
-	// Write atomically: temp file + rename
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return fmt.Errorf("write state: %w", err)
@@ -307,16 +365,50 @@ func (s *Store) writeLocked(f *File) error {
 	return nil
 }
 
-// partitionAlive splits kernels into alive (PID exists) and dead.
-func partitionAlive(kernels []Kernel) (alive, dead []Kernel) {
-	for _, k := range kernels {
-		if isAlive(k.PID) {
-			alive = append(alive, k)
-		} else {
-			dead = append(dead, k)
+// normalizeKernels updates legacy/invalid kernel entries in-place.
+// It fills in missing status, marks dead running PIDs as stopped, and
+// ensures stopped kernels do not keep stale PID/port values.
+func normalizeKernels(kernels []Kernel) bool {
+	changed := false
+	for i := range kernels {
+		k := &kernels[i]
+
+		if k.Status == "" {
+			if k.PID > 0 {
+				k.Status = StatusRunning
+			} else {
+				k.Status = StatusStopped
+				if k.Stopped.IsZero() {
+					k.Stopped = time.Now()
+				}
+			}
+			changed = true
+		}
+
+		if k.Status == StatusRunning && !isAlive(k.PID) {
+			k.Status = StatusStopped
+			k.PID = 0
+			k.Port = 0
+			k.Stopped = time.Now()
+			changed = true
+		}
+
+		if k.Status == StatusStopped {
+			if k.PID != 0 {
+				k.PID = 0
+				changed = true
+			}
+			if k.Port != 0 {
+				k.Port = 0
+				changed = true
+			}
+			if k.Stopped.IsZero() {
+				k.Stopped = time.Now()
+				changed = true
+			}
 		}
 	}
-	return
+	return changed
 }
 
 // isAlive checks if a process with the given PID exists.
@@ -331,14 +423,12 @@ func isAlive(pid int) bool {
 
 // isPortInUse does a quick check by trying to listen on the port.
 func isPortInUse(port int) bool {
-	// Use a raw socket check — try to bind, close immediately
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return true // can't check, assume in use
 	}
 	defer syscall.Close(fd)
 
-	// Allow reuse so we don't block the port
 	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 
 	addr := syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}

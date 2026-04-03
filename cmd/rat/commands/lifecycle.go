@@ -1,10 +1,13 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -14,15 +17,19 @@ import (
 	"github.com/maximerivest/rat/internal/state"
 )
 
-var stopAll bool
+var (
+	stopAll bool
+	rmYes   bool
+)
 
 func init() {
-	stopCmd.Flags().BoolVar(&stopAll, "all", false, "Stop all kernels")
+	stopCmd.Flags().BoolVar(&stopAll, "all", false, "Stop all running kernels")
+	rmCmd.Flags().BoolVar(&rmYes, "yes", false, "Delete without confirmation")
 
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(rmCmd)
-	rootCmd.AddCommand(lsCmd)
+	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
@@ -38,8 +45,9 @@ func store() *state.Store {
 }
 
 var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Interactive setup wizard",
+	Use:     "setup",
+	Short:   "Interactive setup wizard",
+	GroupID: "setup",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("setup not yet implemented")
 	},
@@ -58,31 +66,29 @@ func init() {
 }
 
 var addCmd = &cobra.Command{
-	Use:   "add <name> [<dir>] [--lang py] [--venv PATH] [--cwd PATH]",
-	Short: "Register a named runtime",
-	Long: `Register a named runtime with a specific venv and working directory.
+	Use:     "add <name> [dir] [--lang LANG] [--venv PATH]",
+	Short:   "Register a named runtime",
+	GroupID: "setup",
+	Long: `Register a named runtime with custom configuration.
 
-The language is inferred from the name (pyauto → py, py-ml → py, r-stats → r)
-or can be set explicitly with --lang.
+The language is inferred from the name prefix (py-ml → py, r-stats → r)
+or set explicitly with --lang.
 
 The optional second argument sets the working directory (same as --cwd).
-If a Python venv (.venv/) is found in the directory, it is used automatically.
+If a Python venv (.venv/) is found in the directory, it is auto-detected.
 
 Examples:
-  rat add pyauto .                    # register for current dir, auto-detect venv
-  rat add py-ml --venv ~/ml/.venv --cwd ~/ml
-  rat add py-web ~/web               # auto-detect venv in ~/web
-  rat add r-bio --lang r --cwd ~/bio`,
+  rat add py-ml ~/ml                  # auto-detect venv in ~/ml
+  rat add py-web --venv ~/web/.venv --cwd ~/web
+  rat add r-stats --lang r --cwd ~/stats`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		// Second positional arg is cwd (shorthand for --cwd).
 		if len(args) > 1 && addCwd == "" {
 			addCwd = args[1]
 		}
 
-		// Infer language from name prefix or --lang flag.
 		lang := addLang
 		if lang == "" {
 			if inferred, ok := inferLangFromName(name); ok {
@@ -108,8 +114,6 @@ Examples:
 		if venv != "" {
 			venv, _ = filepath.Abs(venv)
 		}
-
-		// Auto-detect venv for Python if not explicitly set.
 		if venv == "" && lang == "py" {
 			venv = findVenv(cwd)
 		}
@@ -134,57 +138,94 @@ Examples:
 }
 
 var rmCmd = &cobra.Command{
-	Use:   "rm <name>",
-	Short: "Unregister a named runtime",
-	Args:  cobra.ExactArgs(1),
+	Use:     "rm <name>",
+	Short:   "Delete a runtime's state",
+	GroupID: "setup",
+	Long: `Stop the kernel if running and remove the state entry entirely.
+Works on any runtime — custom (py-ml) or auto-generated (py@myproject).
+
+This is the only way to fully erase a runtime from state.
+'rat stop' marks it stopped; 'rat rm' deletes it.
+
+By default, asks for confirmation. Use --yes to skip the prompt.
+
+Examples:
+  rat rm py-ml
+  rat rm py@myproject`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := args[0]
-		s := store()
-
-		// Stop the kernel if running.
-		if k, _ := s.Get(name); k != nil {
-			_ = daemon.Stop(s, name)
-			fmt.Fprintf(os.Stderr, "%s stopped.\n", name)
-		}
-
-		// Remove the saved config.
-		found, err := s.RemoveRuntime(name)
+		r, err := resolveInput(args[0])
 		if err != nil {
 			return err
 		}
-		if !found {
-			return fmt.Errorf("runtime %q not found", name)
+		if r.IsNew {
+			return fmt.Errorf("runtime %q not found", r.Name)
 		}
-		fmt.Fprintf(os.Stderr, "%s removed.\n", name)
+		if !rmYes {
+			ok, err := confirmRemove(r.Name)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Fprintln(os.Stderr, "Cancelled.")
+				return nil
+			}
+		}
+
+		s := store()
+		found := false
+		if k, _ := s.GetRunning(r.Name); k != nil {
+			if err := daemon.Stop(s, r.Name); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "%s stopped.\n", r.Name)
+			found = true
+		}
+		if removed, _ := s.Remove(r.Name); removed {
+			found = true
+		}
+		if removed, _ := s.RemoveRuntime(r.Name); removed {
+			found = true
+		}
+		if !found {
+			return fmt.Errorf("runtime %q not found", r.Name)
+		}
+
+		fmt.Fprintf(os.Stderr, "%s removed.\n", r.Name)
 		return nil
 	},
 }
 
-var lsCmd = &cobra.Command{
-	Use:   "ls",
-	Short: "List all runtimes and their state",
+var statusCmd = &cobra.Command{
+	Use:     "status",
+	Short:   "Show all runtimes and their state",
+	GroupID: "daily",
+	Long: `Show all known runtimes: running, stopped, and saved named runtimes.
+
+Columns:
+  NAME    Resolved runtime name
+  STATUS  running or stopped
+  CWD     Working directory
+  VENV    Python virtual environment (if any)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		kernels, err := store().List()
+		rows, err := buildStatusRows(store())
 		if err != nil {
 			return err
 		}
-		if len(kernels) == 0 {
-			fmt.Println("No running kernels.")
-			fmt.Println("Start one: rat start sh")
+		if len(rows) == 0 {
+			fmt.Println("No runtimes.")
+			fmt.Println("Start one: rat py")
 			return nil
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tLANG\tPORT\tSTATE\tVENV\tCWD\tSTARTED")
-		for _, k := range kernels {
-			cwd := shortPath(k.Cwd)
-			venv := shortPath(k.Venv)
+		fmt.Fprintln(w, "NAME\tSTATUS\tCWD\tVENV")
+		for _, row := range rows {
+			venv := shortPath(row.Venv)
 			if venv == "" {
 				venv = "—"
 			}
-			ago := timeAgo(k.Started)
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-				k.Name, k.Lang, k.Port, "running", venv, cwd, ago)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", row.Name, row.Status, shortPath(row.Cwd), venv)
 		}
 		w.Flush()
 		return nil
@@ -192,109 +233,59 @@ var lsCmd = &cobra.Command{
 }
 
 var startCmd = &cobra.Command{
-	Use:   "start <name> [dir]",
-	Short: "Start a kernel explicitly",
-	Long: `Start a kernel in the background.
+	Use:     "start <runtime>",
+	Short:   "Start a kernel",
+	GroupID: "setup",
+	Long: `Resolve the name and start the kernel in the background.
+If already running and healthy, reports it.
 
-The name can be:
-  • A language:       py, r, jl, sh, js
-  • A named runtime:  py-ml, r-stats (registered with 'rat add')
-
-An optional directory argument enables project-aware naming:
-  rat start py            Start a global "py" kernel (cwd = here)
-  rat start py .          Start a project-scoped kernel (e.g. py@myproject)
-  rat start py ~/ml       Start a project-scoped kernel for ~/ml
-
-Auto-assigns a port and records in ~/.config/rat/state.yaml.
-Auto-detects venv for Python projects.
+The runtime can be a language (py, sh, r, jl, js) which resolves
+to your current project's kernel, or a full name (py@myproject, py-ml).
 
 Examples:
-  rat start sh            Start a bash kernel
-  rat start py            Start Python (global name "py")
-  rat start py .          Start Python for this project (e.g. py@myproject)
-  rat start py-ml         Start a named runtime (from 'rat add py-ml')`,
-	Args: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 {
-			return fmt.Errorf("missing runtime name\n\nUsage: rat start <name> [dir]\n\nExamples:\n  rat start py\n  rat start py .\n  rat start py-ml\n\nSee 'rat start --help' for details.")
-		}
-		if len(args) > 2 {
-			return fmt.Errorf("too many arguments (max 2: name and optional directory)\n\nUsage: rat start <name> [dir]")
-		}
-		return nil
-	},
+  rat start py
+  rat start py@myproject
+  rat start py-ml`,
+	Args: cobra.ExactArgs(1),
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		if len(args) == 0 {
-			completions := []string{"py", "r", "jl", "sh", "js"}
-			for _, rt := range func() []state.Runtime { rts, _ := store().ListRuntimes(); return rts }() {
-				completions = append(completions, rt.Name)
-			}
-			return completions, cobra.ShellCompDirectiveNoFileComp
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
 		}
-		// Second arg is a directory
-		return nil, cobra.ShellCompDirectiveFilterDirs
+		completions := []string{"py", "r", "jl", "sh", "js"}
+		for _, rt := range func() []state.Runtime { rts, _ := store().ListRuntimes(); return rts }() {
+			completions = append(completions, rt.Name)
+		}
+		return completions, cobra.ShellCompDirectiveNoFileComp
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := args[0]
-		s := store()
-
-		// Check for a saved runtime first.
-		rt, _ := s.GetRuntime(name)
-		var lang, cwd, venv string
-		if rt != nil {
-			lang = rt.Lang
-			cwd = rt.Cwd
-			venv = rt.Venv
-		} else {
-			var err error
-			lang, err = resolveLang(name)
-			if err != nil {
-				return fmt.Errorf("unknown runtime %q — use a language (py, r, jl, sh, js) or a named runtime from 'rat add'\n\nFor help: rat start --help", name)
-			}
-		}
-
-		// Optional directory argument → project-aware naming.
-		if len(args) > 1 {
-			dir := args[1]
-			dir, _ = filepath.Abs(dir)
-			cwd = dir
-			// Only do project resolution for language names, not saved runtimes.
-			if rt == nil {
-				name = resolveProjectKernelName(s, lang, cwd)
-			}
-		}
-
-		if cwd == "" {
-			cwd, _ = os.Getwd()
-		}
-		cwd, _ = filepath.Abs(cwd)
-
-		// Auto-detect venv for Python if not set.
-		if venv == "" && lang == "py" {
-			venv = findVenv(cwd)
-		}
-
-		k, err := daemon.Start(s, daemon.StartOpts{
-			Name: name,
-			Lang: lang,
-			Cwd:  cwd,
-			Venv: venv,
-		})
+		r, err := resolveInput(args[0])
 		if err != nil {
 			return err
 		}
-
-		venvMsg := ""
-		if k.Venv != "" {
-			venvMsg = fmt.Sprintf(" venv=%s", shortPath(k.Venv))
+		k, action, err := ensureResolvedKernel(r)
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(os.Stderr, "%s started on http://127.0.0.1:%d/mcp (PID %d)%s\n", k.Name, k.Port, k.PID, venvMsg)
+		if action == ensureNoop {
+			fmt.Fprintf(os.Stderr, "%s already running on http://127.0.0.1:%d/mcp (PID %d)\n", k.Name, k.Port, k.PID)
+			return nil
+		}
+		printKernelAction(k, action)
 		return nil
 	},
 }
 
 var stopCmd = &cobra.Command{
-	Use:   "stop [<name>] [--all]",
-	Short: "Stop a kernel",
+	Use:     "stop <runtime> [--all]",
+	Short:   "Stop a kernel",
+	GroupID: "setup",
+	Long: `Stop a kernel. The state entry is preserved (marked stopped)
+so the name remains resolvable. Use 'rat rm' to delete state entirely.
+
+Examples:
+  rat stop py
+  rat stop py@myproject
+  rat stop --all`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		s := store()
 
@@ -311,62 +302,51 @@ var stopCmd = &cobra.Command{
 			return nil
 		}
 
-		if len(args) == 0 {
+		if len(args) != 1 {
 			return fmt.Errorf("specify a runtime name or use --all")
 		}
 
-		name := args[0]
-		if err := daemon.Stop(s, name); err != nil {
+		r, err := resolveInput(args[0])
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "%s stopped.\n", name)
+		if err := daemon.Stop(s, r.Name); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "%s stopped.\n", r.Name)
 		return nil
 	},
 }
 
 var restartCmd = &cobra.Command{
-	Use:   "restart <name>",
-	Short: "Restart a kernel (fresh namespace, same config)",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		name := args[0]
-		s := store()
+	Use:     "restart <runtime>",
+	Short:   "Restart a kernel (fresh namespace)",
+	GroupID: "daily",
+	Long: `Kill the kernel process and start a new one. Fresh namespace,
+fresh language subprocess. If no kernel is running, starts one.
 
-		// Get current config before stopping
-		existing, err := s.Get(name)
+Examples:
+  rat restart py
+  rat restart py@myproject`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		r, err := resolveInput(args[0])
 		if err != nil {
 			return err
 		}
 
-		// Resolve lang — either from existing state or from the name
-		lang := ""
-		cwd := ""
-		venv := ""
-		if existing != nil {
-			lang = existing.Lang
-			cwd = existing.Cwd
-			venv = existing.Venv
-
-			// Stop the existing kernel
-			if err := daemon.Stop(s, name); err != nil {
+		s := store()
+		if k, _ := s.GetRunning(r.Name); k != nil {
+			if err := daemon.Stop(s, r.Name); err != nil {
 				return err
 			}
-		} else {
-			// Not running — just start it
-			lang, err = resolveLang(name)
-			if err != nil {
-				return err
-			}
-			cwd, _ = os.Getwd()
 		}
 
-		cwd, _ = filepath.Abs(cwd)
-
 		k, err := daemon.Start(s, daemon.StartOpts{
-			Name: name,
-			Lang: lang,
-			Cwd:  cwd,
-			Venv: venv,
+			Name: r.Name,
+			Lang: r.Lang,
+			Cwd:  r.Cwd,
+			Venv: r.Venv,
 		})
 		if err != nil {
 			return err
@@ -378,18 +358,19 @@ var restartCmd = &cobra.Command{
 }
 
 var resetCmd = &cobra.Command{
-	Use:   "reset <name>",
-	Short: "Clear the kernel namespace",
-	Long: `Clear all variables in a kernel's namespace without restarting.
+	Use:     "reset <runtime>",
+	Short:   "Clear namespace without restarting",
+	GroupID: "setup",
+	Long: `Clear the namespace in-process. Faster than restart but less
+reliable. Does NOT auto-start — the kernel must be running.
 
-For full kernel restart, use: rat restart <name>
-For direct MCP access:       mcp2cli rat-<name> ctl --op reset`,
+For a full restart: rat restart <name>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		session, err := connectToKernel(ctx, args[0])
+		session, err := connectToRunningKernel(ctx, args[0])
 		if err != nil {
 			return err
 		}
@@ -405,14 +386,20 @@ For direct MCP access:       mcp2cli rat-<name> ctl --op reset`,
 }
 
 var cancelCmd = &cobra.Command{
-	Use:   "cancel <name>",
-	Short: "Cancel running execution on a kernel",
-	Args:  cobra.ExactArgs(1),
+	Use:     "cancel <runtime>",
+	Short:   "Cancel running execution",
+	GroupID: "daily",
+	Long: `Interrupt the current execution on a kernel (Ctrl-C equivalent).
+Does NOT auto-start — if the kernel isn't running, reports it.
+
+Example:
+  rat cancel py`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		session, err := connectToKernel(ctx, args[0])
+		session, err := connectToRunningKernel(ctx, args[0])
 		if err != nil {
 			return err
 		}
@@ -428,12 +415,16 @@ var cancelCmd = &cobra.Command{
 }
 
 var doctorCmd = &cobra.Command{
-	Use:   "doctor [<lang>]",
-	Short: "Run diagnostics",
+	Use:     "doctor [<lang>]",
+	Short:   "Run diagnostics",
+	GroupID: "setup",
+	Long: `Run diagnostics for one language or for all implemented languages.
+
+Checks runtime detection, environment/tooling, writable directories,
+and the health of running kernels when applicable.`,
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			// Show all diagnostics.
 			printShellDoctor(inspectShellEnv())
 			fmt.Println("")
 			printPythonDoctor(inspectPythonEnv())
@@ -456,14 +447,81 @@ var doctorCmd = &cobra.Command{
 }
 
 var updateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Update rat binary and kernel dependencies",
+	Use:     "update",
+	Short:   "Update rat binary and kernel dependencies",
+	GroupID: "setup",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("update not yet implemented")
 	},
 }
 
-// ── helpers ─────────────────────────────────────────────────
+type statusRow struct {
+	Name   string
+	Status string
+	Cwd    string
+	Venv   string
+}
+
+func buildStatusRows(s *state.Store) ([]statusRow, error) {
+	kernels, err := s.ListKnown()
+	if err != nil {
+		return nil, err
+	}
+	runtimes, err := s.ListRuntimes()
+	if err != nil {
+		return nil, err
+	}
+
+	rows := make(map[string]statusRow, len(kernels)+len(runtimes))
+	for _, rt := range runtimes {
+		rows[rt.Name] = statusRow{
+			Name:   rt.Name,
+			Status: state.StatusStopped,
+			Cwd:    rt.Cwd,
+			Venv:   rt.Venv,
+		}
+	}
+	for _, k := range kernels {
+		rows[k.Name] = statusRow{
+			Name:   k.Name,
+			Status: k.Status,
+			Cwd:    k.Cwd,
+			Venv:   k.Venv,
+		}
+	}
+
+	names := make([]string, 0, len(rows))
+	for name := range rows {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]statusRow, 0, len(names))
+	for _, name := range names {
+		out = append(out, rows[name])
+	}
+	return out, nil
+}
+
+func confirmRemove(name string) (bool, error) {
+	if fi, err := os.Stdin.Stat(); err != nil {
+		return false, err
+	} else if (fi.Mode() & os.ModeCharDevice) == 0 {
+		return false, fmt.Errorf("refusing to prompt for confirmation without a terminal; rerun with --yes")
+	}
+
+	fmt.Fprintf(os.Stderr, "Remove runtime %s? [y/N] ", name)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
 
 func shortPath(p string) string {
 	home, err := os.UserHomeDir()
@@ -474,18 +532,4 @@ func shortPath(p string) string {
 		return "~/" + rel
 	}
 	return p
-}
-
-func timeAgo(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	}
 }

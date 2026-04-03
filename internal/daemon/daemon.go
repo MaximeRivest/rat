@@ -40,20 +40,20 @@ type StartOpts struct {
 // Returns the state entry on success.
 func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	// Check if already running and actually responding.
-	existing, err := store.Get(opts.Name)
+	existing, err := store.GetKnown(opts.Name)
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil {
+	if existing != nil && existing.Status == state.StatusRunning {
 		// PID is alive — but is the kernel actually functional?
 		// A stopped (Ctrl-Z) or hung process still has a live PID,
 		// and the Go HTTP server may respond even if the Python
-		// subprocess is wedged.  Do a real health check.
+		// subprocess is wedged. Do a real health check.
 		if err := healthCheck(existing.Port, 3*time.Second); err == nil {
 			return existing, nil // truly running and healthy
 		}
 		// Not responding — kill the stale process and start fresh.
-		stopKernel(store, existing)
+		forceStopAndRemove(store, existing)
 	}
 
 	// Find a free port
@@ -134,7 +134,7 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 
 // Stop terminates a kernel by name. Returns an error if not found.
 func Stop(store *state.Store, name string) error {
-	k, err := store.Get(name)
+	k, err := store.GetRunning(name)
 	if err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func Stop(store *state.Store, name string) error {
 
 // StopAll terminates all running kernels.
 func StopAll(store *state.Store) (int, error) {
-	kernels, err := store.List()
+	kernels, err := store.ListRunning()
 	if err != nil {
 		return 0, err
 	}
@@ -164,12 +164,40 @@ func StopAll(store *state.Store) (int, error) {
 	return count, nil
 }
 
-// stopKernel sends SIGTERM, waits briefly, escalates to SIGKILL, cleans state.
+// forceStopAndRemove kills a kernel and removes its state entry entirely.
+// Used when daemon.Start finds a stale/unhealthy kernel it needs to replace.
+func forceStopAndRemove(store *state.Store, k *state.Kernel) {
+	if k.PID > 0 {
+		syscall.Kill(k.PID, syscall.SIGTERM)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if !isAlive(k.PID) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if isAlive(k.PID) {
+			syscall.Kill(k.PID, syscall.SIGKILL)
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	store.Remove(k.Name)
+}
+
+// stopKernel sends SIGTERM, waits briefly, escalates to SIGKILL,
+// then marks the kernel as stopped in state (preserves the entry).
 func stopKernel(store *state.Store, k *state.Kernel) error {
+	if k == nil {
+		return fmt.Errorf("kernel is not running")
+	}
+	if k.Status != state.StatusRunning || k.PID <= 0 {
+		return fmt.Errorf("kernel %q is not running", k.Name)
+	}
+
 	// Send SIGTERM
 	if err := syscall.Kill(k.PID, syscall.SIGTERM); err != nil {
-		// Process already gone — just clean up state
-		store.Remove(k.Name)
+		// Process already gone — just mark stopped
+		store.MarkStopped(k.Name)
 		return nil
 	}
 
@@ -177,7 +205,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !isAlive(k.PID) {
-			store.Remove(k.Name)
+			store.MarkStopped(k.Name)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -186,7 +214,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	// Escalate to SIGKILL
 	syscall.Kill(k.PID, syscall.SIGKILL)
 	time.Sleep(100 * time.Millisecond)
-	store.Remove(k.Name)
+	store.MarkStopped(k.Name)
 	return nil
 }
 

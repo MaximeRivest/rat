@@ -3,8 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,17 +15,19 @@ func init() {
 }
 
 var installCmd = &cobra.Command{
-	Use:   "install <lang> [<lang>...]",
-	Short: "Install a language runtime",
-	Long: `Install one or more language runtimes.
+	Use:     "install <lang> [<lang>...]",
+	Short:   "Set up one or more language runtimes",
+	GroupID: "setup",
+	Long: `Set up one or more language runtimes for this project.
 
-For shell/bash, rat checks the host prerequisites (tmux, bash, stty),
-starts the shared shell kernel, and prints the next steps.
+Currently implemented:
+  py  Detect or create a project venv, install IPython + jedi, start the kernel
+  sh  Check shell prerequisites, start the shared shell kernel
 
 Examples:
+  rat install py
   rat install sh
-  rat install bash
-  rat install py r ju`,
+  rat install py sh`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		seen := map[string]bool{}
@@ -82,20 +82,19 @@ func installShellRuntime() error {
 		return fmt.Errorf("shell install incomplete: missing prerequisites")
 	}
 
-	cwd, err := os.Getwd()
+	r, err := resolveInput("sh")
 	if err != nil {
 		return err
 	}
-	cwd, _ = filepath.Abs(cwd)
 
-	k, err := daemon.Start(store(), daemon.StartOpts{Name: "sh", Lang: "sh", Cwd: cwd})
+	k, err := daemon.Start(store(), daemon.StartOpts{Name: r.Name, Lang: r.Lang, Cwd: r.Cwd, Venv: r.Venv})
 	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	session, err := connectToKernel(ctx, "sh")
+	session, err := connectToKernel(ctx, r.Name)
 	if err != nil {
 		return err
 	}

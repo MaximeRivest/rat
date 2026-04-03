@@ -40,8 +40,9 @@ func init() {
 }
 
 var serveCmd = &cobra.Command{
-	Use:   "serve <name>",
-	Short: "Start an MCP server for a language kernel",
+	Use:     "serve <name> [--http] [--port PORT]",
+	Short:   "MCP server (for app builders)",
+	GroupID: "setup",
 	Long: `Start an MCP server for a language kernel.
 
 By default, runs as a stdio server (for Claude Desktop, mcp2cli).

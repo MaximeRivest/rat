@@ -240,19 +240,15 @@ func installPythonRuntime() error {
 	}
 
 	// Start the kernel (project-aware, like `rat py`).
-	cwd, err := os.Getwd()
+	r, err := resolveInput("py")
 	if err != nil {
 		return err
 	}
-	cwd, _ = filepath.Abs(cwd)
 
-	s := store()
-	kernelName := resolveProjectKernelName(s, "py", cwd)
-
-	k, err := daemon.Start(s, daemon.StartOpts{
-		Name: kernelName,
-		Lang: "py",
-		Cwd:  cwd,
+	k, err := daemon.Start(store(), daemon.StartOpts{
+		Name: r.Name,
+		Lang: r.Lang,
+		Cwd:  r.Cwd,
 		Venv: check.VenvPath,
 	})
 	if err != nil {
@@ -262,7 +258,7 @@ func installPythonRuntime() error {
 	// Smoke test.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	session, err := connectToKernel(ctx, kernelName)
+	session, err := connectToKernel(ctx, r.Name)
 	if err != nil {
 		return err
 	}

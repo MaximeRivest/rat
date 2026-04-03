@@ -157,8 +157,11 @@ is the project root:
 
 ```
 .git  pyproject.toml  setup.py  setup.cfg  requirements.txt
-Pipfile  package.json  Cargo.toml  go.mod  DESCRIPTION
-Project.toml  JuliaProject.toml  renv.lock
+Pipfile  tox.ini  DESCRIPTION  renv.lock  Project.toml
+JuliaProject.toml  package.json  deno.json  Cargo.toml  go.mod
+Gemfile  composer.json  *.sln  *.csproj  pom.xml  build.gradle
+stack.yaml  mix.exs  pubspec.yaml  Package.swift  build.zig
+CMakeLists.txt  meson.build  Makefile  .editorconfig
 ```
 
 If none is found before reaching the filesystem root, there is no

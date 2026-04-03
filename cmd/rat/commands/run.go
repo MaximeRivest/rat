@@ -15,14 +15,21 @@ func init() {
 }
 
 var runCmd = &cobra.Command{
-	Use:   "run <name> '<code>'",
-	Short: "Run code on a kernel",
-	Long: `Run code on a named kernel. Auto-starts the kernel if needed.
+	Use:     "run <runtime> '<code>'",
+	Short:   "Run code on a kernel",
+	GroupID: "daily",
+	Long: `Execute code on a kernel. Resolves the runtime name, auto-starts
+if needed, runs the code, prints output.
+
+The runtime can be a language (py, sh, r, jl, js) which resolves
+to your current project's kernel, or a full name (py@myproject, py-ml).
 
 Examples:
+  rat run py 'x = 42'
+  rat run py 'print(x)'
   rat run sh 'ls -la'
-  rat run py 'x = 42; print(x)'
-  rat run r 'summary(mtcars)'`,
+  rat run py@myproject 'df.head()'
+  rat run py-ml 'import torch'`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]

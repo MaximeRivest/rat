@@ -10,80 +10,116 @@ import (
 
 	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/mcpclient"
+	resolver "github.com/maximerivest/rat/internal/resolve"
 	"github.com/maximerivest/rat/internal/state"
 )
 
-// connectToKernel finds a running kernel by name, auto-starts it if
-// needed, and returns an MCP session. This is the shared entry point
-// for run, look, reset, cancel — any command that talks to a kernel.
-func connectToKernel(ctx context.Context, name string) (*mcpclient.Session, error) {
-	s := store()
+type ensureAction string
 
-	// Check if already running
-	k, err := s.Get(name)
+const (
+	ensureNoop      ensureAction = "noop"
+	ensureStarted   ensureAction = "started"
+	ensureRestarted ensureAction = "restarted"
+)
+
+// resolveInput applies rat's unified resolution algorithm for the current cwd.
+func resolveInput(input string) (*resolver.Result, error) {
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
+	cwd, _ = filepath.Abs(cwd)
+	return resolver.Resolve(store(), input, cwd)
+}
 
-	// Not running — auto-start
-	if k == nil {
-		k, err = autoStart(s, name)
-		if err != nil {
-			return nil, err
-		}
-		fmt.Fprintf(os.Stderr, "%s started on http://127.0.0.1:%d/mcp (PID %d)\n", k.Name, k.Port, k.PID)
+// ensureResolvedKernel makes sure the resolved kernel is running.
+// It returns the running kernel plus whether this call started/restarted it.
+func ensureResolvedKernel(r *resolver.Result) (*state.Kernel, ensureAction, error) {
+	s := store()
+	before, err := s.GetRunning(r.Name)
+	if err != nil {
+		return nil, ensureNoop, err
 	}
 
+	k, err := daemon.Start(s, daemon.StartOpts{
+		Name: r.Name,
+		Lang: r.Lang,
+		Cwd:  r.Cwd,
+		Venv: r.Venv,
+	})
+	if err != nil {
+		return nil, ensureNoop, err
+	}
+
+	switch {
+	case before == nil:
+		return k, ensureStarted, nil
+	case before.PID != k.PID || before.Port != k.Port:
+		return k, ensureRestarted, nil
+	default:
+		return k, ensureNoop, nil
+	}
+}
+
+// ensureKernel resolves input and makes sure the target kernel is running.
+func ensureKernel(input string) (*state.Kernel, ensureAction, error) {
+	r, err := resolveInput(input)
+	if err != nil {
+		return nil, ensureNoop, err
+	}
+	return ensureResolvedKernel(r)
+}
+
+// runningKernel resolves input and returns a running kernel only.
+func runningKernel(input string) (*state.Kernel, error) {
+	r, err := resolveInput(input)
+	if err != nil {
+		return nil, err
+	}
+	k, err := store().GetRunning(r.Name)
+	if err != nil {
+		return nil, err
+	}
+	if k == nil {
+		return nil, fmt.Errorf("kernel %q is not running", r.Name)
+	}
+	return k, nil
+}
+
+// connectToKernel resolves a runtime, auto-starts it if needed, and returns
+// an MCP session.
+func connectToKernel(ctx context.Context, input string) (*mcpclient.Session, error) {
+	k, action, err := ensureKernel(input)
+	if err != nil {
+		return nil, err
+	}
+	printKernelAction(k, action)
 	return mcpclient.Connect(ctx, k.Port)
 }
 
-// autoStart starts a kernel for the given name. It first checks for
-// a saved runtime config (from `rat add`), then falls back to
-// resolving the name as a language alias.
-func autoStart(s *state.Store, name string) (*state.Kernel, error) {
-	// Check for a saved named runtime first.
-	rt, _ := s.GetRuntime(name)
-	if rt != nil {
-		cwd := rt.Cwd
-		if cwd == "" {
-			cwd, _ = os.Getwd()
-			cwd, _ = filepath.Abs(cwd)
-		}
-		return daemon.Start(s, daemon.StartOpts{
-			Name: rt.Name,
-			Lang: rt.Lang,
-			Cwd:  cwd,
-			Venv: rt.Venv,
-		})
-	}
-
-	// Fall back to language alias.
-	lang, err := resolveLang(name)
+// connectToRunningKernel resolves a runtime and connects only if it is already running.
+func connectToRunningKernel(ctx context.Context, input string) (*mcpclient.Session, error) {
+	k, err := runningKernel(input)
 	if err != nil {
-		return nil, fmt.Errorf("unknown runtime %q — use 'rat add %s' to register it, or use a language name (py, sh, r, ju, js)", name, name)
+		return nil, err
 	}
+	return mcpclient.Connect(ctx, k.Port)
+}
 
-	cwd, _ := os.Getwd()
-	cwd, _ = filepath.Abs(cwd)
-
-	// Auto-detect venv for Python.
-	venv := ""
-	if lang == "py" {
-		venv = findVenv(cwd)
+func printKernelAction(k *state.Kernel, action ensureAction) {
+	if k == nil || action == ensureNoop {
+		return
 	}
-
-	return daemon.Start(s, daemon.StartOpts{
-		Name: name,
-		Lang: lang,
-		Cwd:  cwd,
-		Venv: venv,
-	})
+	verb := string(action)
+	venvMsg := ""
+	if k.Venv != "" {
+		venvMsg = fmt.Sprintf(" venv=%s", shortPath(k.Venv))
+	}
+	fmt.Fprintf(os.Stderr, "%s %s on http://127.0.0.1:%d/mcp (PID %d)%s\n", k.Name, verb, k.Port, k.PID, venvMsg)
 }
 
 // extractText pulls the text content from an MCP tool result.
 func extractText(result *mcp.CallToolResult) string {
-	// mcp.CallToolResult is from mcp-go — content is a slice of
-	// content blocks. We concatenate all text blocks.
 	if result == nil {
 		return ""
 	}

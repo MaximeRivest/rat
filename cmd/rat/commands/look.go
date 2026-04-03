@@ -22,15 +22,19 @@ func init() {
 }
 
 var lookCmd = &cobra.Command{
-	Use:   "look <name>",
-	Short: "Inspect variables and state on a kernel",
-	Long: `Inspect the state of a running kernel — variables, types, values, or completions.
+	Use:     "look <runtime> [--at SYMBOL]",
+	Short:   "Inspect variables and state",
+	GroupID: "daily",
+	Long: `Inspect a kernel's namespace. Without --at, shows a variable overview.
+With --at, inspects a specific symbol in detail. Auto-starts if needed.
+
+The runtime can be a language (py, sh, r, jl, js) which resolves
+to your current project's kernel, or a full name (py@myproject, py-ml).
 
 Examples:
-  rat look sh                         # list all variables
-  rat look py --at df                 # inspect df in detail
-  rat look sh --code 'ls Pr'          # get completions at end of code
-  rat look sh --code 'echo $PA' --cursor 8`,
+  rat look py                 # variable overview
+  rat look py --at df         # inspect df in detail
+  rat look py --at df.columns # drill into attribute`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]

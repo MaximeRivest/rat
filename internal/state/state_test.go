@@ -16,23 +16,23 @@ func tempStore(t *testing.T) *Store {
 func TestEmptyState(t *testing.T) {
 	s := tempStore(t)
 
-	kernels, err := s.List()
+	kernels, err := s.ListKnown()
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListKnown: %v", err)
 	}
 	if len(kernels) != 0 {
 		t.Fatalf("expected 0 kernels, got %d", len(kernels))
 	}
 }
 
-func TestPutAndGet(t *testing.T) {
+func TestPutAndGetKnown(t *testing.T) {
 	s := tempStore(t)
 
 	k := Kernel{
 		Name:    "sh",
 		Lang:    "sh",
 		Port:    8720,
-		PID:     os.Getpid(), // use our own PID so it passes alive check
+		PID:     os.Getpid(),
 		Cwd:     "/tmp",
 		Started: time.Now(),
 	}
@@ -41,24 +41,27 @@ func TestPutAndGet(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	got, err := s.Get("sh")
+	got, err := s.GetKnown("sh")
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("GetKnown: %v", err)
 	}
 	if got == nil {
-		t.Fatal("Get returned nil")
+		t.Fatal("GetKnown returned nil")
 	}
 	if got.Name != "sh" || got.Port != 8720 || got.PID != os.Getpid() {
 		t.Fatalf("unexpected kernel: %+v", got)
 	}
+	if got.Status != StatusRunning {
+		t.Fatalf("expected status %q, got %q", StatusRunning, got.Status)
+	}
 }
 
-func TestGetNotFound(t *testing.T) {
+func TestGetKnownNotFound(t *testing.T) {
 	s := tempStore(t)
 
-	got, err := s.Get("nonexistent")
+	got, err := s.GetKnown("nonexistent")
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("GetKnown: %v", err)
 	}
 	if got != nil {
 		t.Fatalf("expected nil, got %+v", got)
@@ -75,7 +78,7 @@ func TestPutReplacesExisting(t *testing.T) {
 	s.Put(k1)
 	s.Put(k2)
 
-	kernels, _ := s.List()
+	kernels, _ := s.ListKnown()
 	if len(kernels) != 1 {
 		t.Fatalf("expected 1 kernel after replace, got %d", len(kernels))
 	}
@@ -102,7 +105,7 @@ func TestRemove(t *testing.T) {
 		t.Fatal("Remove returned false")
 	}
 
-	kernels, _ := s.List()
+	kernels, _ := s.ListKnown()
 	if len(kernels) != 1 {
 		t.Fatalf("expected 1 kernel after remove, got %d", len(kernels))
 	}
@@ -123,33 +126,130 @@ func TestRemoveNotFound(t *testing.T) {
 	}
 }
 
-func TestDeadPIDCleanup(t *testing.T) {
+func TestDeadPIDMarkedStopped(t *testing.T) {
 	s := tempStore(t)
 
-	// Write a kernel with a PID that definitely doesn't exist
 	k := Kernel{
 		Name:    "dead",
 		Lang:    "sh",
 		Port:    9999,
-		PID:     999999999, // hopefully doesn't exist
+		PID:     999999999,
+		Status:  StatusRunning,
 		Cwd:     "/tmp",
 		Started: time.Now(),
 	}
 	s.Put(k)
 
-	// Verify it was written
-	data, _ := os.ReadFile(s.Path())
-	if len(data) == 0 {
-		t.Fatal("state file is empty after Put")
+	kernels, err := s.ListKnown()
+	if err != nil {
+		t.Fatalf("ListKnown: %v", err)
+	}
+	if len(kernels) != 1 {
+		t.Fatalf("expected 1 kernel (stopped), got %d", len(kernels))
+	}
+	if kernels[0].Status != StatusStopped {
+		t.Fatalf("expected status %q, got %q", StatusStopped, kernels[0].Status)
+	}
+	if kernels[0].PID != 0 {
+		t.Fatalf("expected PID 0 for stopped kernel, got %d", kernels[0].PID)
+	}
+	if kernels[0].Port != 0 {
+		t.Fatalf("expected Port 0 for stopped kernel, got %d", kernels[0].Port)
+	}
+}
+
+func TestListRunning(t *testing.T) {
+	s := tempStore(t)
+	pid := os.Getpid()
+
+	s.Put(Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: pid, Cwd: "/tmp", Started: time.Now()})
+	s.Put(Kernel{Name: "old", Lang: "py", Port: 0, PID: 0, Status: StatusStopped, Cwd: "/old", Started: time.Now()})
+
+	running, err := s.ListRunning()
+	if err != nil {
+		t.Fatalf("ListRunning: %v", err)
+	}
+	if len(running) != 1 {
+		t.Fatalf("expected 1 running kernel, got %d", len(running))
+	}
+	if running[0].Name != "sh" {
+		t.Fatalf("expected sh, got %s", running[0].Name)
 	}
 
-	// List should clean it up
-	kernels, err := s.List()
+	all, err := s.ListKnown()
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("ListKnown: %v", err)
 	}
-	if len(kernels) != 0 {
-		t.Fatalf("expected dead kernel to be cleaned up, got %d", len(kernels))
+	if len(all) != 2 {
+		t.Fatalf("expected 2 total kernels, got %d", len(all))
+	}
+}
+
+func TestGetRunning(t *testing.T) {
+	s := tempStore(t)
+	pid := os.Getpid()
+
+	s.Put(Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: pid, Cwd: "/tmp", Started: time.Now()})
+	s.Put(Kernel{Name: "old", Lang: "py", Port: 0, PID: 0, Status: StatusStopped, Cwd: "/old", Started: time.Now()})
+
+	got, err := s.GetRunning("sh")
+	if err != nil {
+		t.Fatalf("GetRunning: %v", err)
+	}
+	if got == nil || got.Name != "sh" {
+		t.Fatalf("expected running kernel sh, got %+v", got)
+	}
+
+	stopped, err := s.GetRunning("old")
+	if err != nil {
+		t.Fatalf("GetRunning(old): %v", err)
+	}
+	if stopped != nil {
+		t.Fatalf("expected nil for stopped kernel, got %+v", stopped)
+	}
+}
+
+func TestMarkStopped(t *testing.T) {
+	s := tempStore(t)
+	pid := os.Getpid()
+
+	s.Put(Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: pid, Cwd: "/tmp", Started: time.Now()})
+
+	found, err := s.MarkStopped("sh")
+	if err != nil {
+		t.Fatalf("MarkStopped: %v", err)
+	}
+	if !found {
+		t.Fatal("MarkStopped returned false")
+	}
+
+	got, _ := s.GetKnown("sh")
+	if got == nil {
+		t.Fatal("kernel disappeared after MarkStopped")
+	}
+	if got.Status != StatusStopped {
+		t.Fatalf("expected status %q, got %q", StatusStopped, got.Status)
+	}
+	if got.PID != 0 {
+		t.Fatalf("expected PID 0, got %d", got.PID)
+	}
+	if got.Port != 0 {
+		t.Fatalf("expected Port 0, got %d", got.Port)
+	}
+	if got.Stopped.IsZero() {
+		t.Fatal("expected Stopped time to be set")
+	}
+}
+
+func TestMarkStoppedNotFound(t *testing.T) {
+	s := tempStore(t)
+
+	found, err := s.MarkStopped("nonexistent")
+	if err != nil {
+		t.Fatalf("MarkStopped: %v", err)
+	}
+	if found {
+		t.Fatal("MarkStopped returned true for nonexistent")
 	}
 }
 
@@ -161,13 +261,12 @@ func TestMultipleKernels(t *testing.T) {
 	s.Put(Kernel{Name: "py", Lang: "py", Port: 8717, PID: pid, Cwd: "/home", Started: time.Now()})
 	s.Put(Kernel{Name: "py-ml", Lang: "py", Port: 8718, PID: pid, Cwd: "/ml", Venv: "/ml/.venv", Started: time.Now()})
 
-	kernels, _ := s.List()
+	kernels, _ := s.ListKnown()
 	if len(kernels) != 3 {
 		t.Fatalf("expected 3 kernels, got %d", len(kernels))
 	}
 
-	// Check Get for named runtime
-	ml, _ := s.Get("py-ml")
+	ml, _ := s.GetKnown("py-ml")
 	if ml == nil {
 		t.Fatal("py-ml not found")
 	}
@@ -180,7 +279,6 @@ func TestNextPort(t *testing.T) {
 	s := tempStore(t)
 	pid := os.Getpid()
 
-	// Claim port 8717 in state
 	s.Put(Kernel{Name: "py", Lang: "py", Port: 8717, PID: pid, Cwd: "/tmp", Started: time.Now()})
 
 	port, err := s.NextPort(8717)
@@ -198,14 +296,12 @@ func TestNextPort(t *testing.T) {
 func TestCorruptedStateFile(t *testing.T) {
 	s := tempStore(t)
 
-	// Write garbage
 	os.MkdirAll(filepath.Dir(s.Path()), 0755)
 	os.WriteFile(s.Path(), []byte("{{{{not yaml at all!!!!"), 0644)
 
-	// Should recover gracefully
-	kernels, err := s.List()
+	kernels, err := s.ListKnown()
 	if err != nil {
-		t.Fatalf("List on corrupted file: %v", err)
+		t.Fatalf("ListKnown on corrupted file: %v", err)
 	}
 	if len(kernels) != 0 {
 		t.Fatalf("expected 0 kernels from corrupted file, got %d", len(kernels))
@@ -217,20 +313,56 @@ func TestStateFilePersistence(t *testing.T) {
 	path := filepath.Join(dir, "state.yaml")
 	pid := os.Getpid()
 
-	// Write with one store instance
 	s1 := NewStore(path)
 	s1.Put(Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: pid, Cwd: "/tmp", Started: time.Now()})
 
-	// Read with a fresh store instance (simulates separate process)
 	s2 := NewStore(path)
-	got, err := s2.Get("sh")
+	got, err := s2.GetKnown("sh")
 	if err != nil {
-		t.Fatalf("Get from fresh store: %v", err)
+		t.Fatalf("GetKnown from fresh store: %v", err)
 	}
 	if got == nil {
 		t.Fatal("kernel not persisted across store instances")
 	}
 	if got.Port != 8720 {
 		t.Fatalf("expected port 8720, got %d", got.Port)
+	}
+}
+
+func TestPutDefaultsToRunning(t *testing.T) {
+	s := tempStore(t)
+
+	k := Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: os.Getpid(), Cwd: "/tmp", Started: time.Now()}
+	s.Put(k)
+
+	got, _ := s.GetKnown("sh")
+	if got.Status != StatusRunning {
+		t.Fatalf("expected default status %q, got %q", StatusRunning, got.Status)
+	}
+}
+
+func TestStoppedKernelSurvivesListKnown(t *testing.T) {
+	s := tempStore(t)
+
+	s.Put(Kernel{
+		Name:    "old",
+		Lang:    "py",
+		Status:  StatusStopped,
+		PID:     0,
+		Port:    0,
+		Cwd:     "/old",
+		Started: time.Now(),
+		Stopped: time.Now(),
+	})
+
+	kernels, err := s.ListKnown()
+	if err != nil {
+		t.Fatalf("ListKnown: %v", err)
+	}
+	if len(kernels) != 1 {
+		t.Fatalf("expected 1 stopped kernel, got %d", len(kernels))
+	}
+	if kernels[0].Status != StatusStopped {
+		t.Fatalf("expected stopped, got %s", kernels[0].Status)
 	}
 }
