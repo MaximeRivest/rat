@@ -1,5 +1,5 @@
 > [!WARNING]
-> In early development. Subject to change. Use with caution.
+> In early development. README is the vision, not yet fully implemented. Subject to change. Use with caution.
 
 # rat
 
