@@ -31,7 +31,7 @@ A REPL is a REPL. It shouldn't matter whether you're typing in a terminal, talki
 
 ```
 ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-│  Terminal    │ │   Claude    │ │   Cursor    │ │  Notebook   │
+│  Terminal   │ │   Claude    │ │   Cursor    │ │  Notebook   │
 │  rat py     │ │   Desktop   │ │   agent     │ │  app        │
 │  (IPython)  │ │             │ │             │ │             │
 └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
