@@ -42,10 +42,11 @@ func ensureResolvedKernel(r *resolver.Result) (*state.Kernel, ensureAction, erro
 	}
 
 	k, err := daemon.Start(s, daemon.StartOpts{
-		Name: r.Name,
-		Lang: r.Lang,
-		Cwd:  r.Cwd,
-		Venv: r.Venv,
+		Name:        r.Name,
+		Lang:        r.Lang,
+		Cwd:         r.Cwd,
+		Venv:        r.Venv,
+		RuntimePath: r.RuntimePath,
 	})
 	if err != nil {
 		return nil, ensureNoop, err

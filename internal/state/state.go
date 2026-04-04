@@ -41,10 +41,11 @@ type Kernel struct {
 // across restarts and is used by resolution/auto-start to know which
 // cwd/venv to use for a given name.
 type Runtime struct {
-	Name string `yaml:"name"`           // unique name: "py-ml", "py-web"
-	Lang string `yaml:"lang"`           // canonical language: "py", "r", ...
-	Cwd  string `yaml:"cwd,omitempty"`  // working directory
-	Venv string `yaml:"venv,omitempty"` // venv path (py only)
+	Name        string `yaml:"name"`                   // unique name: "py-ml", "py-web"
+	Lang        string `yaml:"lang"`                   // canonical language: "py", "r", ...
+	Cwd         string `yaml:"cwd,omitempty"`          // working directory
+	Venv        string `yaml:"venv,omitempty"`         // venv path (py only)
+	RuntimePath string `yaml:"runtime_path,omitempty"` // explicit binary path (e.g. /opt/python3.11/bin/python3)
 }
 
 // File is the top-level state file structure.

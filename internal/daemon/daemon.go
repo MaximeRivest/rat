@@ -30,10 +30,11 @@ const (
 
 // StartOpts configures a kernel start.
 type StartOpts struct {
-	Name string // kernel name ("sh", "py", "py-ml")
-	Lang string // canonical language ("sh", "py", ...)
-	Cwd  string // working directory
-	Venv string // venv path (py only)
+	Name        string // kernel name ("sh", "py", "py-ml")
+	Lang        string // canonical language ("sh", "py", ...)
+	Cwd         string // working directory
+	Venv        string // venv path (py only)
+	RuntimePath string // explicit binary path (e.g. /opt/python3.11/bin/python3)
 }
 
 // Start launches a kernel in the background and records it in state.
@@ -76,6 +77,9 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	if opts.Venv != "" {
 		args = append(args, "--venv", opts.Venv)
+	}
+	if opts.RuntimePath != "" {
+		args = append(args, "--runtime", opts.RuntimePath)
 	}
 
 	cmd := exec.Command(self, args...)

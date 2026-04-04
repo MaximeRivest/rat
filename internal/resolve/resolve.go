@@ -26,11 +26,12 @@ import (
 
 // Result is what Resolve returns.
 type Result struct {
-	Name  string // resolved kernel name (e.g. "py@myproject", "py-ml")
-	Lang  string // canonical language (e.g. "py", "sh")
-	Cwd   string // working directory for the kernel
-	Venv  string // detected venv path (py only, may be "")
-	IsNew bool   // true if no existing kernel/runtime matches
+	Name        string // resolved kernel name (e.g. "py@myproject", "py-ml")
+	Lang        string // canonical language (e.g. "py", "sh")
+	Cwd         string // working directory for the kernel
+	Venv        string // detected venv path (py only, may be "")
+	RuntimePath string // explicit binary path (from rat add --runtime)
+	IsNew       bool   // true if no existing kernel/runtime matches
 }
 
 // Resolve maps user input + cwd to a concrete kernel identity.
@@ -70,10 +71,11 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 				rtCwd = cwd
 			}
 			return &Result{
-				Name: rt.Name,
-				Lang: rt.Lang,
-				Cwd:  rtCwd,
-				Venv: rt.Venv,
+				Name:        rt.Name,
+				Lang:        rt.Lang,
+				Cwd:         rtCwd,
+				Venv:        rt.Venv,
+				RuntimePath: rt.RuntimePath,
 			}, nil
 		}
 	}
@@ -115,10 +117,11 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 					rtCwd = cwd
 				}
 				matches = append(matches, Result{
-					Name: rt.Name,
-					Lang: rt.Lang,
-					Cwd:  rtCwd,
-					Venv: rt.Venv,
+					Name:        rt.Name,
+					Lang:        rt.Lang,
+					Cwd:         rtCwd,
+					Venv:        rt.Venv,
+					RuntimePath: rt.RuntimePath,
 				})
 			}
 		}
@@ -182,10 +185,11 @@ func resolveLanguage(
 				rtCwd = root
 			}
 			return &Result{
-				Name: rt.Name,
-				Lang: rt.Lang,
-				Cwd:  rtCwd,
-				Venv: rt.Venv,
+				Name:        rt.Name,
+				Lang:        rt.Lang,
+				Cwd:         rtCwd,
+				Venv:        rt.Venv,
+				RuntimePath: rt.RuntimePath,
 			}, nil
 		}
 	}

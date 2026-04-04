@@ -103,8 +103,17 @@ type Python struct {
 
 // New creates a new Python kernel. If venv is non-empty, it is used
 // as the virtual environment (its python binary is preferred).
-func New(name, cwd, venv string) (*Python, error) {
-	cmdPath, cmdArgs, err := detectPythonCommand(venv)
+// If runtimePath is non-empty, it overrides all auto-detection and
+// uses that exact binary.
+func New(name, cwd, venv, runtimePath string) (*Python, error) {
+	var cmdPath string
+	var cmdArgs []string
+	var err error
+	if runtimePath != "" {
+		cmdPath = runtimePath
+	} else {
+		cmdPath, cmdArgs, err = detectPythonCommand(venv)
+	}
 	if err != nil {
 		return nil, err
 	}

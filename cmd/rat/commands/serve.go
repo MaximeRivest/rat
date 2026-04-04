@@ -21,12 +21,13 @@ import (
 )
 
 var (
-	serveHTTPFlag bool
-	servePort     int
-	serveCwd      string
-	serveLangFlag string
-	serveNameFlag string
-	serveVenvFlag string
+	serveHTTPFlag    bool
+	servePort        int
+	serveCwd         string
+	serveLangFlag    string
+	serveNameFlag    string
+	serveVenvFlag    string
+	serveRuntimeFlag string
 )
 
 func init() {
@@ -36,6 +37,7 @@ func init() {
 	serveCmd.Flags().StringVar(&serveLangFlag, "lang", "", "Canonical language (for named runtimes)")
 	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
 	serveCmd.Flags().StringVar(&serveVenvFlag, "venv", "", "Python venv path (py only)")
+	serveCmd.Flags().StringVar(&serveRuntimeFlag, "runtime", "", "Path to language binary (e.g. /opt/python3.11/bin/python3)")
 
 	rootCmd.AddCommand(serveCmd)
 }
@@ -50,10 +52,15 @@ This is the low-level building block behind every rat kernel. By
 default, it runs as a stdio server. With --http, it runs as an HTTP
 server for shared access from multiple clients.
 
+Use --runtime to specify an exact interpreter binary, bypassing
+auto-detection. This is passed through automatically when you start
+a kernel created with 'rat add --runtime'.
+
 Examples:
   rat serve sh              # MCP stdio server for bash
   rat serve sh --http       # MCP HTTP server on :8720
-  rat serve py --http --port 8717 --cwd ~/project`,
+  rat serve py --http --port 8717 --cwd ~/project
+  rat serve py --http --runtime /opt/python3.11/bin/python3`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runServe(args[0])
@@ -91,7 +98,7 @@ func runServe(input string) error {
 	case "sh":
 		k, err = bash.New(name, cwd)
 	case "py":
-		k, err = python.New(name, cwd, serveVenvFlag)
+		k, err = python.New(name, cwd, serveVenvFlag, serveRuntimeFlag)
 	// Future:
 	// case "r":
 	//     k, err = rlang.New(cwd)

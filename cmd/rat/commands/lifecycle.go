@@ -60,15 +60,17 @@ var setupCmd = &cobra.Command{
 }
 
 var (
-	addVenv string
-	addCwd  string
-	addLang string
+	addVenv    string
+	addCwd     string
+	addLang    string
+	addRuntime string
 )
 
 func init() {
 	addCmd.Flags().StringVar(&addVenv, "venv", "", "Python venv path")
 	addCmd.Flags().StringVar(&addCwd, "cwd", "", "Working directory (default: current)")
 	addCmd.Flags().StringVar(&addLang, "lang", "", "Language (default: inferred from name prefix)")
+	addCmd.Flags().StringVar(&addRuntime, "runtime", "", "Path to language binary (e.g. /opt/python3.11/bin/python3)")
 }
 
 var addCmd = &cobra.Command{
@@ -83,10 +85,15 @@ or set explicitly with --lang.
 The optional second argument sets the working directory (same as --cwd).
 If a Python venv (.venv/) is found in the directory, it is auto-detected.
 
+Use --runtime to point at a specific binary. This overrides auto-detection
+so rat uses exactly the interpreter you want.
+
 Examples:
   rat add py-ml ~/ml                  # auto-detect venv in ~/ml
   rat add py-web --venv ~/web/.venv --cwd ~/web
-  rat add r-stats --lang r --cwd ~/stats`,
+  rat add r-stats --lang r --cwd ~/stats
+  rat add py-311 --runtime /opt/python3.11/bin/python3
+  rat add jl-gpu --runtime ~/julia-nightly/bin/julia --cwd ~/gpu`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -124,11 +131,17 @@ Examples:
 			venv = findVenv(cwd)
 		}
 
+		runtimePath := addRuntime
+		if runtimePath != "" {
+			runtimePath, _ = filepath.Abs(runtimePath)
+		}
+
 		if err := store().PutRuntime(state.Runtime{
-			Name: name,
-			Lang: lang,
-			Cwd:  cwd,
-			Venv: venv,
+			Name:        name,
+			Lang:        lang,
+			Cwd:         cwd,
+			Venv:        venv,
+			RuntimePath: runtimePath,
 		}); err != nil {
 			return err
 		}
@@ -136,6 +149,9 @@ Examples:
 		fmt.Fprintf(os.Stderr, "Added %s (lang=%s cwd=%s", name, lang, shortPath(cwd))
 		if venv != "" {
 			fmt.Fprintf(os.Stderr, " venv=%s", shortPath(venv))
+		}
+		if runtimePath != "" {
+			fmt.Fprintf(os.Stderr, " runtime=%s", runtimePath)
 		}
 		fmt.Fprintln(os.Stderr, ")")
 		fmt.Fprintf(os.Stderr, "Start it: rat start %s\n", name)
@@ -400,10 +416,11 @@ Examples:
 		}
 
 		k, err := daemon.Start(s, daemon.StartOpts{
-			Name: r.Name,
-			Lang: r.Lang,
-			Cwd:  r.Cwd,
-			Venv: r.Venv,
+			Name:        r.Name,
+			Lang:        r.Lang,
+			Cwd:         r.Cwd,
+			Venv:        r.Venv,
+			RuntimePath: r.RuntimePath,
 		})
 		if err != nil {
 			return err
