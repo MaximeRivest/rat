@@ -16,10 +16,12 @@ import (
 	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/mcpclient"
 	"github.com/maximerivest/rat/internal/state"
+	"github.com/maximerivest/rat/internal/termstyle"
 )
 
 var (
 	stopAll       bool
+	removeAll     bool
 	rmYes         bool
 	statusVerbose bool
 )
@@ -27,11 +29,12 @@ var (
 func init() {
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show details: URL, PID, memory, clients, runtime")
 	stopCmd.Flags().BoolVar(&stopAll, "all", false, "Stop all running kernels")
-	rmCmd.Flags().BoolVar(&rmYes, "yes", false, "Delete without confirmation")
+	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Delete all runtime state entries")
+	removeCmd.Flags().BoolVar(&rmYes, "yes", false, "Delete without confirmation")
 
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(addCmd)
-	rootCmd.AddCommand(rmCmd)
+	rootCmd.AddCommand(removeCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(startCmd)
 	rootCmd.AddCommand(stopCmd)
@@ -140,23 +143,70 @@ Examples:
 	},
 }
 
-var rmCmd = &cobra.Command{
-	Use:     "rm <name>",
+var removeCmd = &cobra.Command{
+	Use:     "remove <name> [--all]",
+	Aliases: []string{"rm"},
 	Short:   "Delete a runtime's state",
 	GroupID: "setup",
 	Long: `Stop the kernel if running and remove the state entry entirely.
 Works on any runtime — custom (py-ml) or auto-generated (py@myproject).
 
 This is the only way to fully erase a runtime from state.
-'rat stop' marks it stopped; 'rat rm' deletes it.
+'rat stop' marks it stopped; 'rat remove' deletes it.
 
 By default, asks for confirmation. Use --yes to skip the prompt.
 
 Examples:
-  rat rm py-ml
-  rat rm py@myproject`,
-	Args: cobra.ExactArgs(1),
+  rat remove py-ml
+  rat remove py@myproject
+  rat remove --all`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		if removeAll {
+			if len(args) != 0 {
+				return fmt.Errorf("cannot pass a name with --all")
+			}
+			return nil
+		}
+		if len(args) != 1 {
+			return fmt.Errorf("specify a runtime name or use --all")
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		s := store()
+		if removeAll {
+			names, err := allRuntimeNames(s)
+			if err != nil {
+				return err
+			}
+			if len(names) == 0 {
+				fmt.Fprintln(os.Stderr, "No runtimes to remove.")
+				return nil
+			}
+			if !rmYes {
+				ok, err := confirmRemoveAll(names)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					fmt.Fprintln(os.Stderr, "Cancelled.")
+					return nil
+				}
+			}
+			removed := 0
+			for _, name := range names {
+				ok, err := removeRuntimeByName(s, name)
+				if err != nil {
+					return err
+				}
+				if ok {
+					removed++
+				}
+			}
+			fmt.Fprintf(os.Stderr, "Removed %d runtime(s).\n", removed)
+			return nil
+		}
+
 		r, err := resolveInput(args[0])
 		if err != nil {
 			return err
@@ -175,22 +225,11 @@ Examples:
 			}
 		}
 
-		s := store()
-		found := false
-		if k, _ := s.GetRunning(r.Name); k != nil {
-			if err := daemon.Stop(s, r.Name); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "%s stopped.\n", r.Name)
-			found = true
+		removed, err := removeRuntimeByName(s, r.Name)
+		if err != nil {
+			return err
 		}
-		if removed, _ := s.Remove(r.Name); removed {
-			found = true
-		}
-		if removed, _ := s.RemoveRuntime(r.Name); removed {
-			found = true
-		}
-		if !found {
+		if !removed {
 			return fmt.Errorf("runtime %q not found", r.Name)
 		}
 
@@ -296,7 +335,7 @@ var stopCmd = &cobra.Command{
 	Long: `Stop a kernel.
 
 The state entry is preserved and marked stopped, so the name remains
-resolvable. Use 'rat rm' to delete the runtime from state entirely.
+resolvable. Use 'rat remove' to delete the runtime from state entirely.
 
 Examples:
   rat stop py
@@ -571,64 +610,102 @@ func enrichStatusRows(rows []statusRow) {
 
 func printCompactStatus(rows []statusRow) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATUS\tCWD\tVENV")
+	fmt.Fprintln(w, termstyle.Dim("NAME\tSTATUS\tCWD\tVENV"))
 	for _, row := range rows {
-		venv := shortPath(row.Venv)
+		venv := shortVenv(row.Venv, row.Cwd)
 		if venv == "" {
 			venv = "—"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\n", row.Name, row.Status, shortPath(row.Cwd), venv, formatStatusNote(row))
+		name := termstyle.Bold(row.Name)
+		status := formatColoredStatus(row.Status)
+		note := formatStatusNote(row)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\n", name, status, termstyle.Dim(shortPath(row.Cwd)), termstyle.Dim(venv), note)
 	}
 	w.Flush()
 }
 
 func printVerboseStatus(rows []statusRow) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATUS\tRUNTIME\tCLIENTS\tMEM\tIDLE\tURL\tPID\tCWD\tVENV")
-	for _, row := range rows {
-		venv := shortPath(row.Venv)
-		if venv == "" {
-			venv = "—"
+	for i, row := range rows {
+		if i > 0 {
+			fmt.Println()
 		}
-
-		rt := "—"
-		clients := "—"
-		mem := "—"
-		idle := "—"
-		url := "—"
-		pid := "—"
 
 		if row.Status == state.StatusRunning {
-			if row.RuntimeVersion != "" {
-				rt = row.RuntimeVersion
-			}
-			if row.ClientNames != "" {
-				clients = row.ClientNames
-			} else if row.Clients > 0 {
-				clients = fmt.Sprintf("%d", row.Clients)
-			} else {
-				clients = "0"
-			}
-			if row.MemoryMB > 0 {
-				mem = fmt.Sprintf("%dMB", row.MemoryMB)
-			}
-			if row.IdleSeconds > 0 {
-				idle = formatCompactDuration(time.Duration(row.IdleSeconds) * time.Second)
-			} else {
-				idle = "<1m"
-			}
-			if row.Port > 0 {
-				url = fmt.Sprintf("http://127.0.0.1:%d/mcp", row.Port)
-			}
-			if row.PID > 0 {
-				pid = fmt.Sprintf("%d", row.PID)
-			}
+			printRunningCard(row)
+		} else {
+			printStoppedCard(row)
 		}
-
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			row.Name, row.Status, rt, clients, mem, idle, url, pid, shortPath(row.Cwd), venv)
 	}
-	w.Flush()
+}
+
+func printRunningCard(row statusRow) {
+	// Line 1: name + status
+	fmt.Printf("%s  %s\n", termstyle.Bold(row.Name), termstyle.Green("running"))
+
+	// Line 2: vitals — runtime · memory · idle · PID
+	var vitals []string
+	if row.RuntimeVersion != "" {
+		vitals = append(vitals, row.RuntimeVersion)
+	}
+	if row.MemoryMB > 0 {
+		vitals = append(vitals, fmt.Sprintf("%dMB", row.MemoryMB))
+	}
+	idleStr := "idle <1m"
+	if row.IdleSeconds > 0 {
+		idleStr = "idle " + formatCompactDuration(time.Duration(row.IdleSeconds)*time.Second)
+	}
+	if row.IdleSeconds >= int(idleWarningAfter.Seconds()) {
+		vitals = append(vitals, termstyle.Yellow("⚠ "+idleStr))
+	} else {
+		vitals = append(vitals, idleStr)
+	}
+	if row.PID > 0 {
+		vitals = append(vitals, fmt.Sprintf("PID %d", row.PID))
+	}
+	fmt.Printf("  %s\n", termstyle.Dim(strings.Join(vitals, " · ")))
+
+	// Line 3: URL
+	if row.Port > 0 {
+		fmt.Printf("  %s\n", termstyle.Cyan(fmt.Sprintf("http://127.0.0.1:%d/mcp", row.Port)))
+	}
+
+	// Line 4: location
+	loc := shortPath(row.Cwd)
+	if row.Venv != "" {
+		loc += " · " + shortVenv(row.Venv, row.Cwd)
+	}
+	fmt.Printf("  %s\n", termstyle.Dim(loc))
+
+	// Line 5: clients (only if any)
+	if row.ClientNames != "" {
+		fmt.Printf("  Clients: %s\n", row.ClientNames)
+	} else if row.Clients > 0 {
+		fmt.Printf("  Clients: %d\n", row.Clients)
+	}
+}
+
+func printStoppedCard(row statusRow) {
+	fmt.Printf("%s  %s\n", termstyle.Dim(row.Name), termstyle.Dim("stopped"))
+	loc := shortPath(row.Cwd)
+	if row.Venv != "" {
+		loc += " · " + shortVenv(row.Venv, row.Cwd)
+	}
+	fmt.Printf("  %s\n", termstyle.Dim(loc))
+}
+
+// shortVenv returns the venv path relative to cwd if it's inside it,
+// otherwise the short absolute path. ".venv" inside the project shows
+// as just ".venv" rather than the full path.
+func shortVenv(venv, cwd string) string {
+	if venv == "" {
+		return ""
+	}
+	if cwd != "" {
+		if rel, err := filepath.Rel(cwd, venv); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	return shortPath(venv)
 }
 
 func formatStatusNote(row statusRow) string {
@@ -642,7 +719,7 @@ func formatStatusNote(row statusRow) string {
 		return "  waiting for input"
 	}
 	if row.IdleSeconds >= int(idleWarningAfter.Seconds()) {
-		return fmt.Sprintf("  ⚠ idle %s", formatCompactDuration(time.Duration(row.IdleSeconds)*time.Second))
+		return termstyle.Yellow(fmt.Sprintf("  ⚠ idle %s", formatCompactDuration(time.Duration(row.IdleSeconds)*time.Second)))
 	}
 	return ""
 }
@@ -677,9 +754,18 @@ func printStatusSummary(rows []statusRow) {
 		fmt.Printf("%d %s running.", running, noun)
 	}
 	if firstIdle != "" {
-		fmt.Printf(" Stop idle ones? rat stop %s", firstIdle)
+		fmt.Printf(" Stop idle ones? %s", termstyle.Bold("rat stop "+firstIdle))
 	}
 	fmt.Println("")
+}
+
+func formatColoredStatus(status string) string {
+	switch status {
+	case state.StatusRunning:
+		return termstyle.Green(status)
+	default:
+		return termstyle.Dim(status)
+	}
 }
 
 func formatCompactDuration(d time.Duration) string {
@@ -716,6 +802,75 @@ func confirmRemove(name string) (bool, error) {
 	default:
 		return false, nil
 	}
+}
+
+func confirmRemoveAll(names []string) (bool, error) {
+	if fi, err := os.Stdin.Stat(); err != nil {
+		return false, err
+	} else if (fi.Mode() & os.ModeCharDevice) == 0 {
+		return false, fmt.Errorf("refusing to prompt for confirmation without a terminal; rerun with --yes")
+	}
+
+	fmt.Fprintf(os.Stderr, "Remove all %d runtimes? [y/N] ", len(names))
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func allRuntimeNames(s *state.Store) ([]string, error) {
+	kernels, err := s.ListKnown()
+	if err != nil {
+		return nil, err
+	}
+	runtimes, err := s.ListRuntimes()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	names := make([]string, 0, len(kernels)+len(runtimes))
+	for _, k := range kernels {
+		if !seen[k.Name] {
+			seen[k.Name] = true
+			names = append(names, k.Name)
+		}
+	}
+	for _, r := range runtimes {
+		if !seen[r.Name] {
+			seen[r.Name] = true
+			names = append(names, r.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func removeRuntimeByName(s *state.Store, name string) (bool, error) {
+	found := false
+	if k, _ := s.GetRunning(name); k != nil {
+		if err := daemon.Stop(s, name); err != nil {
+			return false, err
+		}
+		fmt.Fprintf(os.Stderr, "%s stopped.\n", name)
+		found = true
+	}
+	if removed, err := s.Remove(name); err != nil {
+		return false, err
+	} else if removed {
+		found = true
+	}
+	if removed, err := s.RemoveRuntime(name); err != nil {
+		return false, err
+	} else if removed {
+		found = true
+	}
+	return found, nil
 }
 
 func shortPath(p string) string {

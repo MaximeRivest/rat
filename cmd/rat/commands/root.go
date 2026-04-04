@@ -30,7 +30,7 @@ Setup & management:
   rat start <name>              Start a kernel
   rat stop <name> [--all]       Stop a kernel
   rat add <name> [dir]          Register a named runtime
-  rat rm <name>                 Delete a runtime's state
+  rat remove <name> [--all]     Delete a runtime's state
   rat reset <name>              Clear namespace (keep process)
   rat serve <name> [--http]     MCP server (for app builders)
 

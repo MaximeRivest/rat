@@ -78,8 +78,8 @@ export async function ratAdd(
   await exec(args, cwd);
 }
 
-export async function ratRm(name: string): Promise<void> {
-  await exec(["rm", name]);
+export async function ratRemove(name: string): Promise<void> {
+  await exec(["remove", name]);
 }
 
 /**

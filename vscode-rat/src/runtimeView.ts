@@ -14,7 +14,7 @@ import {
   ratStart,
   ratStop,
   ratRestart,
-  ratRm,
+  ratRemove,
   type KernelInfo,
   type SavedRuntime,
 } from "./rat";
@@ -158,7 +158,7 @@ export async function removeRuntimeCmd(node?: RuntimeNode): Promise<void> {
   );
   if (confirm !== "Remove") return;
   try {
-    await ratRm(name);
+    await ratRemove(name);
     vscode.window.showInformationMessage(`Rat: ${name} removed`);
   } catch (err: unknown) {
     vscode.window.showErrorMessage(`Rat: ${msg(err)}`);

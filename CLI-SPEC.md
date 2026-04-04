@@ -652,13 +652,14 @@ venv is found in the directory, it's auto-detected.
 
 ---
 
-#### `rat rm <name>`
+#### `rat remove <name> [--all]`
 
 **JTBD:** "Delete a runtime's state."
 
 ```
-rat rm py-ml
-rat rm py@amrmdtest
+rat remove py-ml
+rat remove py@amrmdtest
+rat remove --all
 ```
 
 Stops the kernel if running and removes the state entry entirely.
@@ -666,9 +667,9 @@ Works on any runtime — custom (`py-ml`) or auto-generated
 (`py@amrmdtest`). Asks for confirmation.
 
 This is the only way to fully erase a runtime from state.
-`rat stop` marks it stopped; `rat rm` deletes it.
+`rat stop` marks it stopped; `rat remove` deletes it.
 
-**Args:** name (exact or resolved).
+**Args:** name (exact or resolved), or `--all`.
 
 ---
 
@@ -730,7 +731,7 @@ Setup & management:
   rat start <name>              Start a kernel
   rat stop <name> [--all]       Stop a kernel
   rat add <name> [dir]          Register a named runtime
-  rat rm <name>                 Delete a runtime's state
+  rat remove <name> [--all]     Delete a runtime's state
   rat reset <name>              Clear namespace (keep process)
   rat serve <name> [--http]     MCP server (for app builders)
 
@@ -857,7 +858,7 @@ IPython init). Users shouldn't fear auto-shutdown — the next
 rat stop py              # stop now (state preserved)
 rat stop --all           # stop everything (state preserved)
 rat restart py           # kill and restart
-rat rm py@scratch        # delete state entry entirely
+rat remove py@scratch    # delete state entry entirely
 ```
 
 These override auto-idle — you don't need to wait.
@@ -867,7 +868,8 @@ These override auto-idle — you don't need to wait.
 Because stopped runtimes persist in state, the state file can
 grow over time. Cleanup is explicit and automatic:
 
-- `rat rm <name>` deletes a single entry.
+- `rat remove <name>` deletes a single entry.
+- `rat remove --all` deletes every saved/runtime entry.
 - `rat stop --all --clean` stops everything and removes all
   state entries.
 - Automatic pruning: stopped runtimes untouched for 30 days

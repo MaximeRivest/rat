@@ -317,7 +317,7 @@ rat restart py
 rat stop --all
 
 # Remove a named runtime
-rat rm py-web
+rat remove py-web
 
 # Diagnostics
 rat doctor
@@ -460,7 +460,7 @@ One Go binary. Kernel scripts embedded for each language.
 
 ```
 rat (Go binary)
-├── CLI          install, add, rm, ls, start, stop, restart, doctor
+├── CLI          install, add, remove, ls, start, stop, restart, doctor
 ├── REPL         rat py → launches IPython connected to shared kernel via MCP
 ├── MCP server   rat serve py → shared server, HTTP or stdio
 └── Kernels      thin scripts in each language, embedded via go:embed
@@ -525,7 +525,7 @@ rat install <lang>              # install runtime: py, r, jl, sh, js
 rat install <lang> --with-<lang>  # also install the language itself
 rat setup                       # interactive wizard
 rat add <name> [--venv] [--cwd] # register a named runtime
-rat rm <name>                   # unregister
+rat remove <name> [--all]       # unregister
 
 # Daily use
 rat <name>                      # REPL — auto-starts kernel
