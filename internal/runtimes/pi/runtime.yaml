@@ -1,0 +1,24 @@
+name: pi
+display: pi
+
+detect:
+  commands: [pi]
+  env: RAT_PI
+
+kernel:
+  type: tmux
+  command: "{runtime} --extension {bridge} --session-dir {data_dir}/sessions"
+  bridge: bridge.ts
+  submit: Enter
+  cancel: Escape
+
+frontend:
+  type: tmux
+
+install:
+  check_commands: [tmux]
+  runtime:
+    manager: npm
+    deps: ["@mariozechner/pi-coding-agent"]
+  smoke:
+    ctl: status

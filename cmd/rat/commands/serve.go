@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 
 	"github.com/maximerivest/rat/internal/activity"
 	"github.com/maximerivest/rat/internal/bash"
+	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
 	"github.com/maximerivest/rat/internal/python"
+	"github.com/maximerivest/rat/internal/runtimes"
 )
 
 var (
@@ -28,6 +31,7 @@ var (
 	serveNameFlag    string
 	serveVenvFlag    string
 	serveRuntimeFlag string
+	serveEnvFlags    []string
 )
 
 func init() {
@@ -38,6 +42,7 @@ func init() {
 	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
 	serveCmd.Flags().StringVar(&serveVenvFlag, "venv", "", "Python venv path (py only)")
 	serveCmd.Flags().StringVar(&serveRuntimeFlag, "runtime", "", "Path to language binary (e.g. /opt/python3.11/bin/python3)")
+	serveCmd.Flags().StringArrayVar(&serveEnvFlags, "env", nil, "Extra env vars for the kernel (KEY=VALUE, repeatable)")
 
 	rootCmd.AddCommand(serveCmd)
 }
@@ -91,6 +96,12 @@ func runServe(input string) error {
 	}
 	cwd, _ = filepath.Abs(cwd)
 
+	// Apply extra env vars (from --env flags / rat add --env).
+	envMap := parseEnvFlags(serveEnvFlags)
+	for k, v := range envMap {
+		os.Setenv(k, v)
+	}
+
 	// Create the kernel for the requested language.
 	var k kernel.Kernel
 
@@ -99,15 +110,9 @@ func runServe(input string) error {
 		k, err = bash.New(name, cwd)
 	case "py":
 		k, err = python.New(name, cwd, serveVenvFlag, serveRuntimeFlag)
-	// Future:
-	// case "r":
-	//     k, err = rlang.New(cwd)
-	// case "ju":
-	//     k, err = julia.New(cwd)
-	// case "js":
-	//     k, err = node.New(cwd)
 	default:
-		return fmt.Errorf("language %q not yet implemented", lang)
+		// Try to load a user-defined or community runtime.
+		k, err = loadGenericKernel(name, lang, cwd, serveRuntimeFlag)
 	}
 
 	if err != nil {
@@ -123,6 +128,63 @@ func runServe(input string) error {
 		return runHTTPServer(mcpSrv, servePort, serverName)
 	}
 	return runStdioServer(mcpSrv, serverName)
+}
+
+// loadGenericKernel tries to find a runtime.yaml for the given language
+// in the standard search paths and creates a kernel from it.
+// Dispatches on kernel.type: "json" (subprocess) or "tmux" (shared session).
+func loadGenericKernel(name, lang, cwd, runtimePath string) (kernel.Kernel, error) {
+	configPath, err := findRuntimeConfig(lang)
+	if err != nil {
+		return nil, fmt.Errorf("language %q: %w\n\nTo add a custom runtime, create ~/.config/rat/runtimes/%s/runtime.yaml\nSee: KERNEL-PROTOCOL.md", lang, err, lang)
+	}
+
+	cfg, err := generic.LoadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	configDir := filepath.Dir(configPath)
+
+	switch cfg.KernelType() {
+	case "tmux":
+		return generic.NewTmux(name, cwd, cfg, configDir, runtimePath)
+	default:
+		return generic.New(name, cwd, cfg, configDir, runtimePath)
+	}
+}
+
+// findRuntimeConfig searches for a runtime.yaml in order:
+//  1. ~/.config/rat/runtimes/<lang>/runtime.yaml  (user-defined, wins)
+//  2. Built-in runtimes embedded in the binary
+func findRuntimeConfig(lang string) (string, error) {
+	// 1. User-defined takes priority.
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		configDir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	userPath := filepath.Join(configDir, "rat", "runtimes", lang, "runtime.yaml")
+	if _, err := os.Stat(userPath); err == nil {
+		return userPath, nil
+	}
+
+	// 2. Built-in: extract from embedded files.
+	if runtimes.IsBuiltin(lang) {
+		return runtimes.Extract(lang)
+	}
+
+	return "", fmt.Errorf("no runtime found for %q\n\nTo add one, create %s\nSee: KERNEL-PROTOCOL.md", lang, userPath)
+}
+
+// parseEnvFlags turns ["KEY=VALUE", ...] into a map.
+func parseEnvFlags(flags []string) map[string]string {
+	m := make(map[string]string, len(flags))
+	for _, f := range flags {
+		if k, v, ok := strings.Cut(f, "="); ok {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 func runStdioServer(mcpSrv *server.MCPServer, name string) error {

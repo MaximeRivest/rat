@@ -1,0 +1,13 @@
+name: slack
+display: Slack
+
+detect:
+  commands: [python3]
+
+kernel:
+  type: json
+  script: kernel-slack.py
+
+frontend:
+  type: repl
+  prompt: "slack> "

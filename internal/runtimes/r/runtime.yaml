@@ -1,0 +1,26 @@
+name: r
+display: R
+
+detect:
+  commands: [Rscript, R]
+  env: RAT_R
+
+kernel:
+  type: json
+  script: kernel.R
+  args: ["--no-save", "--no-restore"]
+
+frontend:
+  type: native
+  command: "python3 {config_dir}/frontend-r.py --server {mcp_url} --name {name} --activity-log {activity_log}"
+  fallback:
+    type: repl
+    prompt: "r> "
+
+install:
+  runtime:
+    manager: r
+    deps: [jsonlite]
+  smoke:
+    run: "1 + 1"
+    expect: "2"

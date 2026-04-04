@@ -24,14 +24,17 @@ This is the explicit setup path. It resolves the project runtime,
 installs or checks the needed dependencies, starts the kernel, and
 runs a quick smoke test.
 
-Currently implemented:
-  py  Detect or create a project venv, install IPython + jedi, start the kernel
-  sh  Check shell prerequisites, start the shared shell kernel
+Implemented:
+  py     Detect or create a project venv, install IPython + jedi, start the kernel
+  sh     Check shell prerequisites, start the shared shell kernel
+  r      Install runtime deps from runtime.yaml, start the kernel, run a smoke test
+  pi     Check tmux + pi, start the shared session, run a smoke test
+  <lang> Any generic runtime with an install section in runtime.yaml
 
 Examples:
   rat install py
   rat install sh
-  rat install py sh`,
+  rat install r pi`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		seen := map[string]bool{}
@@ -55,7 +58,9 @@ Examples:
 					return err
 				}
 			default:
-				return fmt.Errorf("install for %s is not implemented yet", arg)
+				if err := installGenericRuntime(lang); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

@@ -24,6 +24,8 @@ var Aliases = map[string]string{
 	"js":         "js",
 	"node":       "js",
 	"javascript": "js",
+	"pi":         "pi",
+	"slack":      "slack",
 }
 
 // Resolve returns the canonical short name for a language,
@@ -32,7 +34,7 @@ func Resolve(name string) (string, error) {
 	if canon, ok := Aliases[name]; ok {
 		return canon, nil
 	}
-	return "", fmt.Errorf("unknown language %q (supported: py, r, jl, sh, js)", name)
+	return "", fmt.Errorf("unknown language %q (supported: py, r, jl, sh, js, pi, slack)", name)
 }
 
 // IsAlias returns true if name is a known language name or alias.

@@ -4,10 +4,12 @@ package commands
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/repl"
 	s "github.com/maximerivest/rat/internal/termstyle"
 )
@@ -124,11 +126,38 @@ func handleREPL(input string, args []string) error {
 	}
 	printKernelAction(k, action)
 
+	// Activity log: check the cache dir for this kernel's log.
+	activityLog := activityLogPath(k.Name)
+
+	// Load runtime config for generic runtimes (nil for built-in sh/py).
+	var rtCfg *generic.RuntimeConfig
+	var configDir string
+	if k.Lang != "sh" && k.Lang != "py" {
+		if cfgPath, err := findRuntimeConfig(k.Lang); err == nil {
+			if cfg, err := generic.LoadConfig(cfgPath); err == nil {
+				rtCfg = cfg
+				configDir = filepath.Dir(cfgPath)
+			}
+		}
+	}
+
 	return repl.Run(repl.Config{
-		Name: k.Name,
-		Lang: k.Lang,
-		Port: k.Port,
-		Cwd:  k.Cwd,
-		Venv: k.Venv,
+		Name:          k.Name,
+		Lang:          k.Lang,
+		Port:          k.Port,
+		Cwd:           k.Cwd,
+		Venv:          k.Venv,
+		ActivityLog:   activityLog,
+		RuntimeConfig: rtCfg,
+		ConfigDir:     configDir,
 	})
+}
+
+// activityLogPath returns the expected activity log path for a kernel.
+func activityLogPath(name string) string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = filepath.Join(os.Getenv("HOME"), ".cache")
+	}
+	return filepath.Join(dir, "rat", "kernels", name, "activity.jsonl")
 }
