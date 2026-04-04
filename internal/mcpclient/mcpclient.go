@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -40,14 +41,43 @@ type Session struct {
 	url    string
 }
 
+// ConnectOpts configures optional MCP client capabilities.
+type ConnectOpts struct {
+	// Elicitation handles server requests for user input (e.g. Python input()).
+	// When set, the client declares elicitation capability.
+	Elicitation client.ElicitationHandler
+
+	// OnNotification is called for server notifications (e.g. rat/output streaming).
+	OnNotification func(mcp.JSONRPCNotification)
+}
+
 // Connect connects to a kernel's MCP HTTP endpoint, initializes the
 // session, and returns a ready-to-use Session.
-func Connect(ctx context.Context, port int) (*Session, error) {
+func Connect(ctx context.Context, port int, opts ...ConnectOpts) (*Session, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
 
-	c, err := client.NewStreamableHttpClient(url)
+	trans, err := transport.NewStreamableHTTP(url)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", url, err)
+	}
+
+	// Build client options from ConnectOpts.
+	var clientOpts []client.ClientOption
+	var opt ConnectOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	if opt.Elicitation != nil {
+		clientOpts = append(clientOpts, client.WithElicitationHandler(opt.Elicitation))
+	}
+	if sessionID := trans.GetSessionId(); sessionID != "" {
+		clientOpts = append(clientOpts, client.WithSession())
+	}
+
+	c := client.NewClient(trans, clientOpts...)
+
+	if opt.OnNotification != nil {
+		c.OnNotification(opt.OnNotification)
 	}
 
 	initReq := mcp.InitializeRequest{}
@@ -98,7 +128,7 @@ func (s *Session) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return parseStatus(extractText(result)), nil
+	return parseStatus(ExtractText(result)), nil
 }
 
 // IsWaitingForInput checks if the kernel process is waiting for stdin.
@@ -135,7 +165,8 @@ func (s *Session) callTool(ctx context.Context, name string, args map[string]any
 	return result, nil
 }
 
-func extractText(result *mcp.CallToolResult) string {
+// ExtractText pulls the text content from an MCP tool result.
+func ExtractText(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""
 	}

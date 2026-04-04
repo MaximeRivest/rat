@@ -47,6 +47,8 @@ func ensureResolvedKernel(r *resolver.Result) (*state.Kernel, ensureAction, erro
 		Cwd:         r.Cwd,
 		Venv:        r.Venv,
 		RuntimePath: r.RuntimePath,
+		Options:     r.Options,
+		Env:         r.Env,
 	})
 	if err != nil {
 		return nil, ensureNoop, err
@@ -121,17 +123,5 @@ func printKernelAction(k *state.Kernel, action ensureAction) {
 
 // extractText pulls the text content from an MCP tool result.
 func extractText(result *mcp.CallToolResult) string {
-	if result == nil {
-		return ""
-	}
-	text := ""
-	for _, c := range result.Content {
-		if tc, ok := c.(mcp.TextContent); ok {
-			if text != "" {
-				text += "\n"
-			}
-			text += tc.Text
-		}
-	}
-	return text
+	return mcpclient.ExtractText(result)
 }

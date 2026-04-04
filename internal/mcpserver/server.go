@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -73,10 +74,6 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 	)
 
 	s.AddTool(runTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Extract arguments from the request.
-		// Go concept: type assertion. req.Params.Arguments is map[string]any.
-		// We assert each value to string with `val, ok := x.(string)`.
-		// If the assertion fails, ok is false and val is the zero value ("").
 		code, _ := req.GetArguments()["code"].(string)
 		input, _ := req.GetArguments()["input"].(string)
 
@@ -93,6 +90,9 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		}
 
 		tracker.TouchFrom(callerName(ctx))
+		stop := make(chan struct{})
+		defer close(stop)
+		go relayRunNotifications(ctx, s, k, stop)
 		result := k.Run(code)
 		return formatRunResult(result), nil
 	})
@@ -241,6 +241,106 @@ func callerName(ctx context.Context) string {
 		return info.GetClientInfo().Name
 	}
 	return ""
+}
+
+// relayRunNotifications polls the kernel for output chunks and input requests
+// during a run, and relays them to the connected client via MCP notifications
+// and elicitation.
+func relayRunNotifications(ctx context.Context, s *server.MCPServer, k kernel.Kernel, stop <-chan struct{}) {
+	session := server.ClientSessionFromContext(ctx)
+	if session == nil {
+		return
+	}
+	ch := session.NotificationChannel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastOutput := ""
+	waiting := false
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Stream output chunks.
+			output := k.Ctl("output").Text
+			if !strings.HasPrefix(output, "ERROR: unknown op") {
+				if text := strings.TrimPrefix(output, lastOutput); text != "" {
+					lastOutput += text
+					sendNotification(ch, "rat/output", map[string]any{"text": text})
+				}
+			}
+
+			// Handle input requests via MCP elicitation.
+			nowWaiting := k.IsWaitingForInput()
+			if nowWaiting && !waiting {
+				go requestInputViaElicitation(ctx, s, k)
+			}
+			waiting = nowWaiting
+		}
+	}
+}
+
+// requestInputViaElicitation asks the client for input using MCP elicitation.
+// If the client doesn't support elicitation, falls back to a notification.
+func requestInputViaElicitation(ctx context.Context, s *server.MCPServer, k kernel.Kernel) {
+	req := mcp.ElicitationRequest{
+		Request: mcp.Request{
+			Method: string(mcp.MethodElicitationCreate),
+		},
+		Params: mcp.ElicitationParams{
+			Message: "The program is waiting for input.",
+			RequestedSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{
+						"type":        "string",
+						"description": "Text to send to stdin",
+					},
+				},
+				"required": []string{"text"},
+			},
+		},
+	}
+
+	result, err := s.RequestElicitation(ctx, req)
+	if err != nil {
+		// Client doesn't support elicitation — send a notification as fallback.
+		session := server.ClientSessionFromContext(ctx)
+		if session != nil {
+			sendNotification(session.NotificationChannel(), "rat/input_request", nil)
+		}
+		return
+	}
+
+	if result.Action == mcp.ElicitationResponseActionAccept {
+		if content, ok := result.Content.(map[string]any); ok {
+			if text, ok := content["text"].(string); ok {
+				if !strings.HasSuffix(text, "\n") {
+					text += "\n"
+				}
+				k.SendInput(text)
+			}
+		}
+	}
+}
+
+func sendNotification(ch chan<- mcp.JSONRPCNotification, method string, fields map[string]any) {
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	select {
+	case ch <- mcp.JSONRPCNotification{
+		JSONRPC: mcp.JSONRPC_VERSION,
+		Notification: mcp.Notification{
+			Method: method,
+			Params: mcp.NotificationParams{AdditionalFields: fields},
+		},
+	}:
+	default:
+	}
 }
 
 func enrichStatusText(state string, tracker *activity.Tracker) string {
