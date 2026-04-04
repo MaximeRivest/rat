@@ -9,46 +9,72 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/maximerivest/rat/internal/repl"
+	s "github.com/maximerivest/rat/internal/termstyle"
 )
 
 // Version is set at build time via ldflags.
 var Version = "0.1.0"
 
-const rootHelp = `rat — Run AnyThing
+func rootHelp() string {
+	lines := []string{
+		"🐀 " + s.Bold("rat") + " — " + s.Bold("R") + s.Dim("un") + s.Bold("A") + s.Dim("ny") + s.Bold("T") + s.Dim("hing"),
+		"",
+		s.Dim("Use, manage and install shareable repls."),
+		"",
+		s.Cyan("rat <lang>") + s.Dim(" drops you into a REPL. ") + s.Cyan("rat run <lang> 'code'") + s.Dim(" executes code"),
+		s.Dim("and returns the result. Same kernel, same namespace — whether you're"),
+		s.Dim("typing, or Claude/Cursor/a notebook is calling."),
+		"",
+		s.Bold("Daily use:") + "  " + s.Dim("<lang> = py, sh, r, jl, js or a kernel name"),
+		helpLine("rat <lang>", "Drop into a REPL"),
+		helpLine("rat run <lang> '…'", "One-liner"),
+		helpLine("rat look <lang> [--at x]", "See what's inside"),
+		helpLine("rat cancel <lang>", "Unstick"),
+		helpLine("rat restart <lang>", "Fresh start"),
+		helpLine("rat status", "What's running"),
+		"",
+		s.Bold("Setup & management:"),
+		helpLine("rat install <lang>", "Project setup (runtime + deps)"),
+		helpLine("rat doctor [<lang>]", "Diagnostics"),
+		helpLine("rat start <name>", "Start a kernel"),
+		helpLine("rat stop <name> [--all]", "Stop a kernel"),
+		helpLine("rat add <name> [dir]", "Register a named runtime"),
+		helpLine("rat reset <name>", "Clear namespace (keep process)"),
+		helpLine("rat serve <name> [--http]", "MCP server (for app builders)"),
+		"",
+		s.Bold("How naming works:"),
+		s.Dim("  When you type a language, rat creates a kernel named <lang>@<project>"),
+		s.Dim("  based on your current directory. Same directory = same kernel."),
+		"",
+		"  " + s.Cyan("rat py") + s.Dim("  from ~/Projects/myapp  →  ") + s.Bold("py@myapp"),
+		"  " + s.Cyan("rat py") + s.Dim("  from ~/Projects/other  →  ") + s.Bold("py@other") + s.Dim("  (separate kernel)"),
+		"  " + s.Cyan("rat py") + s.Dim("  from ~/Projects/myapp  →  ") + s.Bold("py@myapp") + s.Dim("  (same one as before)"),
+		"",
+		s.Dim("  Full names bypass resolution and are used as-is:"),
+		"  " + s.Cyan("rat py-ml") + s.Dim("                       →  ") + s.Bold("py-ml"),
+		"  " + s.Cyan("rat py@myapp") + s.Dim("                    →  ") + s.Bold("py@myapp"),
+		"",
+		s.Dim("  Want a custom kernel with its own venv, cwd, or runtime?"),
+		s.Dim("  See: ") + s.Bold("rat add --help"),
+		"",
+		s.Dim("See: ") + s.Bold("rat <command> --help") + s.Dim("  ·  ") + s.Bold("rat version") + s.Dim(" for binary + runtime versions"),
+	}
+	return strings.Join(lines, "\n")
+}
 
-Daily use:
-  rat py                        Enter your Python world
-  rat run py '…'                One-liner
-  rat look py [--at x]          See what's inside
-  rat cancel py                 Unstick
-  rat restart py                Fresh start
-  rat status                    What's running
-
-Setup & management:
-  rat install py                Project setup (runtime + deps)
-  rat doctor [py]               Diagnostics
-  rat start <name>              Start a kernel
-  rat stop <name> [--all]       Stop a kernel
-  rat add <name> [dir]          Register a named runtime
-  rat remove <name> [--all]     Delete a runtime's state
-  rat reset <name>              Clear namespace (keep process)
-  rat serve <name> [--http]     MCP server (for app builders)
-
-Every command accepts a language (py, sh, r, jl, js) or a full
-kernel name (py@myproject, py-ml). Languages auto-resolve to the
-kernel for your current project.
-
-See: rat <command> --help`
+func helpLine(cmd, desc string) string {
+	return fmt.Sprintf("  %-30s  %s", s.Cyan(cmd), s.Dim(desc))
+}
 
 var rootCmd = &cobra.Command{
 	Use:           "rat",
 	Short:         "Run AnyThing",
-	Long:          rootHelp,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			return cmd.Help()
+			fmt.Fprintln(os.Stderr, rootHelp())
+			return nil
 		}
 		return handleREPL(args[0], args[1:])
 	},

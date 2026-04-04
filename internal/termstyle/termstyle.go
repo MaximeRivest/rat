@@ -37,6 +37,9 @@ func style(code, s string) string {
 // Bold makes text bold (kernel names).
 func Bold(s string) string { return style(bold, s) }
 
+// BoldCyan makes text bold and cyan (highlighted letters).
+func BoldCyan(s string) string { return style(bold+cyan, s) }
+
 // Dim makes text subdued (secondary info like URLs, PIDs).
 func Dim(s string) string { return style(dim, s) }
 
