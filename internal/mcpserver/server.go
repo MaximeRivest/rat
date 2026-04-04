@@ -21,7 +21,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/maximerivest/rat/internal/idle"
+	"github.com/maximerivest/rat/internal/activity"
 	"github.com/maximerivest/rat/internal/kernel"
 )
 
@@ -30,9 +30,25 @@ import (
 // Go concept: functions are first-class. server.AddTool takes a function
 // as its second argument — the handler. We create closures that capture
 // the kernel variable.
-func New(name string, k kernel.Kernel, tracker *idle.Tracker) *server.MCPServer {
+func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPServer {
+	// Set up hooks to track client connect/disconnect.
+	hooks := &server.Hooks{}
+	hooks.AddOnRegisterSession(func(ctx context.Context, session server.ClientSession) {
+		clientName := "unknown"
+		if info, ok := session.(server.SessionWithClientInfo); ok {
+			if n := info.GetClientInfo().Name; n != "" {
+				clientName = n
+			}
+		}
+		tracker.AddClient(session.SessionID(), clientName)
+	})
+	hooks.AddOnUnregisterSession(func(ctx context.Context, session server.ClientSession) {
+		tracker.RemoveClient(session.SessionID())
+	})
+
 	s := server.NewMCPServer(name, "0.1.0",
 		server.WithToolCapabilities(true),
+		server.WithHooks(hooks),
 		server.WithInstructions(fmt.Sprintf(
 			"%s runtime. "+
 				"run(code) runs code. "+
@@ -69,14 +85,14 @@ func New(name string, k kernel.Kernel, tracker *idle.Tracker) *server.MCPServer 
 		}
 
 		if input != "" {
-			tracker.Touch()
+			tracker.TouchFrom(callerName(ctx))
 			if err := k.SendInput(input); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("send input: %v", err)), nil
 			}
 			return mcp.NewToolResultText("input sent"), nil
 		}
 
-		tracker.Touch()
+		tracker.TouchFrom(callerName(ctx))
 		result := k.Run(code)
 		return formatRunResult(result), nil
 	})
@@ -110,7 +126,7 @@ func New(name string, k kernel.Kernel, tracker *idle.Tracker) *server.MCPServer 
 			cursor = v
 		}
 
-		tracker.Touch()
+		tracker.TouchFrom(callerName(ctx))
 		result := k.Look(kernel.LookRequest{
 			At:     at,
 			Code:   code,
@@ -137,7 +153,7 @@ func New(name string, k kernel.Kernel, tracker *idle.Tracker) *server.MCPServer 
 	s.AddTool(ctlTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op, _ := req.GetArguments()["op"].(string)
 		if op != "status" {
-			tracker.Touch()
+			tracker.TouchFrom(callerName(ctx))
 		}
 		result := k.Ctl(op)
 		if op == "status" {
@@ -215,13 +231,33 @@ func stripANSI(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
 }
 
-func enrichStatusText(state string, tracker *idle.Tracker) string {
+// callerName extracts the MCP client name from the request context.
+func callerName(ctx context.Context) string {
+	session := server.ClientSessionFromContext(ctx)
+	if session == nil {
+		return ""
+	}
+	if info, ok := session.(server.SessionWithClientInfo); ok {
+		return info.GetClientInfo().Name
+	}
+	return ""
+}
+
+func enrichStatusText(state string, tracker *activity.Tracker) string {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		state = "unknown"
 	}
 	idleSeconds := int(tracker.IdleFor().Seconds())
-	return fmt.Sprintf("%s\nidle_seconds: %d\nmemory_mb: %d\npid: %d", state, idleSeconds, currentMemoryMB(), os.Getpid())
+	lines := fmt.Sprintf("%s\nidle_seconds: %d\nmemory_mb: %d\npid: %d\nclients: %d",
+		state, idleSeconds, currentMemoryMB(), os.Getpid(), tracker.ClientCount())
+	if names := tracker.ClientNames(); names != "" {
+		lines += "\nclient_names: " + names
+	}
+	if caller := tracker.LastCaller(); caller != "" {
+		lines += "\nlast_caller: " + caller
+	}
+	return lines
 }
 
 // currentMemoryMB returns the total RSS of this process and all its

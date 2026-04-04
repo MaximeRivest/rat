@@ -16,9 +16,13 @@ func init() {
 
 var installCmd = &cobra.Command{
 	Use:     "install <lang> [<lang>...]",
-	Short:   "Set up one or more language runtimes",
+	Short:   "Project setup (runtime + deps)",
 	GroupID: "setup",
 	Long: `Set up one or more language runtimes for this project.
+
+This is the explicit setup path. It resolves the project runtime,
+installs or checks the needed dependencies, starts the kernel, and
+runs a quick smoke test.
 
 Currently implemented:
   py  Detect or create a project venv, install IPython + jedi, start the kernel

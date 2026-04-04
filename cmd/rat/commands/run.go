@@ -16,10 +16,12 @@ func init() {
 
 var runCmd = &cobra.Command{
 	Use:     "run <runtime> '<code>'",
-	Short:   "Run code on a kernel",
+	Short:   "Execute code on a kernel",
 	GroupID: "daily",
-	Long: `Execute code on a kernel. Resolves the runtime name, auto-starts
-if needed, runs the code, prints output.
+	Long: `Run code on a kernel.
+
+Resolves the runtime name, auto-starts the kernel if needed, executes
+the code, prints output, and exits.
 
 The runtime can be a language (py, sh, r, jl, js) which resolves
 to your current project's kernel, or a full name (py@myproject, py-ml).

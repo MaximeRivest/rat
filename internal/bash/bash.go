@@ -26,6 +26,7 @@ var validVarNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type Bash struct {
 	name               string
 	cwd                string
+	version            string // e.g. "5.2.15", detected at startup
 	tmuxPath           string
 	sessionName        string
 	dataDir            string
@@ -66,6 +67,7 @@ func New(name, cwd string) (*Bash, error) {
 	b := &Bash{
 		name:               name,
 		cwd:                cwd,
+		version:            detectBashVersion(),
 		tmuxPath:           tmuxPath,
 		sessionName:        SessionName(name),
 		dataDir:            dataDir,
@@ -280,16 +282,18 @@ func (b *Bash) Ctl(op string) kernel.CtlResult {
 		}
 		return kernel.CtlResult{Text: "CANCELLED"}
 	case "status":
+		state := "idle"
 		if !b.hasSessionLocked() {
-			return kernel.CtlResult{Text: "idle"}
+			// session not started
+		} else if b.IsWaitingForInput() {
+			state = "waiting_for_input"
+		} else if b.executing.Load() {
+			state = "busy"
 		}
-		if b.IsWaitingForInput() {
-			return kernel.CtlResult{Text: "waiting_for_input"}
+		if b.version != "" {
+			state += "\nruntime_version: bash " + b.version
 		}
-		if b.executing.Load() {
-			return kernel.CtlResult{Text: "busy"}
-		}
-		return kernel.CtlResult{Text: "idle"}
+		return kernel.CtlResult{Text: state}
 	case "output":
 		// Bash doesn't stream partial output (tmux captures to file).
 		return kernel.CtlResult{Text: ""}
@@ -740,6 +744,27 @@ type variable struct {
 	Name  string
 	Type  string
 	Value string
+}
+
+func detectBashVersion() string {
+	out, err := exec.Command("bash", "--version").Output()
+	if err != nil {
+		return ""
+	}
+	// First line: "GNU bash, version 5.2.15(1)-release ..."
+	line := strings.SplitN(string(out), "\n", 2)[0]
+	// Extract version number after "version "
+	if i := strings.Index(line, "version "); i >= 0 {
+		ver := line[i+8:]
+		// Trim everything after the version number (parenthetical, etc.)
+		for j, c := range ver {
+			if c != '.' && (c < '0' || c > '9') {
+				return ver[:j]
+			}
+		}
+		return ver
+	}
+	return ""
 }
 
 func kernelDataDir(name string) (string, error) {

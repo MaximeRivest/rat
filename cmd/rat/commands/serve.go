@@ -13,8 +13,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 
+	"github.com/maximerivest/rat/internal/activity"
 	"github.com/maximerivest/rat/internal/bash"
-	"github.com/maximerivest/rat/internal/idle"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
 	"github.com/maximerivest/rat/internal/python"
@@ -44,10 +44,11 @@ var serveCmd = &cobra.Command{
 	Use:     "serve <name> [--http] [--port PORT]",
 	Short:   "MCP server (for app builders)",
 	GroupID: "setup",
-	Long: `Start an MCP server for a language kernel.
+	Long: `Run an MCP server in the foreground.
 
-By default, runs as a stdio server (for Claude Desktop, mcp2cli).
-With --http, runs as an HTTP server (for shared access from multiple clients).
+This is the low-level building block behind every rat kernel. By
+default, it runs as a stdio server. With --http, it runs as an HTTP
+server for shared access from multiple clients.
 
 Examples:
   rat serve sh              # MCP stdio server for bash
@@ -108,7 +109,7 @@ func runServe(input string) error {
 	defer k.Shutdown()
 
 	serverName := fmt.Sprintf("rat-%s", name)
-	tracker := idle.New()
+	tracker := activity.New()
 	mcpSrv := mcpserver.New(serverName, k, tracker)
 
 	if serveHTTPFlag {

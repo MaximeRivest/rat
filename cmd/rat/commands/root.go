@@ -16,6 +16,7 @@ var Version = "0.1.0"
 
 const rootHelp = `rat — Run AnyThing
 
+Daily use:
   rat py                        Enter your Python world
   rat run py '…'                One-liner
   rat look py [--at x]          See what's inside

@@ -21,12 +21,17 @@ import (
 const DefaultTimeout = 30 * time.Second
 
 // Status is parsed from ctl(status). The first line is always the runtime
-// state (idle, busy, waiting_for_input). Additional metadata is optional.
+// state (idle, busy, waiting_for_input). Additional key: value lines are
+// appended by the MCP server and kernel.
 type Status struct {
-	State       string
-	IdleSeconds int
-	MemoryMB    int
-	PID         int
+	State          string
+	IdleSeconds    int
+	MemoryMB       int
+	PID            int
+	Clients        int
+	ClientNames    string
+	LastCaller     string
+	RuntimeVersion string
 }
 
 // Session is an initialized MCP connection to a kernel.
@@ -160,17 +165,21 @@ func parseStatus(text string) Status {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		n, err := strconv.Atoi(value)
-		if err != nil {
-			continue
-		}
 		switch key {
 		case "idle_seconds":
-			status.IdleSeconds = n
+			status.IdleSeconds, _ = strconv.Atoi(value)
 		case "memory_mb":
-			status.MemoryMB = n
+			status.MemoryMB, _ = strconv.Atoi(value)
 		case "pid":
-			status.PID = n
+			status.PID, _ = strconv.Atoi(value)
+		case "clients":
+			status.Clients, _ = strconv.Atoi(value)
+		case "client_names":
+			status.ClientNames = value
+		case "last_caller":
+			status.LastCaller = value
+		case "runtime_version":
+			status.RuntimeVersion = value
 		}
 	}
 	return status

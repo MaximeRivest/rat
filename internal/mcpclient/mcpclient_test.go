@@ -2,28 +2,67 @@ package mcpclient
 
 import "testing"
 
-func TestParseStatusStructured(t *testing.T) {
-	status := parseStatus("idle\nidle_seconds: 172800\nmemory_mb: 96\npid: 1234")
-	if status.State != "idle" {
-		t.Fatalf("State = %q, want idle", status.State)
+func TestParseStatusFull(t *testing.T) {
+	text := `idle
+idle_seconds: 172800
+memory_mb: 96
+pid: 1234
+clients: 2
+client_names: claude-desktop, rat
+last_caller: claude-desktop
+runtime_version: Python 3.12.1`
+
+	s := parseStatus(text)
+	if s.State != "idle" {
+		t.Fatalf("State = %q, want idle", s.State)
 	}
-	if status.IdleSeconds != 172800 {
-		t.Fatalf("IdleSeconds = %d, want 172800", status.IdleSeconds)
+	if s.IdleSeconds != 172800 {
+		t.Fatalf("IdleSeconds = %d, want 172800", s.IdleSeconds)
 	}
-	if status.MemoryMB != 96 {
-		t.Fatalf("MemoryMB = %d, want 96", status.MemoryMB)
+	if s.MemoryMB != 96 {
+		t.Fatalf("MemoryMB = %d, want 96", s.MemoryMB)
 	}
-	if status.PID != 1234 {
-		t.Fatalf("PID = %d, want 1234", status.PID)
+	if s.PID != 1234 {
+		t.Fatalf("PID = %d, want 1234", s.PID)
+	}
+	if s.Clients != 2 {
+		t.Fatalf("Clients = %d, want 2", s.Clients)
+	}
+	if s.ClientNames != "claude-desktop, rat" {
+		t.Fatalf("ClientNames = %q, want %q", s.ClientNames, "claude-desktop, rat")
+	}
+	if s.LastCaller != "claude-desktop" {
+		t.Fatalf("LastCaller = %q, want %q", s.LastCaller, "claude-desktop")
+	}
+	if s.RuntimeVersion != "Python 3.12.1" {
+		t.Fatalf("RuntimeVersion = %q, want %q", s.RuntimeVersion, "Python 3.12.1")
 	}
 }
 
 func TestParseStatusLegacy(t *testing.T) {
-	status := parseStatus("waiting_for_input")
-	if status.State != "waiting_for_input" {
-		t.Fatalf("State = %q, want waiting_for_input", status.State)
+	s := parseStatus("waiting_for_input")
+	if s.State != "waiting_for_input" {
+		t.Fatalf("State = %q, want waiting_for_input", s.State)
 	}
-	if status.IdleSeconds != 0 || status.MemoryMB != 0 || status.PID != 0 {
-		t.Fatalf("unexpected legacy status parse: %+v", status)
+	if s.IdleSeconds != 0 || s.MemoryMB != 0 || s.Clients != 0 {
+		t.Fatalf("unexpected values in legacy parse: %+v", s)
+	}
+}
+
+func TestParseStatusEmpty(t *testing.T) {
+	s := parseStatus("")
+	if s.State != "" {
+		t.Fatalf("State = %q, want empty", s.State)
+	}
+}
+
+func TestParseStatusWithRuntimeVersion(t *testing.T) {
+	text := "busy\nruntime_version: bash 5.2.15\nidle_seconds: 0\nmemory_mb: 12\npid: 5678"
+	s := parseStatus(text)
+	if s.State != "busy" {
+		t.Fatalf("State = %q, want busy", s.State)
+	}
+	if s.RuntimeVersion != "bash 5.2.15" {
+		t.Fatalf("RuntimeVersion = %q, want %q", s.RuntimeVersion, "bash 5.2.15")
 	}
 }

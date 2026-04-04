@@ -23,10 +23,12 @@ func init() {
 
 var lookCmd = &cobra.Command{
 	Use:     "look <runtime> [--at SYMBOL]",
-	Short:   "Inspect variables and state",
+	Short:   "See what's inside",
 	GroupID: "daily",
-	Long: `Inspect a kernel's namespace. Without --at, shows a variable overview.
-With --at, inspects a specific symbol in detail. Auto-starts if needed.
+	Long: `Inspect a kernel's namespace.
+
+Without --at, shows a variable overview. With --at, inspects a
+specific symbol in detail. Auto-starts the kernel if needed.
 
 The runtime can be a language (py, sh, r, jl, js) which resolves
 to your current project's kernel, or a full name (py@myproject, py-ml).

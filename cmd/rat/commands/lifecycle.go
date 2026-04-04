@@ -19,11 +19,13 @@ import (
 )
 
 var (
-	stopAll bool
-	rmYes   bool
+	stopAll       bool
+	rmYes         bool
+	statusVerbose bool
 )
 
 func init() {
+	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show details: URL, PID, memory, clients, runtime")
 	stopCmd.Flags().BoolVar(&stopAll, "all", false, "Stop all running kernels")
 	rmCmd.Flags().BoolVar(&rmYes, "yes", false, "Delete without confirmation")
 
@@ -199,21 +201,25 @@ Examples:
 
 var statusCmd = &cobra.Command{
 	Use:     "status",
-	Short:   "Show all runtimes and their state",
+	Short:   "What's running",
 	GroupID: "daily",
-	Long: `Show all known runtimes: running, stopped, and saved named runtimes.
+	Long: `Show all known runtimes and what they're up to.
 
-For running kernels, queries each one for idle time and memory usage.
-Kernels idle for more than 24 hours are flagged with a ⚠ warning.
-A summary line shows total memory and suggests cleanup.
+For running kernels, queries each one live to report idle time,
+memory usage, and connected clients. Kernels idle for more than
+24 hours get a ⚠ nudge so you know what to clean up.
 
-Example:
   NAME             STATUS   CWD                   VENV
   py@myproject     running  ~/Projects/myproject   .venv
   py@old-thing     running  ~/Projects/old-thing   .venv   ⚠ idle 3d
   sh@myproject     stopped  ~/Projects/myproject   —
 
-  2 kernels using ~185MB. Stop idle ones? rat stop py@old-thing`,
+  2 kernels using ~185MB. Stop idle ones? rat stop py@old-thing
+
+Use -v for the full picture: runtime version, connected clients,
+URL, PID, and memory.
+
+  rat status -v`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rows, err := buildStatusRows(store())
 		if err != nil {
@@ -227,16 +233,11 @@ Example:
 
 		enrichStatusRows(rows)
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tSTATUS\tCWD\tVENV")
-		for _, row := range rows {
-			venv := shortPath(row.Venv)
-			if venv == "" {
-				venv = "—"
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\n", row.Name, row.Status, shortPath(row.Cwd), venv, formatStatusNote(row))
+		if statusVerbose {
+			printVerboseStatus(rows)
+		} else {
+			printCompactStatus(rows)
 		}
-		w.Flush()
 		printStatusSummary(rows)
 		return nil
 	},
@@ -246,8 +247,11 @@ var startCmd = &cobra.Command{
 	Use:     "start <runtime>",
 	Short:   "Start a kernel",
 	GroupID: "setup",
-	Long: `Resolve the name and start the kernel in the background.
-If already running and healthy, reports it.
+	Long: `Start a kernel.
+
+Resolves the runtime name, starts the kernel in the background, and
+reports where it is listening. If it is already running and healthy,
+reports that instead.
 
 The runtime can be a language (py, sh, r, jl, js) which resolves
 to your current project's kernel, or a full name (py@myproject, py-ml).
@@ -289,8 +293,10 @@ var stopCmd = &cobra.Command{
 	Use:     "stop <runtime> [--all]",
 	Short:   "Stop a kernel",
 	GroupID: "setup",
-	Long: `Stop a kernel. The state entry is preserved (marked stopped)
-so the name remains resolvable. Use 'rat rm' to delete state entirely.
+	Long: `Stop a kernel.
+
+The state entry is preserved and marked stopped, so the name remains
+resolvable. Use 'rat rm' to delete the runtime from state entirely.
 
 Examples:
   rat stop py
@@ -330,10 +336,12 @@ Examples:
 
 var restartCmd = &cobra.Command{
 	Use:     "restart <runtime>",
-	Short:   "Restart a kernel (fresh namespace)",
+	Short:   "Fresh start",
 	GroupID: "daily",
-	Long: `Kill the kernel process and start a new one. Fresh namespace,
-fresh language subprocess. If no kernel is running, starts one.
+	Long: `Restart a kernel with a fresh namespace.
+
+Kills the current kernel process and starts a new one. If no kernel is
+running, starts a fresh one using the same resolution path as 'rat py'.
 
 Examples:
   rat restart py
@@ -369,10 +377,12 @@ Examples:
 
 var resetCmd = &cobra.Command{
 	Use:     "reset <runtime>",
-	Short:   "Clear namespace without restarting",
+	Short:   "Clear namespace (keep process)",
 	GroupID: "setup",
-	Long: `Clear the namespace in-process. Faster than restart but less
-reliable. Does NOT auto-start — the kernel must be running.
+	Long: `Clear the namespace without restarting the process.
+
+This is faster than restart but less reliable. It does NOT auto-start —
+the kernel must already be running.
 
 For a full restart: rat restart <name>`,
 	Args: cobra.ExactArgs(1),
@@ -397,10 +407,12 @@ For a full restart: rat restart <name>`,
 
 var cancelCmd = &cobra.Command{
 	Use:     "cancel <runtime>",
-	Short:   "Cancel running execution",
+	Short:   "Unstick",
 	GroupID: "daily",
-	Long: `Interrupt the current execution on a kernel (Ctrl-C equivalent).
-Does NOT auto-start — if the kernel isn't running, reports it.
+	Long: `Interrupt the current execution on a kernel.
+
+This is the Ctrl-C equivalent. It does NOT auto-start — if the kernel
+isn't running, rat reports that and exits.
 
 Example:
   rat cancel py`,
@@ -426,12 +438,13 @@ Example:
 
 var doctorCmd = &cobra.Command{
 	Use:     "doctor [<lang>]",
-	Short:   "Run diagnostics",
+	Short:   "Diagnostics",
 	GroupID: "setup",
-	Long: `Run diagnostics for one language or for all implemented languages.
+	Long: `Run diagnostics.
 
 Checks runtime detection, environment/tooling, writable directories,
-and the health of running kernels when applicable.`,
+and the health of running kernels when applicable. Use an optional
+language argument to focus the report.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
@@ -458,7 +471,7 @@ and the health of running kernels when applicable.`,
 
 var updateCmd = &cobra.Command{
 	Use:     "update",
-	Short:   "Update rat binary and kernel dependencies",
+	Short:   "Update rat",
 	GroupID: "setup",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("update not yet implemented")
@@ -468,14 +481,19 @@ var updateCmd = &cobra.Command{
 const idleWarningAfter = 24 * time.Hour
 
 type statusRow struct {
-	Name         string
-	Status       string
-	Cwd          string
-	Venv         string
-	Port         int
-	RuntimeState string
-	IdleSeconds  int
-	MemoryMB     int
+	Name           string
+	Status         string
+	Cwd            string
+	Venv           string
+	Port           int
+	PID            int
+	RuntimeState   string
+	IdleSeconds    int
+	MemoryMB       int
+	Clients        int
+	ClientNames    string
+	LastCaller     string
+	RuntimeVersion string
 }
 
 func buildStatusRows(s *state.Store) ([]statusRow, error) {
@@ -504,6 +522,7 @@ func buildStatusRows(s *state.Store) ([]statusRow, error) {
 			Cwd:    k.Cwd,
 			Venv:   k.Venv,
 			Port:   k.Port,
+			PID:    k.PID,
 		}
 	}
 
@@ -543,7 +562,73 @@ func enrichStatusRows(rows []statusRow) {
 		rows[i].RuntimeState = status.State
 		rows[i].IdleSeconds = status.IdleSeconds
 		rows[i].MemoryMB = status.MemoryMB
+		rows[i].Clients = status.Clients
+		rows[i].ClientNames = status.ClientNames
+		rows[i].LastCaller = status.LastCaller
+		rows[i].RuntimeVersion = status.RuntimeVersion
 	}
+}
+
+func printCompactStatus(rows []statusRow) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tSTATUS\tCWD\tVENV")
+	for _, row := range rows {
+		venv := shortPath(row.Venv)
+		if venv == "" {
+			venv = "—"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s%s\n", row.Name, row.Status, shortPath(row.Cwd), venv, formatStatusNote(row))
+	}
+	w.Flush()
+}
+
+func printVerboseStatus(rows []statusRow) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tSTATUS\tRUNTIME\tCLIENTS\tMEM\tIDLE\tURL\tPID\tCWD\tVENV")
+	for _, row := range rows {
+		venv := shortPath(row.Venv)
+		if venv == "" {
+			venv = "—"
+		}
+
+		rt := "—"
+		clients := "—"
+		mem := "—"
+		idle := "—"
+		url := "—"
+		pid := "—"
+
+		if row.Status == state.StatusRunning {
+			if row.RuntimeVersion != "" {
+				rt = row.RuntimeVersion
+			}
+			if row.ClientNames != "" {
+				clients = row.ClientNames
+			} else if row.Clients > 0 {
+				clients = fmt.Sprintf("%d", row.Clients)
+			} else {
+				clients = "0"
+			}
+			if row.MemoryMB > 0 {
+				mem = fmt.Sprintf("%dMB", row.MemoryMB)
+			}
+			if row.IdleSeconds > 0 {
+				idle = formatCompactDuration(time.Duration(row.IdleSeconds) * time.Second)
+			} else {
+				idle = "<1m"
+			}
+			if row.Port > 0 {
+				url = fmt.Sprintf("http://127.0.0.1:%d/mcp", row.Port)
+			}
+			if row.PID > 0 {
+				pid = fmt.Sprintf("%d", row.PID)
+			}
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			row.Name, row.Status, rt, clients, mem, idle, url, pid, shortPath(row.Cwd), venv)
+	}
+	w.Flush()
 }
 
 func formatStatusNote(row statusRow) string {

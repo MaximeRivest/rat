@@ -84,17 +84,18 @@ type Python struct {
 	cmdPath    string
 	cmdArgs    []string
 	scriptPath string
+	version    string // e.g. "3.12.1", detected at startup
 
-	mu             sync.Mutex
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	stdout         *bufio.Reader
-	stderrBuf      bytes.Buffer
-	executionCount int
-	executing        atomic.Bool
-	waitingForInput  atomic.Bool
-	writeMu          sync.Mutex
-	partial          partialBuf // live output during execution
+	mu              sync.Mutex
+	cmd             *exec.Cmd
+	stdin           io.WriteCloser
+	stdout          *bufio.Reader
+	stderrBuf       bytes.Buffer
+	executionCount  int
+	executing       atomic.Bool
+	waitingForInput atomic.Bool
+	writeMu         sync.Mutex
+	partial         partialBuf // live output during execution
 
 	interruptMu   sync.Mutex
 	interruptProc *os.Process
@@ -126,6 +127,7 @@ func New(name, cwd, venv string) (*Python, error) {
 		cmdPath:    cmdPath,
 		cmdArgs:    cmdArgs,
 		scriptPath: scriptPath,
+		version:    detectPythonVersion(cmdPath, cmdArgs),
 	}
 	if err := p.ensureStartedLocked(); err != nil {
 		return nil, err
@@ -294,13 +296,17 @@ func (p *Python) Ctl(op string) kernel.CtlResult {
 		}
 		return kernel.CtlResult{Text: "CANCELLED"}
 	case "status":
-		if !p.executing.Load() {
-			return kernel.CtlResult{Text: "idle"}
+		state := "idle"
+		if p.executing.Load() {
+			state = "busy"
+			if p.waitingForInput.Load() {
+				state = "waiting_for_input"
+			}
 		}
-		if p.waitingForInput.Load() {
-			return kernel.CtlResult{Text: "waiting_for_input"}
+		if p.version != "" {
+			state += "\nruntime_version: Python " + p.version
 		}
-		return kernel.CtlResult{Text: "busy"}
+		return kernel.CtlResult{Text: state}
 	case "output":
 		// Return partial stdout accumulated during the current execution.
 		// Lock-free relative to p.mu so it doesn't block Run().
@@ -486,6 +492,15 @@ func truncateLog(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func detectPythonVersion(cmdPath string, cmdArgs []string) string {
+	args := append(append([]string{}, cmdArgs...), "-c", "import platform; print(platform.python_version())")
+	out, err := exec.Command(cmdPath, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func detectPythonCommand(venv string) (string, []string, error) {
