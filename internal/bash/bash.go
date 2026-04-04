@@ -38,8 +38,11 @@ type Bash struct {
 	pendingSummaryPath string
 
 	mu             sync.Mutex
+	outputMu       sync.RWMutex
 	executionCount int
 	executing      atomic.Bool
+	liveOutPath    string
+	liveCode       string
 }
 
 // New creates a new shared bash kernel for the given runtime name.
@@ -136,7 +139,9 @@ func (b *Bash) Run(code string) kernel.RunResult {
 	}
 
 	b.executing.Store(true)
+	b.setLiveOutput(outPath, code)
 	defer b.executing.Store(false)
+	defer b.clearLiveOutput()
 
 	_ = b.tmuxRun("display-message", "-d", "1500", "-t", b.target(), "rat> "+summarizeCode(code))
 	if err := b.sendLiteralTextLocked(code + "\n"); err != nil {
@@ -295,8 +300,7 @@ func (b *Bash) Ctl(op string) kernel.CtlResult {
 		}
 		return kernel.CtlResult{Text: state}
 	case "output":
-		// Bash doesn't stream partial output (tmux captures to file).
-		return kernel.CtlResult{Text: ""}
+		return kernel.CtlResult{Text: b.liveOutput()}
 	default:
 		return kernel.CtlResult{Text: fmt.Sprintf("ERROR: unknown op '%s'. Use reset, cancel, restart, or status.", op)}
 	}
@@ -626,6 +630,35 @@ func (b *Bash) startCaptureLocked(outPath string) error {
 
 func (b *Bash) stopCaptureLocked() error {
 	return b.tmuxRun("pipe-pane", "-t", b.target())
+}
+
+func (b *Bash) setLiveOutput(outPath, code string) {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.liveOutPath = outPath
+	b.liveCode = code
+}
+
+func (b *Bash) clearLiveOutput() {
+	b.outputMu.Lock()
+	defer b.outputMu.Unlock()
+	b.liveOutPath = ""
+	b.liveCode = ""
+}
+
+func (b *Bash) liveOutput() string {
+	b.outputMu.RLock()
+	outPath := b.liveOutPath
+	code := b.liveCode
+	b.outputMu.RUnlock()
+	if outPath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		return ""
+	}
+	return cleanRunOutput(string(data), code)
 }
 
 func (b *Bash) waitForControlLocked(id string) (int, error) {
