@@ -5,9 +5,21 @@ detect:
   commands: [pi]
   env: RAT_PI
 
+options:
+  model:
+    arg: --model
+    description: Model pattern or ID
+  provider:
+    arg: --provider
+    description: Provider name
+  thinking:
+    arg: --thinking
+    enum: [off, minimal, low, medium, high, xhigh]
+    description: Thinking level
+
 kernel:
   type: tmux
-  command: "{runtime} --extension {bridge} --session-dir {data_dir}/sessions"
+  command: "{runtime} {opts} --extension {bridge} --session-dir {data_dir}/sessions"
   bridge: bridge.ts
   submit: Enter
   cancel: Escape

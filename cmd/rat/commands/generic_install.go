@@ -105,6 +105,8 @@ func installGenericRuntime(lang string) error {
 		Cwd:         r.Cwd,
 		Venv:        r.Venv,
 		RuntimePath: check.RuntimeBinary,
+		Options:     r.Options,
+		Env:         r.Env,
 	})
 	if err != nil {
 		return err

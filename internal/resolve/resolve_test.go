@@ -37,7 +37,12 @@ func TestExactMatchRunningKernel(t *testing.T) {
 func TestExactMatchSavedRuntime(t *testing.T) {
 	s := tempStore(t)
 	s.PutRuntime(state.Runtime{
-		Name: "py-ml", Lang: "py", Cwd: "/ml", Venv: "/ml/.venv",
+		Name:    "py-ml",
+		Lang:    "py",
+		Cwd:     "/ml",
+		Venv:    "/ml/.venv",
+		Options: map[string]string{"model": "claude-sonnet-4-5"},
+		Env:     map[string]string{"TOKEN": "secret"},
 	})
 
 	r, err := Resolve(s, "py-ml", "/somewhere")
@@ -49,6 +54,12 @@ func TestExactMatchSavedRuntime(t *testing.T) {
 	}
 	if r.Venv != "/ml/.venv" {
 		t.Fatalf("expected venv /ml/.venv, got %s", r.Venv)
+	}
+	if r.Options["model"] != "claude-sonnet-4-5" {
+		t.Fatalf("expected options to round-trip, got %#v", r.Options)
+	}
+	if r.Env["TOKEN"] != "secret" {
+		t.Fatalf("expected env to round-trip, got %#v", r.Env)
 	}
 }
 

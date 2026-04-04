@@ -77,7 +77,7 @@ func TmuxAttach(name string) error {
 }
 
 // NewTmux creates a tmux-based kernel from a runtime config.
-func NewTmux(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath string) (*TmuxKernel, error) {
+func NewTmux(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath string, options map[string]string) (*TmuxKernel, error) {
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		return nil, fmt.Errorf("tmux not found: %w", err)
@@ -114,14 +114,34 @@ func NewTmux(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath
 		}
 	}
 
+	optionString, err := cfg.TmuxOptionString(options)
+	if err != nil {
+		return nil, err
+	}
+	optionEnv, err := cfg.OptionEnv(options)
+	if err != nil {
+		return nil, err
+	}
+
 	// Expand template variables in the command.
 	command := cfg.Kernel.Command
+	if optionString != "" && !strings.Contains(command, "{opts}") {
+		return nil, fmt.Errorf("runtime %q defines arg-mapped options but kernel.command is missing {opts}", cfg.Name)
+	}
 	command = strings.ReplaceAll(command, "{runtime}", shellQuote(runtimeBinary))
+	command = strings.ReplaceAll(command, "{opts}", optionString)
 	command = strings.ReplaceAll(command, "{bridge}", shellQuote(bridgePath))
 	command = strings.ReplaceAll(command, "{data_dir}", shellQuote(dataDir))
 	command = strings.ReplaceAll(command, "{config_dir}", shellQuote(configDir))
 	command = strings.ReplaceAll(command, "{cwd}", shellQuote(cwd))
 	command = strings.ReplaceAll(command, "{name}", name)
+	if len(optionEnv) > 0 {
+		var envParts []string
+		for _, key := range sortedOptionKeys(optionEnv) {
+			envParts = append(envParts, key+"="+shellQuote(optionEnv[key]))
+		}
+		command = strings.Join(envParts, " ") + " " + command
+	}
 
 	k := &TmuxKernel{
 		name:         name,

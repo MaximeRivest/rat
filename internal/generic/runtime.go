@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,13 +71,23 @@ type RuntimeConfig struct {
 		Fallback *FrontendFallback `yaml:"fallback,omitempty"` // fallback if native command not found
 	} `yaml:"frontend"`
 
-	Install InstallConfig `yaml:"install"`
+	Options map[string]RuntimeOption `yaml:"options,omitempty"`
+	Install InstallConfig            `yaml:"install"`
 }
 
 // FrontendFallback defines what to use when the primary frontend isn't available.
 type FrontendFallback struct {
 	Type   string `yaml:"type,omitempty"`   // "repl" or "tmux"
 	Prompt string `yaml:"prompt,omitempty"` // for repl type
+}
+
+// RuntimeOption describes a user-facing option supported by a runtime.
+type RuntimeOption struct {
+	Type        string   `yaml:"type,omitempty"`        // "string" (default) or "bool"
+	Arg         string   `yaml:"arg,omitempty"`         // CLI flag to emit, e.g. --model
+	Env         string   `yaml:"env,omitempty"`         // env var to set, e.g. AWS_PROFILE
+	Enum        []string `yaml:"enum,omitempty"`        // allowed values for string options
+	Description string   `yaml:"description,omitempty"` // help text
 }
 
 // InstallConfig defines how `rat install <lang>` should prepare a runtime.
@@ -207,6 +218,136 @@ func (cfg *RuntimeConfig) KernelScriptPath(configDir string) string {
 	return filepath.Join(configDir, cfg.Kernel.Script)
 }
 
+// OptionArgs renders configured runtime options as CLI args.
+func (cfg *RuntimeConfig) OptionArgs(options map[string]string) ([]string, error) {
+	norm, err := cfg.NormalizeOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	keys := sortedOptionKeys(norm)
+	args := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		spec := cfg.Options[key]
+		if spec.Arg == "" {
+			continue
+		}
+		value := norm[key]
+		if spec.optionType() == "bool" {
+			if isTrue(value) {
+				args = append(args, spec.Arg)
+			}
+			continue
+		}
+		args = append(args, spec.Arg, value)
+	}
+	return args, nil
+}
+
+// OptionEnv renders configured runtime options as env vars.
+func (cfg *RuntimeConfig) OptionEnv(options map[string]string) (map[string]string, error) {
+	norm, err := cfg.NormalizeOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	env := map[string]string{}
+	for key, value := range norm {
+		spec := cfg.Options[key]
+		if spec.Env != "" {
+			env[spec.Env] = value
+		}
+	}
+	return env, nil
+}
+
+// TmuxOptionString renders configured options for insertion into a shell command.
+func (cfg *RuntimeConfig) TmuxOptionString(options map[string]string) (string, error) {
+	args, err := cfg.OptionArgs(options)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " "), nil
+}
+
+// NormalizeOptions validates option names and values against runtime.yaml.
+func (cfg *RuntimeConfig) NormalizeOptions(options map[string]string) (map[string]string, error) {
+	if len(options) == 0 {
+		return map[string]string{}, nil
+	}
+	norm := make(map[string]string, len(options))
+	for key, value := range options {
+		spec, ok := cfg.Options[key]
+		if !ok {
+			return nil, fmt.Errorf("unknown option %q for %s runtime", key, cfg.Name)
+		}
+		value = strings.TrimSpace(value)
+		switch spec.optionType() {
+		case "bool":
+			if value == "" {
+				value = "true"
+			}
+			if !isBool(value) {
+				return nil, fmt.Errorf("option %q must be true or false", key)
+			}
+		default:
+			if value == "" {
+				return nil, fmt.Errorf("option %q cannot be empty", key)
+			}
+		}
+		if len(spec.Enum) > 0 && !containsString(spec.Enum, value) {
+			return nil, fmt.Errorf("option %q must be one of: %s", key, strings.Join(spec.Enum, ", "))
+		}
+		norm[key] = value
+	}
+	return norm, nil
+}
+
+func (o RuntimeOption) optionType() string {
+	if o.Type == "bool" {
+		return "bool"
+	}
+	return "string"
+}
+
+func sortedOptionKeys(options map[string]string) []string {
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isBool(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "0", "true", "false", "yes", "no", "on", "off":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTrue(value string) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // ── Generic Kernel ──────────────────────────────────────────
 
 // request/response match the kernel protocol JSON schema.
@@ -273,12 +414,13 @@ type Kernel struct {
 	binaryArgs   []string // args before the script
 	scriptPath   string
 	cwd          string
+	extraEnv     map[string]string
 	activityPath string // path to activity.jsonl for frontend sharing
 }
 
 // New creates a generic kernel from a runtime config.
 // If runtimePath is non-empty, it overrides auto-detection.
-func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath string) (*Kernel, error) {
+func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath string, options map[string]string) (*Kernel, error) {
 	binary := runtimePath
 	if binary == "" {
 		var err error
@@ -302,6 +444,15 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 		return nil, fmt.Errorf("kernel script not found: %s", scriptPath)
 	}
 
+	binaryArgs, err := cfg.OptionArgs(options)
+	if err != nil {
+		return nil, err
+	}
+	extraEnv, err := cfg.OptionEnv(options)
+	if err != nil {
+		return nil, err
+	}
+
 	// Activity log lives in the cache dir next to the kernel script.
 	activityDir, err := os.UserCacheDir()
 	if err != nil {
@@ -314,7 +465,8 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 		name:         name,
 		display:      cfg.Display,
 		binaryPath:   binary,
-		binaryArgs:   cfg.Kernel.Args,
+		binaryArgs:   append(append([]string{}, cfg.Kernel.Args...), binaryArgs...),
+		extraEnv:     extraEnv,
 		activityPath: activityPath,
 		scriptPath:   scriptPath,
 		cwd:          cwd,
@@ -520,7 +672,10 @@ func (k *Kernel) ensureStarted() error {
 	args := append(append([]string{}, k.binaryArgs...), k.scriptPath)
 	cmd := exec.Command(k.binaryPath, args...)
 	cmd.Dir = k.cwd
-	cmd.Env = os.Environ()
+	cmd.Env = append([]string{}, os.Environ()...)
+	for key, value := range k.extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

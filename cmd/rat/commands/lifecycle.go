@@ -64,6 +64,8 @@ var (
 	addCwd     string
 	addLang    string
 	addRuntime string
+	addOpt     []string
+	addEnv     []string
 )
 
 func init() {
@@ -71,6 +73,8 @@ func init() {
 	addCmd.Flags().StringVar(&addCwd, "cwd", "", "Working directory (default: current)")
 	addCmd.Flags().StringVar(&addLang, "lang", "", "Language (default: inferred from name prefix)")
 	addCmd.Flags().StringVar(&addRuntime, "runtime", "", "Path to language binary (e.g. /opt/python3.11/bin/python3)")
+	addCmd.Flags().StringArrayVar(&addOpt, "opt", nil, "Structured runtime options (KEY=VALUE, repeatable)")
+	addCmd.Flags().StringArrayVar(&addEnv, "env", nil, "Extra env vars (KEY=VALUE, repeatable)")
 }
 
 var addCmd = &cobra.Command{
@@ -93,7 +97,8 @@ Examples:
   rat add py-web --venv ~/web/.venv --cwd ~/web
   rat add r-stats --lang r --cwd ~/stats
   rat add py-311 --runtime /opt/python3.11/bin/python3
-  rat add jl-gpu --runtime ~/julia-nightly/bin/julia --cwd ~/gpu`,
+  rat add jl-gpu --runtime ~/julia-nightly/bin/julia --cwd ~/gpu
+  rat add pi-sonnet --lang pi --opt model=claude-sonnet-4-5 --opt thinking=high`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -136,12 +141,17 @@ Examples:
 			runtimePath, _ = filepath.Abs(runtimePath)
 		}
 
+		optionsMap := parseKVFlags(addOpt)
+		envMap := parseKVFlags(addEnv)
+
 		if err := store().PutRuntime(state.Runtime{
 			Name:        name,
 			Lang:        lang,
 			Cwd:         cwd,
 			Venv:        venv,
 			RuntimePath: runtimePath,
+			Options:     optionsMap,
+			Env:         envMap,
 		}); err != nil {
 			return err
 		}
@@ -152,6 +162,12 @@ Examples:
 		}
 		if runtimePath != "" {
 			fmt.Fprintf(os.Stderr, " runtime=%s", runtimePath)
+		}
+		for k, v := range optionsMap {
+			fmt.Fprintf(os.Stderr, " opt:%s=%s", k, v)
+		}
+		for k, v := range envMap {
+			fmt.Fprintf(os.Stderr, " env:%s=%s", k, v)
 		}
 		fmt.Fprintln(os.Stderr, ")")
 		fmt.Fprintf(os.Stderr, "Start it: rat start %s\n", name)
@@ -421,6 +437,8 @@ Examples:
 			Cwd:         r.Cwd,
 			Venv:        r.Venv,
 			RuntimePath: r.RuntimePath,
+			Options:     r.Options,
+			Env:         r.Env,
 		})
 		if err != nil {
 			return err

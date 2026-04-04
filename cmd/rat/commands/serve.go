@@ -31,6 +31,7 @@ var (
 	serveNameFlag    string
 	serveVenvFlag    string
 	serveRuntimeFlag string
+	serveOptFlags    []string
 	serveEnvFlags    []string
 )
 
@@ -42,6 +43,7 @@ func init() {
 	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
 	serveCmd.Flags().StringVar(&serveVenvFlag, "venv", "", "Python venv path (py only)")
 	serveCmd.Flags().StringVar(&serveRuntimeFlag, "runtime", "", "Path to language binary (e.g. /opt/python3.11/bin/python3)")
+	serveCmd.Flags().StringArrayVar(&serveOptFlags, "opt", nil, "Structured runtime options (KEY=VALUE, repeatable)")
 	serveCmd.Flags().StringArrayVar(&serveEnvFlags, "env", nil, "Extra env vars for the kernel (KEY=VALUE, repeatable)")
 
 	rootCmd.AddCommand(serveCmd)
@@ -97,10 +99,11 @@ func runServe(input string) error {
 	cwd, _ = filepath.Abs(cwd)
 
 	// Apply extra env vars (from --env flags / rat add --env).
-	envMap := parseEnvFlags(serveEnvFlags)
+	envMap := parseKVFlags(serveEnvFlags)
 	for k, v := range envMap {
 		os.Setenv(k, v)
 	}
+	optionsMap := parseKVFlags(serveOptFlags)
 
 	// Create the kernel for the requested language.
 	var k kernel.Kernel
@@ -112,7 +115,7 @@ func runServe(input string) error {
 		k, err = python.New(name, cwd, serveVenvFlag, serveRuntimeFlag)
 	default:
 		// Try to load a user-defined or community runtime.
-		k, err = loadGenericKernel(name, lang, cwd, serveRuntimeFlag)
+		k, err = loadGenericKernel(name, lang, cwd, serveRuntimeFlag, optionsMap)
 	}
 
 	if err != nil {
@@ -133,7 +136,7 @@ func runServe(input string) error {
 // loadGenericKernel tries to find a runtime.yaml for the given language
 // in the standard search paths and creates a kernel from it.
 // Dispatches on kernel.type: "json" (subprocess) or "tmux" (shared session).
-func loadGenericKernel(name, lang, cwd, runtimePath string) (kernel.Kernel, error) {
+func loadGenericKernel(name, lang, cwd, runtimePath string, options map[string]string) (kernel.Kernel, error) {
 	configPath, err := findRuntimeConfig(lang)
 	if err != nil {
 		return nil, fmt.Errorf("language %q: %w\n\nTo add a custom runtime, create ~/.config/rat/runtimes/%s/runtime.yaml\nSee: KERNEL-PROTOCOL.md", lang, err, lang)
@@ -148,9 +151,9 @@ func loadGenericKernel(name, lang, cwd, runtimePath string) (kernel.Kernel, erro
 
 	switch cfg.KernelType() {
 	case "tmux":
-		return generic.NewTmux(name, cwd, cfg, configDir, runtimePath)
+		return generic.NewTmux(name, cwd, cfg, configDir, runtimePath, options)
 	default:
-		return generic.New(name, cwd, cfg, configDir, runtimePath)
+		return generic.New(name, cwd, cfg, configDir, runtimePath, options)
 	}
 }
 
@@ -176,8 +179,8 @@ func findRuntimeConfig(lang string) (string, error) {
 	return "", fmt.Errorf("no runtime found for %q\n\nTo add one, create %s\nSee: KERNEL-PROTOCOL.md", lang, userPath)
 }
 
-// parseEnvFlags turns ["KEY=VALUE", ...] into a map.
-func parseEnvFlags(flags []string) map[string]string {
+// parseKVFlags turns ["KEY=VALUE", ...] into a map.
+func parseKVFlags(flags []string) map[string]string {
 	m := make(map[string]string, len(flags))
 	for _, f := range flags {
 		if k, v, ok := strings.Cut(f, "="); ok {
