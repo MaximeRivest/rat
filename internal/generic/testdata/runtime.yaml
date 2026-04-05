@@ -1,0 +1,9 @@
+name: mock
+display: Mock
+
+detect:
+  commands: [python3, python]
+
+kernel:
+  type: json
+  script: mock-kernel.py

@@ -3,7 +3,6 @@ package python
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,31 +18,6 @@ func requirePython(t *testing.T) {
 	}
 }
 
-func requireIPython(t *testing.T) {
-	t.Helper()
-	py, args, err := detectPythonCommand("")
-	if err != nil {
-		t.Skipf("python not available: %v", err)
-	}
-	cmdArgs := append(append([]string{}, args...), "-c", "import IPython")
-	if err := exec.Command(py, cmdArgs...).Run(); err != nil {
-		t.Skip("IPython not installed for detected python")
-	}
-}
-
-func newTestKernel(t *testing.T, cwd string) *Python {
-	t.Helper()
-	requireIPython(t)
-	p, err := New(t.Name(), cwd, "", "")
-	if err != nil {
-		t.Fatalf("New(): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = p.Shutdown()
-	})
-	return p
-}
-
 func newPlainTestKernel(t *testing.T, cwd string) *Python {
 	t.Helper()
 	requirePython(t)
@@ -57,35 +31,26 @@ func newPlainTestKernel(t *testing.T, cwd string) *Python {
 	return p
 }
 
-func TestPythonKernelTopLevelAwait(t *testing.T) {
-	p := newTestKernel(t, t.TempDir())
+// Top-level await requires IPython's AST transformer. The kernel uses
+// plain ast.parse, so top-level await is a syntax error at the kernel
+// level. This test verifies the kernel rejects it cleanly.
+func TestPythonKernelTopLevelAwaitIsSyntaxError(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
 
 	result := p.Run("import asyncio\nawait asyncio.sleep(0)\n42")
-	if !result.Success {
-		t.Fatalf("Run() failed: %s", result.Error)
+	if result.Success {
+		t.Fatal("expected syntax error for top-level await")
 	}
-	if !strings.Contains(result.Output, "42") {
-		t.Fatalf("output = %q, want it to contain 42", result.Output)
+	if !strings.Contains(result.Error, "SyntaxError") {
+		t.Fatalf("error = %q, want SyntaxError", result.Error)
 	}
 }
 
 func TestPythonKernelAsyncioBehaviors(t *testing.T) {
-	t.Run("running loop exists inside awaited coroutine", func(t *testing.T) {
-		p := newTestKernel(t, t.TempDir())
+	t.Run("asyncio.run works from kernel", func(t *testing.T) {
+		p := newPlainTestKernel(t, t.TempDir())
 
-		result := p.Run("import asyncio\nasync def f():\n    return asyncio.get_running_loop() is not None\nawait f()")
-		if !result.Success {
-			t.Fatalf("Run() failed: %s", result.Error)
-		}
-		if !strings.Contains(result.Output, "True") {
-			t.Fatalf("output = %q, want True", result.Output)
-		}
-	})
-
-	t.Run("create_task works inside awaited coroutine", func(t *testing.T) {
-		p := newTestKernel(t, t.TempDir())
-
-		result := p.Run("import asyncio\nasync def f():\n    t = asyncio.create_task(asyncio.sleep(0, result=42))\n    return await t\nawait f()")
+		result := p.Run("import asyncio\nasync def f():\n    return 42\nasyncio.run(f())")
 		if !result.Success {
 			t.Fatalf("Run() failed: %s", result.Error)
 		}
@@ -94,8 +59,8 @@ func TestPythonKernelAsyncioBehaviors(t *testing.T) {
 		}
 	})
 
-	t.Run("top level create_task without running loop fails clearly", func(t *testing.T) {
-		p := newTestKernel(t, t.TempDir())
+	t.Run("create_task without running loop fails clearly", func(t *testing.T) {
+		p := newPlainTestKernel(t, t.TempDir())
 
 		result := p.Run("import asyncio\nasync def sleeper():\n    await asyncio.sleep(0)\n    return 7\nt = asyncio.create_task(sleeper())")
 		if result.Success {
@@ -107,47 +72,13 @@ func TestPythonKernelAsyncioBehaviors(t *testing.T) {
 	})
 }
 
-func TestPythonKernelIPythonMagics(t *testing.T) {
-	t.Run("pwd", func(t *testing.T) {
-		cwd := t.TempDir()
-		p := newTestKernel(t, cwd)
-
-		result := p.Run("%pwd")
-		if !result.Success {
-			t.Fatalf("Run(%%pwd) failed: %s", result.Error)
-		}
-		if !strings.Contains(result.Output, cwd) {
-			t.Fatalf("output = %q, want it to contain %q", result.Output, cwd)
-		}
-	})
-
-	t.Run("timeit", func(t *testing.T) {
-		p := newTestKernel(t, t.TempDir())
-
-		result := p.Run("%timeit [x**2 for x in range(100)]")
-		if !result.Success {
-			t.Fatalf("Run(%%timeit) failed: %s", result.Error)
-		}
-		if !strings.Contains(result.Output, "per loop") {
-			t.Fatalf("output = %q, want a timeit result", result.Output)
-		}
-	})
-
-	t.Run("shell", func(t *testing.T) {
-		p := newTestKernel(t, t.TempDir())
-
-		result := p.Run("!echo hello-from-rat")
-		if !result.Success {
-			t.Fatalf("Run(!echo) failed: %s", result.Error)
-		}
-		if !strings.Contains(result.Output, "hello-from-rat") {
-			t.Fatalf("output = %q, want shell output", result.Output)
-		}
-	})
-}
+// IPython magics (%pwd, %timeit, !shell) are handled by the frontend,
+// not the kernel. The kernel uses plain ast.parse, so these are syntax
+// errors at the kernel level. Frontend tests belong in an integration
+// test that exercises the IPython frontend → MCP → kernel path.
 
 func TestPythonKernelStatus(t *testing.T) {
-	p := newTestKernel(t, t.TempDir())
+	p := newPlainTestKernel(t, t.TempDir())
 
 	status := p.Ctl("status")
 	if !strings.Contains(status.Text, "idle") {
@@ -158,17 +89,19 @@ func TestPythonKernelStatus(t *testing.T) {
 	}
 }
 
-func TestPythonFrontendKeepsOnlyInteractiveDebuggerLocal(t *testing.T) {
-	if !strings.Contains(frontendScript, `_LOCAL_ONLY = {"%debug", "%pdb"}`) {
-		t.Fatalf("frontend local-only magic set changed; want only %%debug and %%pdb to stay local")
+func TestPythonFrontendRoutesAllMagicsLocally(t *testing.T) {
+	// The frontend routes all % and ! prefixed lines to IPython locally,
+	// not through the kernel. Verify the routing logic is present.
+	if !strings.Contains(frontendScript, `raw_cell.startswith("%")`) {
+		t.Fatal("frontend should route %magics locally")
 	}
-	if strings.Contains(frontendScript, "%autoreload") {
-		t.Fatalf("frontend still treats %%autoreload as local-only; expected magics to go to kernel")
+	if !strings.Contains(frontendScript, `raw_cell.startswith("!")`) {
+		t.Fatal("frontend should route !shell locally")
 	}
 }
 
 func TestPythonLookOverviewStillWorksWithIPythonNamespace(t *testing.T) {
-	p := newTestKernel(t, t.TempDir())
+	p := newPlainTestKernel(t, t.TempDir())
 
 	_ = p.Run("x = 42")
 	look := p.Look(kernel.LookRequest{})
