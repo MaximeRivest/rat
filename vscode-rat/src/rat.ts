@@ -121,6 +121,7 @@ export interface KernelInfo {
   pid: number;
   cwd: string;
   venv: string;
+  status: string;
   started: string;
 }
 
@@ -154,6 +155,7 @@ export function readState(): RatState {
       const venv = entry.match(/venv:\s*(\S+)/);
       const started = entry.match(/started:\s*(\S+)/);
       if (!name || !port) return null;
+      const status = entry.match(/status:\s*(\S+)/);
       return {
         name: name[1],
         lang: lang?.[1] ?? "",
@@ -161,6 +163,7 @@ export function readState(): RatState {
         pid: pid ? parseInt(pid[1], 10) : 0,
         cwd: cwd?.[1] ?? "",
         venv: venv?.[1] ?? "",
+        status: status?.[1] ?? "running",
         started: started?.[1] ?? "",
       };
     }),
@@ -243,6 +246,12 @@ export class McpClient {
     return this.parseToolResult(await this.callTool("look", args)).text;
   }
 
+  async tail(n = 10, format = "json"): Promise<string> {
+    return this.parseToolResult(
+      await this.callTool("tail", { n, format }),
+    ).text;
+  }
+
   async complete(code: string, cursor: number): Promise<string[]> {
     const r = await this.callTool("look", { code, cursor });
     const text = this.parseToolResult(r).text;
@@ -253,6 +262,10 @@ export class McpClient {
     return this.parseToolResult(
       await this.callTool("ctl", { op: "status" }),
     ).text;
+  }
+
+  async reset(): Promise<void> {
+    await this.callTool("ctl", { op: "reset" });
   }
 
   /**
