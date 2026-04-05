@@ -17,6 +17,7 @@ package resolve
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/maximerivest/rat/internal/lang"
@@ -82,6 +83,21 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 				Env:         rt.Env,
 			}, nil
 		}
+	}
+
+	// ── Step 1b: Instance shorthand ───────────────────────────────────────────
+	// "py.2" → resolve "py", then rename to "<resolved>.2".
+	// Runs after exact match so that existing instance kernels
+	// (e.g. "py@rat.2" already in state) are found directly.
+
+	if base, n, ok := parseInstance(input); ok {
+		result, err := Resolve(s, base, cwd)
+		if err != nil {
+			return nil, err
+		}
+		result.Name = fmt.Sprintf("%s.%d", result.Name, n)
+		result.IsNew = true // force caller to check/create
+		return result, nil
 	}
 
 	// ── Step 2: Language alias ────────────────────────────────────
@@ -245,6 +261,21 @@ func computeCanonicalName(
 	}
 
 	return name
+}
+
+// parseInstance checks if input ends with ".N" where N is an integer >= 2.
+// Returns the base string, the instance number, and true if matched.
+// "py.2" → ("py", 2, true), "py" → ("", 0, false), "py.ml" → ("", 0, false)
+func parseInstance(input string) (string, int, bool) {
+	i := strings.LastIndex(input, ".")
+	if i < 1 || i == len(input)-1 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(input[i+1:])
+	if err != nil || n < 2 {
+		return "", 0, false
+	}
+	return input[:i], n, true
 }
 
 // parentQualifiedName returns "parent-basename" for collision tiebreaking.

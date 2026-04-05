@@ -97,6 +97,9 @@ func runGenericRepl(cfg Config) error {
 	// Header.
 	serverURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port)
 	fmt.Printf("rat %s | %s @ %s\n", cfg.Name, cfg.Lang, serverURL)
+	if tabBar := formatTabBar(cfg.Instance, cfg.Siblings); tabBar != "" {
+		fmt.Println(tabBar)
+	}
 	fmt.Println("Shared namespace — other clients see your state.")
 	fmt.Println()
 
@@ -247,6 +250,23 @@ func formatEvent(e activityEntry) {
 		}
 		fmt.Printf("%s[%s] %s%s\n", dim, e.Event, display, reset)
 	}
+}
+
+// formatTabBar renders instance tabs when multiple siblings exist.
+// Returns "" if there's only one instance (no clutter for the common case).
+func formatTabBar(current int, siblings []int) string {
+	if len(siblings) <= 1 {
+		return ""
+	}
+	var parts []string
+	for _, n := range siblings {
+		if n == current {
+			parts = append(parts, fmt.Sprintf("[%d]", n))
+		} else {
+			parts = append(parts, fmt.Sprintf(" %d ", n))
+		}
+	}
+	return strings.Join(parts, "·")
 }
 
 func stripHint(s string) string {

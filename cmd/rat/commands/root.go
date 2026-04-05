@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,7 +29,7 @@ func rootHelp() string {
 		s.Dim("typing, or Claude/Cursor/a notebook is calling."),
 		"",
 		s.Bold("Daily use:") + "  " + s.Dim("<lang> = py, sh, r, jl, js or a kernel name"),
-		helpLine("rat <lang>", "Drop into a REPL"),
+		helpLine("rat <lang> [N]", "Drop into a REPL (N = instance number)"),
 		helpLine("rat run <lang> '…'", "One-liner"),
 		helpLine("rat look <lang>", "See what's inside"),
 		helpLine("rat tail <lang>", "See recent activity"),
@@ -117,6 +118,13 @@ func isKnownCommand(name string) bool {
 }
 
 func handleREPL(input string, args []string) error {
+	instance := 0
+	if len(args) == 1 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n >= 1 {
+			instance = n
+			args = nil
+		}
+	}
 	if len(args) > 0 {
 		return fmt.Errorf("unexpected arguments after %q: %s", input, strings.Join(args, " "))
 	}
@@ -124,6 +132,19 @@ func handleREPL(input string, args []string) error {
 	k, action, err := ensureKernel(input)
 	if err != nil {
 		return err
+	}
+
+	// Apply instance suffix: py@myproject.2, py@myproject.3, etc.
+	baseName := k.Name
+	if instance >= 2 {
+		// Resolve via the instance-aware resolver path.
+		instanceInput := fmt.Sprintf("%s.%d", input, instance)
+		k, action, err = ensureKernel(instanceInput)
+		if err != nil {
+			return err
+		}
+	} else {
+		instance = 1
 	}
 	printKernelAction(k, action)
 
@@ -142,6 +163,8 @@ func handleREPL(input string, args []string) error {
 		}
 	}
 
+	siblings := discoverSiblings(baseName, instance)
+
 	return repl.Run(repl.Config{
 		Name:          k.Name,
 		Lang:          k.Lang,
@@ -151,7 +174,49 @@ func handleREPL(input string, args []string) error {
 		ActivityLog:   activityLog,
 		RuntimeConfig: rtCfg,
 		ConfigDir:     configDir,
+		Instance:      instance,
+		Siblings:      siblings,
 	})
+}
+
+// discoverSiblings returns the instance numbers of all running kernels
+// that share the same base name (including the base itself as instance 1).
+func discoverSiblings(baseName string, current int) []int {
+	kernels, err := store().ListRunning()
+	if err != nil {
+		return []int{current}
+	}
+	prefix := baseName + "."
+	var instances []int
+	for _, k := range kernels {
+		if k.Name == baseName {
+			instances = append(instances, 1)
+		} else if strings.HasPrefix(k.Name, prefix) {
+			if n, err := strconv.Atoi(k.Name[len(prefix):]); err == nil {
+				instances = append(instances, n)
+			}
+		}
+	}
+	// Ensure current is in the list (it may not be running yet).
+	found := false
+	for _, n := range instances {
+		if n == current {
+			found = true
+			break
+		}
+	}
+	if !found {
+		instances = append(instances, current)
+	}
+	// Sort.
+	for i := range instances {
+		for j := i + 1; j < len(instances); j++ {
+			if instances[j] < instances[i] {
+				instances[i], instances[j] = instances[j], instances[i]
+			}
+		}
+	}
+	return instances
 }
 
 // activityLogPath returns the expected activity log path for a kernel.

@@ -31,6 +31,10 @@ type Config struct {
 	// Generic runtime config (nil for built-in sh/py).
 	RuntimeConfig *generic.RuntimeConfig
 	ConfigDir     string // directory containing runtime.yaml
+
+	// Instance support: "rat py 2" creates a second kernel for the same project.
+	Instance int   // 1-based instance number (0 or 1 = default)
+	Siblings []int // all running instance numbers (including this one)
 }
 
 // Run starts an interactive REPL session connected to the kernel.
