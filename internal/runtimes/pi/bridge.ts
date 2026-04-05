@@ -33,11 +33,6 @@ export default function (pi: ExtensionAPI) {
   const currentIdFile = join(controlDir, "current-id");
   const readyFile = join(controlDir, "ready");
   const activityLog = join(controlDir, "activity.jsonl");
-  const debugLog = join(controlDir, "bridge-debug.log");
-
-  function debug(msg: string) {
-    appendFileSync(debugLog, `${new Date().toISOString()} ${msg}\n`);
-  }
 
   let lastInteractiveInput = "";
   let activityCount = 0;
@@ -112,28 +107,22 @@ export default function (pi: ExtensionAPI) {
     activityCount = scanActivityCount();
     lastInteractiveInput = "";
     writeFileSync(readyFile, `${Date.now()}\n`);
-    debug(`session_start activityCount=${activityCount}`);
   });
 
   // Track interactive user prompts so they can appear in rat tail.
   pi.on("input", async (event) => {
-    debug(`input event.source=${event.source} event.text=${JSON.stringify(event.text)?.slice(0, 100)} keys=${Object.keys(event).join(",")}`);
     const text = typeof event.text === "string" ? event.text.trim() : "";
     if (event.source === "interactive" && text && !text.startsWith("/")) {
       lastInteractiveInput = text;
-      debug(`captured interactive input: ${text.slice(0, 80)}`);
     } else {
       lastInteractiveInput = "";
-      debug(`skipped input: source=${event.source} text=${text.slice(0, 40)}`);
     }
     return { action: "continue" };
   });
 
   // After each agent turn, either complete an MCP request or log human activity.
   pi.on("agent_end", async (event) => {
-    debug(`agent_end lastInteractiveInput=${JSON.stringify(lastInteractiveInput)?.slice(0, 80)} currentIdExists=${existsSync(currentIdFile)} msgCount=${event.messages?.length ?? 0}`);
     const result = extractAssistantResult(event);
-    debug(`agent_end result.text=${result.text.slice(0, 80)}`);
 
     if (existsSync(currentIdFile)) {
       const id = readFileSync(currentIdFile, "utf8").trim();
@@ -152,7 +141,6 @@ export default function (pi: ExtensionAPI) {
       }
       // Clear stale interactive input — this was an MCP-driven turn.
       lastInteractiveInput = "";
-      debug(`agent_end: MCP path taken, cleared lastInteractiveInput`);
       return;
     }
 
