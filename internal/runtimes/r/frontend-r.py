@@ -347,9 +347,13 @@ def main():
         "prompt":           "ansiblue bold",
         "prompt.cont":      "ansigray bold",
         # Toolbar.
-        "bottom-toolbar":   "reverse",
-        "bottom-toolbar.text": "",
-        "bottom-toolbar.key":  "ansiblue bold",
+        "bottom-toolbar":           "bg:#262626 #d0d0d0 noreverse",
+        "bottom-toolbar.text":      "noreverse",
+        "rat.label":                "fg:#00d7ff bold noreverse",
+        "rat.bar":                  "fg:#d0d0d0 noreverse",
+        "rat.sep":                  "fg:#8a8a8a noreverse",
+        "rat.dot":                  "fg:#8a8a8a noreverse",
+        "rat.green":                "fg:#00d75f noreverse",
         # Completion menu — use reverse video for portability.
         "completion-menu.completion":             "bg:ansiblack ansiwhite",
         "completion-menu.completion.current":     "bg:ansiblue ansiwhite bold",
@@ -477,22 +481,43 @@ def main():
     # ── Toolbar ──────────────────────────────────────────────
 
     def get_toolbar():
-        parts = []
-        parts.append(("class:bottom-toolbar.key", " rat "))
-        parts.append(("class:bottom-toolbar.text", f" {args.name} "))
-        parts.append(("class:bottom-toolbar.text", "│ "))
-        parts.append(("class:bottom-toolbar.text", f"{state.var_count} vars "))
+        import shutil
+        cols = shutil.get_terminal_size((80, 24)).columns
+
+        # Left side: rat <display> │ <name>
+        left_parts = []
+        left_parts.append(("class:rat.label", " rat "))
+        left_parts.append(("class:rat.bar", " r "))
+        left_parts.append(("class:rat.sep", "│"))
+        left_parts.append(("class:rat.bar", f" {args.name} "))
+
+        # Right side: shared • N vars • F2:vars • Ctrl+D exit
+        right_segs = []
+        right_segs.append(("class:rat.green", "shared"))
+        right_segs.append(("class:rat.bar", f"{state.var_count} vars"))
         if state.last_time_ms > 0:
-            parts.append(("class:bottom-toolbar.text", "│ "))
             if state.last_time_ms >= 1000:
-                parts.append(("class:bottom-toolbar.text", f"{state.last_time_ms/1000:.1f}s "))
+                right_segs.append(("class:rat.bar", f"{state.last_time_ms/1000:.1f}s"))
             else:
-                parts.append(("class:bottom-toolbar.text", f"{state.last_time_ms}ms "))
+                right_segs.append(("class:rat.bar", f"{state.last_time_ms}ms"))
         if state.is_busy:
-            parts.append(("class:bottom-toolbar.text", "│ "))
-            parts.append(("class:bottom-toolbar.key", "running… "))
-        parts.append(("class:bottom-toolbar.text", "│ F2:vars │ Ctrl+D exit "))
-        return parts
+            right_segs.append(("class:rat.label", "running…"))
+        right_segs.append(("class:rat.bar", "F2:vars"))
+        right_segs.append(("class:rat.bar", "Ctrl+D exit"))
+
+        # Join right segments with dot separators
+        right_parts = []
+        for i, seg in enumerate(right_segs):
+            if i > 0:
+                right_parts.append(("class:rat.dot", " • "))
+            right_parts.append(seg)
+
+        # Calculate padding
+        left_len = sum(len(t) for _, t in left_parts)
+        right_len = sum(len(t) for _, t in right_parts)
+        pad = max(1, cols - left_len - right_len)
+
+        return left_parts + [("class:rat.bar", " " * pad)] + right_parts
 
     # ── History ──────────────────────────────────────────────
 

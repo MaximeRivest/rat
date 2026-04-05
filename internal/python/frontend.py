@@ -392,19 +392,44 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             shell = self
 
             def _toolbar():
-                parts = []
-                parts.append(("class:bottom-toolbar.key", " rat "))
-                parts.append(("class:bottom-toolbar", f" {shell._kernel_name} "))
-                parts.append(("class:bottom-toolbar", "│ "))
-                parts.append(("class:bottom-toolbar", f"{shell._rat_var_count} vars "))
+                import shutil
+                cols = shutil.get_terminal_size((80, 24)).columns
+
+                # Left side: rat <display> │ <name> [│ (venv)]
+                left_parts = []
+                left_parts.append(("class:rat.label", " rat "))
+                left_parts.append(("class:rat.bar", " py "))
+                left_parts.append(("class:rat.sep", "│"))
+                left_parts.append(("class:rat.bar", f" {shell._kernel_name} "))
+                if shell._venv:
+                    left_parts.append(("class:rat.sep", "│"))
+                    left_parts.append(("class:rat.bar", f" ({shell._venv}) "))
+
+                # Right side: shared • N vars • F2:vars • Ctrl+D exit
+                right_segs = []
+                right_segs.append(("class:rat.green", "shared"))
+                right_segs.append(("class:rat.bar", f" {shell._rat_var_count} vars"))
                 if shell._rat_last_ms > 0:
                     t = f"{shell._rat_last_ms/1000:.1f}s" if shell._rat_last_ms >= 1000 else f"{shell._rat_last_ms}ms"
-                    parts.append(("class:bottom-toolbar", f"{t} "))
+                    right_segs.append(("class:rat.bar", t))
                 if shell._rat_busy:
-                    parts.append(("class:bottom-toolbar.key", "running… "))
-                parts.append(("class:bottom-toolbar", "│ F2:vars "))
-                parts.append(("class:bottom-toolbar", "│ Ctrl+D exit "))
-                return parts
+                    right_segs.append(("class:rat.label", "running…"))
+                right_segs.append(("class:rat.bar", "F2:vars"))
+                right_segs.append(("class:rat.bar", "Ctrl+D exit"))
+
+                # Join right segments with dot separators
+                right_parts = []
+                for i, seg in enumerate(right_segs):
+                    if i > 0:
+                        right_parts.append(("class:rat.dot", " • "))
+                    right_parts.append(seg)
+
+                # Calculate padding
+                left_len = sum(len(t) for _, t in left_parts)
+                right_len = sum(len(t) for _, t in right_parts)
+                pad = max(1, cols - left_len - right_len)
+
+                return left_parts + [("class:rat.bar", " " * pad)] + right_parts
 
             # pt_app is already created by super().__init__.
             if self.pt_app:
@@ -412,8 +437,13 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                 from prompt_toolkit.styles import Style, merge_styles
                 from prompt_toolkit.keys import Keys
                 toolbar_style = Style.from_dict({
-                    "bottom-toolbar":     "reverse",
-                    "bottom-toolbar.key": "ansiblue bold reverse",
+                    "bottom-toolbar":           "bg:#262626 #d0d0d0 noreverse",
+                    "bottom-toolbar.text":      "noreverse",
+                    "rat.label":                "fg:#00d7ff bold noreverse",
+                    "rat.bar":                  "fg:#d0d0d0 noreverse",
+                    "rat.sep":                  "fg:#8a8a8a noreverse",
+                    "rat.dot":                  "fg:#8a8a8a noreverse",
+                    "rat.green":                "fg:#00d75f noreverse",
                 })
                 self.pt_app.style = merge_styles([self.pt_app.style, toolbar_style])
 
