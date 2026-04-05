@@ -1,6 +1,8 @@
 package mcpserver
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -176,5 +178,50 @@ func TestStripANSI(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("stripANSI(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestReadActivityEntriesTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.jsonl")
+	data := strings.Join([]string{
+		`{"n":1,"code":"x = 1","output":"","ok":true,"t":1,"client":"rat"}`,
+		`{"n":2,"code":"print(x)","output":"1","ok":true,"t":2,"client":"claude-desktop"}`,
+		`{"event":"message","data":{"from":"slack","text":"hi"},"t":3}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readActivityEntries(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2", len(entries))
+	}
+	if entries[0].N != 2 || entries[1].Event != "message" {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
+func TestFormatActivity(t *testing.T) {
+	text := formatActivity([]activityEntry{{
+		Code:   "x = 1\nprint(x)",
+		Output: "1\n",
+		OK:     true,
+		Client: "claude-desktop",
+	}, {
+		Event: "message",
+		Data:  map[string]interface{}{"from": "slack", "text": "hi"},
+	}})
+	if !strings.Contains(text, "claude-desktop ✓") {
+		t.Fatalf("text = %q, want client header", text)
+	}
+	if !strings.Contains(text, "print(x)") || !strings.Contains(text, "1") {
+		t.Fatalf("text = %q, want code and output", text)
+	}
+	if !strings.Contains(text, "slack") || !strings.Contains(text, "hi") {
+		t.Fatalf("text = %q, want event", text)
 	}
 }

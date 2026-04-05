@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/maximerivest/rat/internal/kernel"
 )
 
 func TestBashLiveOutputReturnsCleanedPartialOutput(t *testing.T) {
@@ -38,5 +40,25 @@ func TestBashCtlOutputReturnsLiveOutput(t *testing.T) {
 	got := b.Ctl("output").Text
 	if !strings.Contains(got, "step 1") || !strings.Contains(got, "step 2") {
 		t.Fatalf("Ctl(output) = %q, want streamed steps", got)
+	}
+}
+
+func TestBashLogActivityAndPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.jsonl")
+	b := &Bash{activityPath: path}
+
+	if got := b.ActivityLogPath(); got != path {
+		t.Fatalf("ActivityLogPath() = %q, want %q", got, path)
+	}
+
+	b.logActivity("echo hello", kernel.RunResult{Success: true, Output: "hello", ExecCount: 3})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"n":3`) || !strings.Contains(text, `"code":"echo hello"`) || !strings.Contains(text, `"output":"hello"`) {
+		t.Fatalf("activity log = %q", text)
 	}
 }

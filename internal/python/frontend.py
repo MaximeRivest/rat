@@ -12,6 +12,7 @@ Usage (called by Go binary):
 import argparse
 import http.client
 import json
+import os
 import re
 import sys
 import threading
@@ -110,12 +111,21 @@ def _mcp_notify(url, method, params=None):
         pass
 
 
-def _mcp_init(url):
+def _make_client_name(prefix):
+    try:
+        tty = os.path.basename(os.ttyname(sys.stdin.fileno()))
+    except OSError:
+        tty = f"pid-{os.getpid()}"
+    return f"{prefix}@{tty}"
+
+
+
+def _mcp_init(url, client_name):
     """Initialize the MCP session."""
     r = _mcp_call(url, "initialize", {
         "protocolVersion": "2025-03-26",
         "capabilities": {},
-        "clientInfo": {"name": "rat-py-repl", "version": "0.1.0"},
+        "clientInfo": {"name": client_name, "version": "0.1.0"},
     })
     if "_error" not in r:
         _mcp_notify(url, "notifications/initialized")
@@ -215,33 +225,58 @@ class ActivityWatcher:
                 pass
 
 
-DIM = "\033[2m"
-RESET_ANSI = "\033[0m"
+# Activity colors — use ANSI 16 colors so terminal themes control readability.
+_BAR     = "\033[2;35m"   # dim magenta for the border
+_LABEL   = "\033[2;37m"   # dim white for the label
+_CODE    = "\033[2m"      # dim default for code
+_OUTPUT  = "\033[2m"      # dim default for output
+_ERR_DIM = "\033[2;31m"   # dim red for failed marker
+_R       = "\033[0m"
 
 
-def _format_activity(entries):
+def _activity_label(entry, own_client=""):
+    client = (entry.get("client") or "").strip()
+    if not client:
+        return "activity"
+    if own_client and client == own_client:
+        return "you"
+    if client.startswith("rat-py-repl@"):
+        return f"repl {client.split('@', 1)[1]}"
+    if client.startswith("rat-r-repl@"):
+        return f"R repl {client.split('@', 1)[1]}"
+    return client
+
+
+
+def _format_activity(entries, own_client=""):
     """Format activity entries for display in the REPL."""
     lines = []
     for e in entries:
         code = e.get("code", "")
         output = e.get("output", "")
-        n = e.get("n", "?")
         ok = e.get("ok", True)
         mark = "✓" if ok else "✗"
+        mark_color = _LABEL if ok else _ERR_DIM
+        label = _activity_label(e, own_client)
 
-        lines.append(f"{DIM}── rat: exec #{n} (another client) {mark} ──{RESET_ANSI}")
-        for cl in code.split("\n")[:8]:
-            lines.append(f"{DIM}>>> {cl}{RESET_ANSI}")
-        if output:
-            for ol in output.split("\n")[:8]:
-                lines.append(f"{DIM}{ol}{RESET_ANSI}")
-        lines.append(f"{DIM}{'─' * 42}{RESET_ANSI}")
+        # Filter blank code lines.
+        code_lines = [cl for cl in code.split("\n") if cl.strip()][:6]
+        out_lines = [ol for ol in output.split("\n") if ol.strip()][:6]
+
+        # Header: thin bar + label.
+        lines.append(f"{_BAR}\u258d{mark_color} {label} {mark}{_R}")
+        for cl in code_lines:
+            lines.append(f"{_BAR}\u258d {_CODE}{cl}{_R}")
+        if out_lines:
+            for ol in out_lines:
+                lines.append(f"{_BAR}\u258d {_OUTPUT}{ol}{_R}")
+        lines.append("")  # blank line between entries
     return "\n".join(lines)
 
 
 # ── IPython shell with MCP backend ──────────────────────────
 
-def _make_shell(server_url, activity_log=None):
+def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv="", py_version="", client_name="", replay_recent_activity=False):
     """Create an IPython shell class that routes execution to MCP."""
     from IPython.terminal.interactiveshell import TerminalInteractiveShell
     from IPython.core.interactiveshell import ExecutionResult
@@ -252,10 +287,22 @@ def _make_shell(server_url, activity_log=None):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._server = server_url
+            self._kernel_name = kernel_name
+            import os as _os
+            self._kernel_cwd = cwd.replace(_os.path.expanduser('~'), '~') if cwd else ''
+            self._py_version = py_version
+            self._venv = _os.path.basename(venv) if venv else ''
             self._mcp_ok = False
+            self._client_name = client_name
+            self._replay_recent_activity = replay_recent_activity
             self._activity = ActivityWatcher(activity_log)
-            self._activity.seek_to_end()
+            self._activity.seek_to_end()  # will be rewound in interact()
+            self._rat_var_count = 0
+            self._rat_last_ms = 0
+            self._rat_busy = False
             self._patch_completer()
+            self._patch_toolbar()
+            self._refresh_var_count()
 
         def interact(self):
             """Main REPL loop — wrapped with patch_stdout so the
@@ -263,28 +310,127 @@ def _make_shell(server_url, activity_log=None):
             without corrupting the prompt."""
             from prompt_toolkit.patch_stdout import patch_stdout
 
+            from prompt_toolkit.formatted_text import ANSI
+            from prompt_toolkit import print_formatted_text as ptk_print
+
             stop = threading.Event()
-
-            def watcher():
-                while not stop.wait(0.5):
-                    entries = self._activity.check()
-                    if entries:
-                        # patch_stdout makes this safe while the
-                        # prompt is active — prompt_toolkit redraws
-                        # the input line after our output.
-                        print(_format_activity(entries))
-
-            thread = threading.Thread(target=watcher, daemon=True)
-            thread.start()
             try:
                 with patch_stdout():
+                    if self._replay_recent_activity:
+                        self._show_recent_activity(ptk_print, ANSI)
+                    else:
+                        self._activity.seek_to_end()
+
+                    def watcher():
+                        while not stop.wait(0.5):
+                            entries = self._activity.check()
+                            if entries:
+                                ptk_print(ANSI(_format_activity(entries, self._client_name)))
+                                # Refresh var count after remote activity.
+                                self._refresh_var_count()
+                                # Seed remote code into prompt_toolkit's
+                                # in-memory history for up-arrow recall.
+                                self._seed_history(entries)
+
+                    thread = threading.Thread(target=watcher, daemon=True)
+                    thread.start()
                     super().interact()
             finally:
                 stop.set()
 
+        def _seed_history(self, entries):
+            """Add remote code to prompt_toolkit history for up-arrow."""
+            for e in entries:
+                code = e.get("code", "").strip()
+                if code and self.pt_app:
+                    try:
+                        self.pt_app.history.store_string(code)
+                    except Exception:
+                        pass
+
+        def _show_recent_activity(self, ptk_print, ANSI):
+            """On connect, show the last few activity entries and
+            seed them into history so up-arrow has context."""
+            path = self._activity.path
+            if not path:
+                return
+            try:
+                with open(path, "r") as f:
+                    lines = f.readlines()
+            except (FileNotFoundError, OSError):
+                return
+            # Parse last N entries.
+            entries = []
+            for line in lines[-10:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if entries:
+                ptk_print(ANSI(_format_activity(entries, self._client_name)))
+                self._seed_history(entries)
+            # Now seek to end so the watcher only sees new stuff.
+            self._activity.seek_to_end()
+
+        def _refresh_var_count(self):
+            """Quick look call to get current var count from kernel."""
+            try:
+                r = _tool(self._server, "look", {}, timeout=3)
+                out = _text(r)
+                # Parse "N vars" from overview like "py idle | 6 vars"
+                m = re.search(r'(\d+) vars?', out)
+                if m:
+                    self._rat_var_count = int(m.group(1))
+            except Exception:
+                pass
+
+        def _patch_toolbar(self):
+            """Add a bottom toolbar showing rat status."""
+            shell = self
+
+            def _toolbar():
+                parts = []
+                parts.append(("class:bottom-toolbar.key", " rat "))
+                parts.append(("class:bottom-toolbar", f" {shell._kernel_name} "))
+                parts.append(("class:bottom-toolbar", "│ "))
+                parts.append(("class:bottom-toolbar", f"{shell._rat_var_count} vars "))
+                if shell._rat_last_ms > 0:
+                    t = f"{shell._rat_last_ms/1000:.1f}s" if shell._rat_last_ms >= 1000 else f"{shell._rat_last_ms}ms"
+                    parts.append(("class:bottom-toolbar", f"{t} "))
+                if shell._rat_busy:
+                    parts.append(("class:bottom-toolbar.key", "running… "))
+                parts.append(("class:bottom-toolbar", "│ F2:vars "))
+                parts.append(("class:bottom-toolbar", "│ Ctrl+D exit "))
+                return parts
+
+            # pt_app is already created by super().__init__.
+            if self.pt_app:
+                self.pt_app.bottom_toolbar = _toolbar
+                from prompt_toolkit.styles import Style, merge_styles
+                from prompt_toolkit.keys import Keys
+                toolbar_style = Style.from_dict({
+                    "bottom-toolbar":     "reverse",
+                    "bottom-toolbar.key": "ansiblue bold reverse",
+                })
+                self.pt_app.style = merge_styles([self.pt_app.style, toolbar_style])
+
+                # F2: show variable overview
+                @self.pt_app.key_bindings.add(Keys.F2)
+                def _show_vars(event):
+                    try:
+                        r = _tool(shell._server, "look", {}, timeout=5)
+                        out = _text(r)
+                        if out:
+                            print(f"\n{out}\n")
+                    except Exception as e:
+                        print(f"\n[rat] error: {e}\n")
+
         def _ensure_mcp(self):
             if not self._mcp_ok:
-                r = _mcp_init(self._server)
+                r = _mcp_init(self._server, self._client_name)
                 self._mcp_ok = "_error" not in r
 
         def _patch_completer(self):
@@ -309,10 +455,16 @@ def _make_shell(server_url, activity_log=None):
                             if parts:
                                 labels.append(parts[0])
 
+                    # Filter dunder methods unless user is typing "__"
+                    token_start = offset
+                    while token_start > 0 and text[token_start - 1] not in " \t\n(,=[{.":
+                        token_start -= 1
+                    typing_prefix = text[token_start:offset]
+                    if not typing_prefix.startswith("__"):
+                        labels = [l for l in labels if not l.startswith("__")]
+
                     if labels:
                         # Find start of the token being completed.
-                        # If labels contain dots (full-path completions from
-                        # fallback completer), go back past dots too.
                         has_dots = any("." in label for label in labels)
                         start = offset
                         if has_dots:
@@ -368,10 +520,24 @@ def _make_shell(server_url, activity_log=None):
             # Execute on the shared kernel
             self._ensure_mcp()
             self._activity.mark_own(raw_cell)
+            self._rat_busy = True
             er = ExecutionResult(None)
+            t0 = __import__('time').monotonic()
             try:
                 r = _tool(self._server, "run", {"code": raw_cell})
-                out = _strip_hint(_text(r))
+                elapsed = __import__('time').monotonic() - t0
+                self._rat_last_ms = int(elapsed * 1000)
+                self._rat_busy = False
+
+                # Parse var count from hint.
+                raw_text = _text(r)
+                hint_match = _HINT_RE.search(raw_text)
+                if hint_match:
+                    var_match = re.search(r'(\d+) vars?', hint_match.group())
+                    if var_match:
+                        self._rat_var_count = int(var_match.group(1))
+
+                out = _strip_hint(raw_text)
                 if out:
                     print(out)
                 if _is_err(r):
@@ -379,6 +545,7 @@ def _make_shell(server_url, activity_log=None):
                     # read-only property derived from this).
                     er.error_in_exec = RuntimeError("execution failed")
             except Exception as e:
+                self._rat_busy = False
                 print(f"[rat] connection error: {e}")
                 print("[rat] kernel may have stopped. "
                       "Ctrl-D to exit, then 'rat py' to reconnect.")
@@ -387,6 +554,11 @@ def _make_shell(server_url, activity_log=None):
 
             if store_history:
                 self.execution_count += 1
+                try:
+                    self.history_manager.store_inputs(
+                        self.execution_count, raw_cell)
+                except Exception:
+                    pass
 
             return er
 
@@ -396,6 +568,9 @@ def _make_shell(server_url, activity_log=None):
 # ── Main ─────────────────────────────────────────────────────
 
 def main():
+    import signal as _signal
+    _signal.signal(_signal.SIGTSTP, _signal.SIG_IGN)  # block until args parsed
+
     parser = argparse.ArgumentParser(description="IPython frontend for rat py")
     parser.add_argument("--server", default="http://127.0.0.1:8717/mcp",
                         help="MCP server URL")
@@ -403,7 +578,19 @@ def main():
                         help="Kernel name")
     parser.add_argument("--activity-log", default=None,
                         help="Path to activity log (for shared session visibility)")
+    parser.add_argument("--cwd", default="",
+                        help="Kernel working directory")
+    parser.add_argument("--venv", default="",
+                        help="Virtual environment path")
+    parser.add_argument("--python-version", default="",
+                        help="Python version string")
     args = parser.parse_args()
+
+    # Ctrl+Z detaches (same as Ctrl+D) — rat owns the kernel lifecycle.
+    def _sigtstp_handler(signum, frame):
+        print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
+        sys.exit(0)
+    _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
 
     # Check IPython is available
     try:
@@ -414,7 +601,8 @@ def main():
         sys.exit(1)
 
     # Connect to kernel
-    r = _mcp_init(args.server)
+    client_name = _make_client_name("rat-py-repl")
+    r = _mcp_init(args.server, client_name)
     if "_error" in r:
         print(f"Cannot connect to kernel at {args.server}",
               file=sys.stderr)
@@ -426,21 +614,57 @@ def main():
     info = r.get("serverInfo", {})
     server_name = info.get("name", args.name)
 
+    py_version = f"Python {args.python_version}" if args.python_version else "Python"
+    cwd_display = args.cwd.replace(os.path.expanduser('~'), '~') if args.cwd else ''
+    venv_display = os.path.basename(args.venv) if args.venv else ''
+
     # Launch IPython with our custom shell
     from IPython.terminal.ipapp import TerminalIPythonApp
 
-    Shell = _make_shell(args.server, activity_log=args.activity_log)
+    # Use a per-kernel IPython profile so history is isolated
+    # from other kernels and normal IPython sessions.
+    profile_dir = os.path.join(
+        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
+        "rat", "kernels", args.name, "ipython-profile",
+    )
+    hist_file = os.path.join(profile_dir, 'history.sqlite')
+    replay_recent_activity = os.path.exists(hist_file) and os.path.getsize(hist_file) > 0
+    Shell = _make_shell(args.server, kernel_name=args.name,
+                        activity_log=args.activity_log, cwd=args.cwd,
+                        venv=args.venv, py_version=py_version,
+                        client_name=client_name,
+                        replay_recent_activity=replay_recent_activity)
+    os.makedirs(profile_dir, exist_ok=True)
+
     app = TerminalIPythonApp.instance()
     app.interact = True
     app.interactive_shell_class = Shell
     app.display_banner = False
-    app.initialize(["--no-banner"])
+    app.initialize(["--no-banner",
+                    f"--HistoryManager.hist_file={hist_file}",
+                    "--TerminalInteractiveShell.confirm_exit=False"])
 
-    print(f"rat {args.name} | {server_name} @ {args.server}")
-    print("Shared namespace — other clients see your variables.")
+    BLUE = "\033[34m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    R = "\033[0m"
+
+    # Clear screen so prompt starts at top, toolbar at bottom.
+    print("\033[2J\033[H", end="")
+    banner_parts = [f"  {BLUE}rat{R} {BOLD}{args.name}{R} — {py_version}"]
+    if cwd_display:
+        banner_parts.append(f"in {cwd_display}")
+    if venv_display:
+        banner_parts.append(f"({venv_display})")
+    print(" ".join(banner_parts))
+    print(f"  {DIM}Shared namespace · other clients see your variables{R}")
     print()
 
     app.start()
+
+    # Ctrl+D exits IPython cleanly. Print a detach message so the user
+    # knows the kernel is still alive.
+    print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
 
 
 if __name__ == "__main__":

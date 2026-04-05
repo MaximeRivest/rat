@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 )
 
 //go:embed frontend.py
@@ -16,10 +18,14 @@ var frontendScript string
 // IPython session where execution and completions go through MCP to
 // the shared kernel. Everything else (history, multiline, syntax
 // highlighting, magics) stays native IPython.
-func RunFrontend(name string, port int) error {
+func RunFrontend(name string, port int, cwd string, venv string, pyVersion string) error {
 	cmdPath, cmdArgs, err := detectPythonCommand("")
 	if err != nil {
 		return fmt.Errorf("find python for frontend: %w", err)
+	}
+
+	if pyVersion == "" {
+		pyVersion = detectPythonVersion(cmdPath, cmdArgs)
 	}
 
 	scriptPath, err := writeFrontendScript(name)
@@ -35,7 +41,13 @@ func RunFrontend(name string, port int) error {
 		"--server", serverURL,
 		"--name", name,
 		"--activity-log", activityPath,
+		"--cwd", cwd,
+		"--venv", venv,
+		"--python-version", pyVersion,
 	)
+
+	// Ignore SIGTSTP (Ctrl+Z) — rat owns the kernel lifecycle.
+	signal.Ignore(syscall.SIGTSTP)
 
 	cmd := exec.Command(cmdPath, args...)
 	cmd.Stdin = os.Stdin

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/tmuxutil"
 )
 
 //go:embed extension.ts
@@ -321,20 +322,13 @@ func (p *Pi) startSession() error {
 }
 
 func (p *Pi) configureUI() {
-	left := fmt.Sprintf("#[bold]rat pi#[nobold] #[fg=colour45](ratmux)#[default] | %s", p.name)
-	right := "#[fg=colour10]shared session#[default] • Escape cancel • Ctrl+B d detach"
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status", "on")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-position", "bottom")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-interval", "1")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-style", "bg=colour235,fg=colour252")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "message-style", "bg=colour45,fg=colour16")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-left-length", "80")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-right-length", "100")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-left", left)
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "status-right", right)
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "window-status-format", "")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "window-status-current-format", "")
-	_ = p.tmuxRun("set-option", "-t", p.sessionName, "window-status-separator", "")
+	tmuxutil.ConfigureSession(tmuxutil.SessionConfig{
+		TmuxPath:    p.tmuxPath,
+		SessionName: p.sessionName,
+		Display:     "pi",
+		Name:        p.name,
+		CancelKey:   "Escape",
+	})
 }
 
 func (p *Pi) killSession() {

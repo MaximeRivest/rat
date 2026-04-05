@@ -28,6 +28,7 @@ type activityEntry struct {
 	Output string `json:"output"`
 	OK     bool   `json:"ok"`
 	Time   int64  `json:"t"`
+	Client string `json:"client,omitempty"`
 }
 
 //go:embed kernel.py
@@ -129,6 +130,8 @@ func New(name, cwd, venv, runtimePath string) (*Python, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	_ = os.Remove(filepath.Join(filepath.Dir(scriptPath), "activity.jsonl"))
 
 	p := &Python{
 		name:       name,

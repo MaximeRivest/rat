@@ -377,6 +377,7 @@ type activityEntry struct {
 	Output string `json:"output"`
 	OK     bool   `json:"ok"`
 	Time   int64  `json:"t"`
+	Client string `json:"client,omitempty"`
 }
 
 // Event is a kernel-initiated notification (pushed, not requested).
@@ -460,6 +461,7 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 	}
 	activityPath := filepath.Join(activityDir, "rat", "kernels", name, "activity.jsonl")
 	os.MkdirAll(filepath.Dir(activityPath), 0o700)
+	_ = os.Remove(activityPath)
 
 	k := &Kernel{
 		name:         name,

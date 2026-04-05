@@ -6,6 +6,7 @@
 package bash
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/tmuxutil"
 )
 
 var validVarNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -36,6 +38,7 @@ type Bash struct {
 	pendingPath        string
 	pendingModePath    string
 	pendingSummaryPath string
+	activityPath       string
 
 	mu             sync.Mutex
 	outputMu       sync.RWMutex
@@ -80,6 +83,7 @@ func New(name, cwd string) (*Bash, error) {
 		pendingPath:        filepath.Join(dataDir, "pending.sh"),
 		pendingModePath:    filepath.Join(dataDir, "pending.mode"),
 		pendingSummaryPath: filepath.Join(dataDir, "pending.summary"),
+		activityPath:       filepath.Join(dataDir, "activity.jsonl"),
 	}
 	if err := b.ensureStartedLocked(); err != nil {
 		return nil, err
@@ -173,21 +177,25 @@ func (b *Bash) Run(code string) kernel.RunResult {
 		} else {
 			errMsg += fmt.Sprintf("\nCommand exited with code %d", status)
 		}
-		return kernel.RunResult{
+		result := kernel.RunResult{
 			Success:   false,
 			Output:    output,
 			Error:     errMsg,
 			ExecCount: execCount,
 			Duration:  int(time.Since(start).Milliseconds()),
 		}
+		b.logActivity(code, result)
+		return result
 	}
 
-	return kernel.RunResult{
+	result := kernel.RunResult{
 		Success:   true,
 		Output:    output,
 		ExecCount: execCount,
 		Duration:  int(time.Since(start).Milliseconds()),
 	}
+	b.logActivity(code, result)
+	return result
 }
 
 // IsWaitingForInput checks if the running command needs stdin.
@@ -307,6 +315,41 @@ func (b *Bash) Ctl(op string) kernel.CtlResult {
 }
 
 // Shutdown tears down the tmux session.
+// ActivityLogPath returns the path to the activity log for this kernel.
+func (b *Bash) ActivityLogPath() string {
+	return b.activityPath
+}
+
+func (b *Bash) logActivity(code string, r kernel.RunResult) {
+	if b.activityPath == "" {
+		return
+	}
+	type activityEntry struct {
+		N      int    `json:"n"`
+		Code   string `json:"code"`
+		Output string `json:"output"`
+		OK     bool   `json:"ok"`
+		Time   int64  `json:"t"`
+	}
+	entry := activityEntry{
+		N:      r.ExecCount,
+		Code:   truncateString(code, 500),
+		Output: truncateString(r.Output, 500),
+		OK:     r.Success,
+		Time:   time.Now().Unix(),
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(b.activityPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(data, '\n'))
+}
+
 func (b *Bash) Shutdown() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -604,20 +647,13 @@ func (b *Bash) startSessionLocked() error {
 }
 
 func (b *Bash) configureUILocked() {
-	left := "#[bold]rat sh#[nobold] #[fg=colour45](ratmux)#[default] | " + b.name + " | #{b:pane_current_path}"
-	right := "#[fg=colour10]shared shell#[default] • Ctrl+C interrupt • Ctrl+B d detach"
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status", "on")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-position", "bottom")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-interval", "1")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-style", "bg=colour235,fg=colour252")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "message-style", "bg=colour45,fg=colour16")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-left-length", "80")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-right-length", "100")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-left", left)
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "status-right", right)
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "window-status-format", "")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "window-status-current-format", "")
-	_ = b.tmuxRun("set-option", "-t", b.sessionName, "window-status-separator", "")
+	tmuxutil.ConfigureSession(tmuxutil.SessionConfig{
+		TmuxPath:    b.tmuxPath,
+		SessionName: b.sessionName,
+		Display:     "sh",
+		Name:        b.name,
+		CancelKey:   "Ctrl+C",
+	})
 }
 
 func (b *Bash) startCaptureLocked(outPath string) error {

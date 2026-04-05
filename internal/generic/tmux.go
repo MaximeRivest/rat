@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/tmuxutil"
 )
 
 // TmuxKernel implements kernel.Kernel for tmux-based runtimes.
@@ -97,6 +98,7 @@ func NewTmux(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath
 
 	// Activity log for frontend cross-client visibility.
 	activityPath := filepath.Join(dataDir, "activity.jsonl")
+	_ = os.Remove(activityPath)
 
 	// Resolve the bridge script path.
 	bridgePath := cfg.BridgePath(configDir)
@@ -342,20 +344,13 @@ func (k *TmuxKernel) startSession() error {
 }
 
 func (k *TmuxKernel) configureUI() {
-	left := fmt.Sprintf("#[bold]rat %s#[nobold] #[fg=colour45](ratmux)#[default] | %s", k.display, k.name)
-	right := fmt.Sprintf("#[fg=colour10]shared session#[default] • %s cancel • Ctrl+B d detach", k.cancelKey)
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status", "on")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-position", "bottom")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-interval", "1")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-style", "bg=colour235,fg=colour252")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "message-style", "bg=colour45,fg=colour16")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-left-length", "80")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-right-length", "100")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-left", left)
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "status-right", right)
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "window-status-format", "")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "window-status-current-format", "")
-	_ = k.tmuxRun("set-option", "-t", k.sessionName, "window-status-separator", "")
+	tmuxutil.ConfigureSession(tmuxutil.SessionConfig{
+		TmuxPath:    k.tmuxPath,
+		SessionName: k.sessionName,
+		Display:     k.display,
+		Name:        k.name,
+		CancelKey:   k.cancelKey,
+	})
 }
 
 func (k *TmuxKernel) killSession() {

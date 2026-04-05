@@ -1,7 +1,7 @@
 // Package mcpserver wraps a kernel.Kernel as an MCP server.
 //
 // This is the shared MCP layer — same code for bash, Python, R, Julia.
-// It registers three tools (run, look, ctl) and delegates to the kernel.
+// It registers four tools (run, look, tail, ctl) and delegates to the kernel.
 //
 // Go concept: this package depends on the kernel.Kernel INTERFACE,
 // not on any specific kernel implementation. That's how one MCP server
@@ -9,7 +9,9 @@
 package mcpserver
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -55,6 +57,7 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 				"run(code) runs code. "+
 				"look() shows variables. look(at='x') inspects x. "+
 				"look(code='df.he', cursor=5) completes. "+
+				"tail() shows recent activity. "+
 				"ctl(op='reset') resets.",
 			name,
 		)),
@@ -94,6 +97,7 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		defer close(stop)
 		go relayRunNotifications(ctx, s, k, stop)
 		result := k.Run(code)
+		annotateActivity(k, result.ExecCount, callerName(ctx))
 		return formatRunResult(result), nil
 	})
 
@@ -134,6 +138,42 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		})
 
 		return mcp.NewToolResultText(result.Text), nil
+	})
+
+	// ── tail ─────────────────────────────────────────────────
+
+	tailTool := mcp.NewTool("tail",
+		mcp.WithDescription(
+			"Show recent activity from the kernel activity log. "+
+				"Returns recent runs with code, output, success, time, and client when available.",
+		),
+		mcp.WithNumber("n", mcp.Description("How many recent entries to return (default 10).")),
+		mcp.WithString("format", mcp.Description("Output format: text (default) or json.")),
+	)
+
+	s.AddTool(tailTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		n := 10
+		switch v := args["n"].(type) {
+		case float64:
+			n = int(v)
+		case int:
+			n = v
+		}
+		format, _ := args["format"].(string)
+		if format == "" {
+			format = "text"
+		}
+		if caller := callerName(ctx); caller != "" {
+			tracker.TouchFrom(caller)
+		} else {
+			tracker.Touch()
+		}
+		text, err := tailActivity(k, n, format)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(text), nil
 	})
 
 	// ── ctl ──────────────────────────────────────────────────
@@ -202,6 +242,144 @@ func formatHint(ok bool, durationMs, vars int) string {
 	return fmt.Sprintf("%s %s", mark, dur)
 }
 
+type activityEntry struct {
+	N      int                    `json:"n"`
+	Code   string                 `json:"code"`
+	Output string                 `json:"output"`
+	OK     bool                   `json:"ok"`
+	Time   int64                  `json:"t"`
+	Client string                 `json:"client,omitempty"`
+	Event  string                 `json:"event,omitempty"`
+	Data   map[string]interface{} `json:"data,omitempty"`
+}
+
+func tailActivity(k kernel.Kernel, n int, format string) (string, error) {
+	if n <= 0 {
+		n = 10
+	}
+	if n > 100 {
+		n = 100
+	}
+	withLog, ok := k.(activityLogKernel)
+	if !ok {
+		return "", fmt.Errorf("activity history not available")
+	}
+	entries, err := readActivityEntries(withLog.ActivityLogPath(), n)
+	if err != nil {
+		return "", err
+	}
+	if format == "json" {
+		data, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+	return formatActivity(entries), nil
+}
+
+func readActivityEntries(path string, n int) ([]activityEntry, error) {
+	if path == "" {
+		return nil, fmt.Errorf("activity history not available")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []activityEntry
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if line == "" {
+			continue
+		}
+		var entry activityEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	if len(entries) <= n {
+		return entries, nil
+	}
+	return entries[len(entries)-n:], nil
+}
+
+func formatActivity(entries []activityEntry) string {
+	if len(entries) == 0 {
+		return "no recent activity"
+	}
+	var lines []string
+	for _, e := range entries {
+		if e.Event != "" {
+			lines = append(lines, formatActivityEvent(e), "")
+			continue
+		}
+		mark := "✓"
+		if !e.OK {
+			mark = "✗"
+		}
+		label := strings.TrimSpace(e.Client)
+		if label == "" {
+			label = "activity"
+		}
+		lines = append(lines, fmt.Sprintf("%s %s", label, mark))
+		for _, line := range limitNonBlankLines(e.Code, 6) {
+			lines = append(lines, "  "+line)
+		}
+		for _, line := range limitNonBlankLines(cleanOutput(e.Output), 6) {
+			lines = append(lines, "  "+line)
+		}
+		lines = append(lines, "")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func formatActivityEvent(e activityEntry) string {
+	switch e.Event {
+	case "message":
+		from, _ := e.Data["from"].(string)
+		text, _ := e.Data["text"].(string)
+		channel, _ := e.Data["channel"].(string)
+		header := strings.TrimSpace(from)
+		if header == "" {
+			header = "message"
+		}
+		if channel != "" {
+			header += " @" + channel
+		}
+		if text == "" {
+			return header
+		}
+		return header + "\n  " + text
+	default:
+		return e.Event
+	}
+}
+
+func limitNonBlankLines(text string, max int) []string {
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
+		if len(lines) == max {
+			break
+		}
+	}
+	return lines
+}
+
 // cleanOutput strips ANSI escapes and processes \r so that
 // progress-bar output (tqdm, etc.) shows only the final frame
 // and terminal colours don't leak into MCP text results.
@@ -241,6 +419,65 @@ func callerName(ctx context.Context) string {
 		return info.GetClientInfo().Name
 	}
 	return ""
+}
+
+type activityLogKernel interface {
+	ActivityLogPath() string
+}
+
+func annotateActivity(k kernel.Kernel, execCount int, client string) {
+	if execCount <= 0 || client == "" {
+		return
+	}
+	withLog, ok := k.(activityLogKernel)
+	if !ok {
+		return
+	}
+	path := withLog.ActivityLogPath()
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	var lines []string
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		lines = append(lines, s.Text())
+	}
+	if len(lines) == 0 {
+		return
+	}
+
+	updated := false
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &entry); err != nil {
+			continue
+		}
+		n, _ := entry["n"].(float64)
+		if int(n) != execCount {
+			continue
+		}
+		entry["client"] = client
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return
+		}
+		lines[i] = string(data)
+		updated = true
+		break
+	}
+	if !updated {
+		return
+	}
+	_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
 // relayRunNotifications polls the kernel for output chunks and input requests

@@ -4,7 +4,9 @@
 
 library(jsonlite)
 
-env <- new.env(parent = globalenv())
+# Use globalenv() directly so rcompgen's completion engine can see
+# all session variables (it walks the search path).
+env <- globalenv()
 
 send <- function(obj) {
   cat(toJSON(obj, auto_unbox = TRUE), "\n", sep = "", file = stdout())
@@ -76,19 +78,37 @@ while (TRUE) {
     send(list(text = look_at(req$at)))
 
   } else if (op == "complete") {
-    # Basic completions using utils::apropos
-    prefix <- req$code
-    if (!is.null(req$cursor) && req$cursor >= 0) {
-      prefix <- substr(req$code, 1, req$cursor)
-    }
-    # Extract last token
-    tokens <- strsplit(prefix, "[^a-zA-Z0-9._]")[[1]]
-    token <- if (length(tokens) > 0) tail(tokens, 1) else ""
-    matches <- apropos(paste0("^", token), mode = "function")
+    # Use R's built-in completion engine (rcompgen).
+    # It knows about session variables, functions, $, ::, file paths, etc.
+    line <- req$code
+    cursor <- if (!is.null(req$cursor) && req$cursor >= 0) req$cursor else nchar(line)
+    # Feed the line buffer to rcompgen.
+    utils:::.assignLinebuffer(substr(line, 1, cursor))
+    utils:::.assignEnd(cursor)
+    utils:::.guessTokenFromLine()
+    utils:::.completeToken()
+    matches <- utils:::.retrieveCompletions()
     if (length(matches) == 0) {
       send(list(text = "No completions."))
     } else {
-      lines <- sapply(head(matches, 50), function(m) sprintf("%-20s function", m))
+      # Classify each match for display metadata.
+      lines <- vapply(head(matches, 50), function(m) {
+        # Try to figure out what it is.
+        kind <- tryCatch({
+          obj <- get(m, envir = env)
+          if (is.function(obj)) "function"
+          else if (is.data.frame(obj)) "data.frame"
+          else if (is.list(obj)) "list"
+          else paste(class(obj)[1])
+        }, error = function(e) {
+          # Not in our env — try globalenv/base.
+          tryCatch({
+            obj <- get(m, envir = globalenv())
+            if (is.function(obj)) "function" else paste(class(obj)[1])
+          }, error = function(e2) "")
+        })
+        sprintf("%-20s %s", m, kind)
+      }, character(1))
       send(list(text = paste(lines, collapse = "\n")))
     }
 

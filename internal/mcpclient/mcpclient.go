@@ -140,6 +140,18 @@ func (s *Session) IsWaitingForInput(ctx context.Context) bool {
 	return status.State == "waiting_for_input"
 }
 
+// Tail returns recent activity from the kernel activity log.
+func (s *Session) Tail(ctx context.Context, n int, format string) (*mcp.CallToolResult, error) {
+	args := map[string]any{}
+	if n > 0 {
+		args["n"] = n
+	}
+	if format != "" {
+		args["format"] = format
+	}
+	return s.callTool(ctx, "tail", args)
+}
+
 // Ctl sends a control operation (reset, cancel, restart, status).
 func (s *Session) Ctl(ctx context.Context, op string) (*mcp.CallToolResult, error) {
 	return s.callTool(ctx, "ctl", map[string]any{"op": op})

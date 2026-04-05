@@ -40,7 +40,7 @@ func Run(cfg Config) error {
 	case "sh":
 		return bash.Attach(cfg.Name)
 	case "py":
-		return python.RunFrontend(cfg.Name, cfg.Port)
+		return python.RunFrontend(cfg.Name, cfg.Port, cfg.Cwd, cfg.Venv, "")
 	}
 
 	// Generic runtimes — dispatch on frontend type from runtime.yaml.
