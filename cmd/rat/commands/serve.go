@@ -50,7 +50,7 @@ func init() {
 }
 
 var serveCmd = &cobra.Command{
-	Use:     "serve <name> [--http] [--port PORT]",
+	Use:     "serve <name>",
 	Short:   "MCP server (for app builders)",
 	GroupID: "setup",
 	Long: `Run an MCP server in the foreground.

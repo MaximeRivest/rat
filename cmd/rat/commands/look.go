@@ -22,7 +22,7 @@ func init() {
 }
 
 var lookCmd = &cobra.Command{
-	Use:     "look <runtime> [--at SYMBOL]",
+	Use:     "look <runtime>",
 	Short:   "See what's inside",
 	GroupID: "daily",
 	Long: `Inspect a kernel's namespace.

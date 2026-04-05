@@ -78,7 +78,7 @@ func init() {
 }
 
 var addCmd = &cobra.Command{
-	Use:     "add <name> [dir] [--lang LANG] [--venv PATH]",
+	Use:     "add <name> [dir]",
 	Short:   "Register a named runtime",
 	GroupID: "setup",
 	Long: `Register a named runtime with custom configuration.
