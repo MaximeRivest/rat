@@ -165,3 +165,70 @@ Your version in `~/.config/` takes priority over the built-in.
   # Then in another terminal:
   rat run ruby 'puts 1 + 1'
   ```
+
+## Frontend styling guide
+
+If you write a custom REPL frontend (using prompt_toolkit, etc.),
+follow these rules so your colors work on any terminal theme:
+
+### Use ANSI 16 colors, not RGB
+
+```python
+# ✗ Bad — hardcoded RGB bypasses the terminal theme.
+#   Invisible on some backgrounds, wrong on others.
+BLUE = "\033[38;2;108;158;248m"
+
+# ✓ Good — terminal theme maps this to a readable blue.
+BLUE = "\033[34m"
+```
+
+The 16 ANSI colors (black, red, green, yellow, blue, magenta,
+cyan, white × normal/bright) are remapped by every terminal
+theme. Solarized picks Solarized shades. Dracula picks Dracula
+shades. Light themes pick dark-enough-on-white shades.
+
+### Use attributes for emphasis
+
+```python
+BOLD = "\033[1m"       # emphasis
+DIM  = "\033[2m"       # de-emphasis (activity, hints)
+R    = "\033[0m"       # reset
+```
+
+`bold`, `dim`, `italic`, `underline`, and `reverse` work on
+every terminal and adapt to the theme.
+
+### prompt_toolkit: use ansi* names
+
+```python
+Style.from_dict({
+    # ✗ Bad
+    "prompt": "#6c9ef8 bold",
+    # ✓ Good
+    "prompt": "ansiblue bold",
+    # ✓ reverse video always contrasts with the background
+    "bottom-toolbar": "reverse",
+})
+```
+
+### Helper module
+
+rat ships `rat_frontend.py` with pre-built constants and helpers:
+
+```python
+from rat_frontend import ansi, style, format_activity
+
+# ANSI escapes
+print(f"{ansi.BLUE}hello{ansi.R}")
+print(ansi.err("something failed"))   # red
+print(ansi.dim("muted hint"))          # dim
+
+# prompt_toolkit style dict
+from prompt_toolkit.styles import Style
+session = PromptSession(style=Style.from_dict(style.PROMPT_TOOLKIT))
+
+# Format activity entries from the shared session watcher
+print(format_activity(entries))
+```
+
+See `internal/runtimes/rat_frontend.py` for the full API.

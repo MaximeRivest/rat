@@ -1,0 +1,21 @@
+# rat hardening todo
+
+- [ ] Add local transport hardening in `cmd/rat/commands/serve.go` by binding HTTP to localhost only, validating `Origin` on Streamable HTTP requests, and adding server read, write, and idle timeouts.
+- [ ] Add automatic local auth for daemon-managed HTTP kernels by minting a per-kernel token in `internal/daemon`, storing it in `internal/state`, and attaching it automatically from `internal/mcpclient`.
+- [ ] Keep stdio as the default zero-friction trusted path and use local HTTP only where multi-client access is needed.
+- [ ] Extend `internal/state/state.go` to persist transport kind, token metadata, policy profile, and audit settings alongside port, PID, and cwd.
+- [ ] Add MCP request middleware in `internal/mcpserver` for auth checks, request ID injection, request size limits, and structured audit events.
+- [ ] Add audit logging in the Go host for every `run`, `look`, and `ctl` call with caller, kernel, request ID, timing, and policy decision.
+- [ ] Add runtime policy profiles in state with defaults for workspace roots, inherited env vars, resource limits, and network mode.
+- [ ] Filter inherited environment variables before spawning kernels in the runtime launch path so only a minimal safe set is passed by default.
+- [ ] Add host-level resource limits for wall time, memory, CPU, and child process count with generous defaults and per-runtime overrides.
+- [ ] Add a lightweight risk classifier before `run` dispatch so common read and compute operations pass silently and rare high-risk actions can be gated.
+- [ ] Add approval caching keyed by runtime, project, action class, and command hash so repeated high-risk operations do not keep prompting.
+- [ ] Keep the extension contract stable so runtimes still only implement `run`, `look`, and `ctl`, while auth, audit, and policy stay in the Go host.
+- [ ] Implement remote HTTP auth using MCP’s transport authorization model with OAuth 2.1, Authorization Server Metadata discovery, and token-based access for shared and tunneled kernels.
+- [ ] Make `rat login` the UX wrapper around the remote OAuth flow and keep it out of the local-only path.
+- [ ] Put ACL enforcement in the tunnel or remote gateway so remote caller identity is resolved before requests reach the local machine.
+- [ ] Forward remote caller identity through the tunnel into rat so local audit and policy can record the actual remote principal.
+- [ ] Add tests for localhost binding, `Origin` validation, token enforcement, state persistence, automatic client token attachment, and policy decisions.
+- [ ] Add conformance checks against MCP transport and authorization requirements for the remote HTTP path.
+- [ ] Ship the work in phases by doing local transport hardening first, then automatic local auth, then audit and policy profiles, then approval caching, then remote OAuth and tunnel integration.
