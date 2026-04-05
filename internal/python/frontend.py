@@ -1,9 +1,9 @@
 """
 IPython frontend for rat py.
 
-Routes execution and completions to the shared MCP kernel.
+Routes execution, completions, and %magics to the shared MCP kernel.
 Everything else stays native IPython: history, multiline editing,
-syntax highlighting, %magics, !shell.
+syntax highlighting, !shell.
 
 Usage (called by Go binary):
     python frontend.py --server http://127.0.0.1:8717/mcp --name py
@@ -343,8 +343,8 @@ def _make_shell(server_url, activity_log=None):
                 self.ask_exit()
                 return ExecutionResult(None)
 
-            # Magics and shell escapes stay local
-            if raw_cell.startswith("%") or raw_cell.startswith("!"):
+            # Shell escapes stay local (user's terminal)
+            if raw_cell.startswith("!"):
                 return super().run_cell(
                     raw_cell, store_history=store_history,
                     silent=silent, shell_futures=shell_futures,

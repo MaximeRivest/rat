@@ -26,6 +26,29 @@ namespace = {
     "__builtins__": builtins,
 }
 
+# ── Optional IPython (for %magic support in the kernel) ─────
+
+_ipython_shell = None
+
+
+def _init_ipython():
+    """Set up a headless IPython so magics like %timeit, %who work."""
+    global _ipython_shell
+    try:
+        from IPython.core.interactiveshell import InteractiveShell
+        # Suppress any output during init (protect JSON protocol on stdout)
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            shell = InteractiveShell.instance()
+        shell.user_ns = namespace
+        shell.user_global_ns = namespace
+        _ipython_shell = shell
+    except Exception:
+        pass
+
+
+_init_ipython()
+
 _write_lock = threading.Lock()
 _pipe = sys.stdout          # original fd — survives redirect_stdout
 
@@ -760,6 +783,13 @@ def run_code(code, allow_stdin):
 
     builtins.input = hooked_input
     getpass_module.getpass = hooked_getpass
+
+    # Transform IPython magics (%timeit, %who, etc.) to executable Python
+    if _ipython_shell is not None:
+        try:
+            code = _ipython_shell.transform_cell(code)
+        except Exception:
+            pass
 
     try:
         tree = ast.parse(code, mode="exec")

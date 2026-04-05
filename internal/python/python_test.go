@@ -89,11 +89,11 @@ func TestPythonKernelStatus(t *testing.T) {
 	}
 }
 
-func TestPythonFrontendRoutesAllMagicsLocally(t *testing.T) {
-	// The frontend routes all % and ! prefixed lines to IPython locally,
-	// not through the kernel. Verify the routing logic is present.
-	if !strings.Contains(frontendScript, `raw_cell.startswith("%")`) {
-		t.Fatal("frontend should route %magics locally")
+func TestPythonFrontendRoutesMagicsToKernel(t *testing.T) {
+	// The frontend forwards %magics to the kernel (which has IPython +
+	// the namespace). Only !shell escapes stay local.
+	if strings.Contains(frontendScript, `raw_cell.startswith("%")`) {
+		t.Fatal("frontend should NOT route %magics locally — they go to the kernel")
 	}
 	if !strings.Contains(frontendScript, `raw_cell.startswith("!")`) {
 		t.Fatal("frontend should route !shell locally")
