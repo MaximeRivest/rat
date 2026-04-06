@@ -55,14 +55,25 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 	// ── Step 1: Exact match ──────────────────────────────────────
 
 	// Check kernels (running or stopped).
+	// If a matching runtime config exists, merge in its extra fields
+	// (Env, Options, RuntimePath) that the kernel entry doesn't carry.
 	for _, k := range kernels {
 		if k.Name == input {
-			return &Result{
+			r := &Result{
 				Name: k.Name,
 				Lang: k.Lang,
 				Cwd:  k.Cwd,
 				Venv: k.Venv,
-			}, nil
+			}
+			for _, rt := range runtimes {
+				if rt.Name == k.Name {
+					r.RuntimePath = rt.RuntimePath
+					r.Options = rt.Options
+					r.Env = rt.Env
+					break
+				}
+			}
+			return r, nil
 		}
 	}
 

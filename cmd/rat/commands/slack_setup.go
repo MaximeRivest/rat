@@ -33,6 +33,7 @@ var slackManifest = map[string]interface{}{
 		"scopes": map[string]interface{}{
 			"bot": []string{
 				"channels:history",
+				"channels:join",
 				"channels:read",
 				"chat:write",
 				"groups:history",
@@ -121,8 +122,9 @@ func installSlackRuntime() error {
 	fmt.Println("")
 
 	// Build manifest URL.
+	// Slack's app creation from manifest uses this specific URL format.
 	manifestJSON, _ := json.Marshal(slackManifest)
-	manifestURL := "https://api.slack.com/apps?new_app=1&manifest_json=" + url.QueryEscape(string(manifestJSON))
+	manifestURL := "https://api.slack.com/apps/new?manifest_json=" + url.QueryEscape(string(manifestJSON))
 
 	fmt.Println("Opening browser...")
 	if err := openBrowser(manifestURL); err != nil {

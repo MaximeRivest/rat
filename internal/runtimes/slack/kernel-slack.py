@@ -194,14 +194,72 @@ def _get_history(count=None):
     return "\n".join(lines)
 
 
-def _send_message(text):
-    """Send a message to the channel."""
+def _send_message(text, target=None):
+    """Send a message to a channel or DM."""
     global message_count
-    resp = _api("chat.postMessage", channel=channel_id, text=text)
+    ch = target or channel_id
+    resp = _api("chat.postMessage", channel=ch, text=text)
     if resp.get("ok"):
         message_count += 1
         return True, "sent"
-    return False, resp.get("error", "unknown error")
+    err = resp.get("error", "unknown error")
+    if err == "not_in_channel":
+        # Try to join the channel first, then retry.
+        join = _api("conversations.join", channel=ch)
+        if join.get("ok"):
+            resp = _api("chat.postMessage", channel=ch, text=text)
+            if resp.get("ok"):
+                message_count += 1
+                return True, "sent"
+            err = resp.get("error", "unknown error")
+    return False, err
+
+
+def _open_dm(user_identifier):
+    """Open a DM with a user. Accepts @name or user ID."""
+    user_id = _resolve_user_id(user_identifier)
+    if not user_id:
+        return "", f"user not found: {user_identifier}"
+    resp = _api("conversations.open", users=user_id)
+    if resp.get("ok"):
+        return resp["channel"]["id"], ""
+    return "", resp.get("error", "unknown error")
+
+
+def _resolve_user_id(name_or_id):
+    """Resolve a display name or @mention to a user ID."""
+    name_or_id = name_or_id.lstrip("@")
+    # If it looks like a user ID already, return it.
+    if name_or_id.startswith("U") and len(name_or_id) > 8 and name_or_id.isalnum():
+        return name_or_id
+    # Search cached users.
+    for uid, uname in users_cache.items():
+        if uname.lower() == name_or_id.lower():
+            return uid
+    # Fetch user list and search.
+    _refresh_users()
+    for uid, uname in users_cache.items():
+        if uname.lower() == name_or_id.lower():
+            return uid
+    return ""
+
+
+def _refresh_users():
+    """Refresh the users cache."""
+    cursor = ""
+    for _ in range(10):
+        resp = _api("users.list", limit="200", cursor=cursor or None)
+        if not resp.get("ok"):
+            break
+        for u in resp.get("members", []):
+            if u.get("deleted") or u.get("is_bot"):
+                continue
+            name = u.get("profile", {}).get("display_name") or u.get("real_name") or u.get("name", "")
+            if name:
+                users_cache[u["id"]] = name
+        cursor = resp.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
 
 
 # ── Protocol ─────────────────────────────────────────────────
@@ -263,6 +321,23 @@ def handle_command(code):
             return {"success": False, "error": f"channel not found: {arg}", "vars": message_count}
         return _switch_channel(new_id, new_name)
 
+    elif cmd in ("/dm",):
+        # DM a user: /dm @alice hey there
+        if not arg:
+            return {"success": False, "error": "usage: /dm @user message", "vars": message_count}
+        parts2 = arg.split(None, 1)
+        user_target = parts2[0]
+        dm_text = parts2[1] if len(parts2) > 1 else ""
+        if not dm_text:
+            return {"success": False, "error": "usage: /dm @user message", "vars": message_count}
+        dm_id, err = _open_dm(user_target)
+        if not dm_id:
+            return {"success": False, "error": f"could not open DM: {err}", "vars": message_count}
+        ok, msg = _send_message(dm_text, target=dm_id)
+        if ok:
+            return {"success": True, "output": f"✓ DM sent to {user_target}", "vars": message_count}
+        return {"success": False, "error": f"DM failed: {msg}", "vars": message_count}
+
     elif cmd in ("/thread", "/t"):
         # TODO: thread support
         return {"success": False, "error": "/thread not yet implemented", "vars": message_count}
@@ -284,7 +359,8 @@ def handle_command(code):
     elif cmd in ("/help", "/?"):
         return {"success": True, "output": """Slack kernel commands:
 
-  <text>              Send a message
+  <text>              Send a message to current channel
+  /dm @user message   Send a direct message
   /history [N]        Show last N messages (default: 10)
   /channels           List available channels
   /switch #channel    Switch to another channel
@@ -404,6 +480,10 @@ def ensure_init():
             return {"success": False, "error": _init_error}
 
     channel_id, channel_name = cid, cname
+
+    # Auto-join the channel so we can post without manual /invite.
+    _api("conversations.join", channel=channel_id)
+
     return None
 
 
