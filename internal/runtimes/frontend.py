@@ -306,9 +306,45 @@ def _activity_label(entry, own_client=""):
     return client
 
 
+def _format_event(entry):
+    """Format a kernel-pushed event (message, alert, etc.)."""
+    event_type = entry.get("event", "")
+    data = entry.get("data", {})
+    if event_type == "message":
+        sender = data.get("from", "")
+        text = data.get("text", "")
+        channel = data.get("channel", "")
+        header = sender
+        if channel:
+            header += f" @{channel}"
+        lines = [f"{_BAR}▍\033[1m{header}\033[0m"]
+        for tl in text.split("\n"):
+            lines.append(f"{_BAR}▍  {tl}")
+        lines.append("")
+        return "\n".join(lines)
+    elif event_type == "error":
+        msg = data.get("msg", "")
+        return f"{_BAR}▍{_ERR_DIM}✗ {msg}{_R}\n"
+    elif event_type == "alert":
+        msg = data.get("msg", "")
+        level = data.get("level", "")
+        icon = "🔴" if level == "error" else "⚠️" if level == "warning" else "🔔"
+        return f"{_BAR}▍ {icon} {msg}\n"
+    else:
+        text = data.get("text", data.get("msg", ""))
+        if not text:
+            text = json.dumps(data)
+        return f"{_BAR}▍\033[2m[{event_type}] {text}\033[0m\n"
+
+
 def _format_activity(entries, own_client=""):
     lines = []
     for e in entries:
+        # Kernel-pushed events (message, alert, etc.)
+        if e.get("event"):
+            lines.append(_format_event(e))
+            continue
+        # Execution records from other clients.
         code = e.get("code", "")
         output = e.get("output", "")
         ok = e.get("ok", True)
