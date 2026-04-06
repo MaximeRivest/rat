@@ -227,21 +227,64 @@ def _open_dm(user_identifier):
 
 
 def _resolve_user_id(name_or_id):
-    """Resolve a display name or @mention to a user ID."""
+    """Resolve a display name or @mention to a user ID.
+
+    Tries exact match first, then case-insensitive prefix/substring.
+    Works with full names ('Maxime Rivest') and partial ('Maxime').
+    """
     name_or_id = name_or_id.lstrip("@")
     # If it looks like a user ID already, return it.
     if name_or_id.startswith("U") and len(name_or_id) > 8 and name_or_id.isalnum():
         return name_or_id
-    # Search cached users.
-    for uid, uname in users_cache.items():
-        if uname.lower() == name_or_id.lower():
-            return uid
-    # Fetch user list and search.
+
+    def _search(query):
+        q = query.lower()
+        # Exact match.
+        for uid, uname in users_cache.items():
+            if uname.lower() == q:
+                return uid
+        # Prefix match (first name or start of display name).
+        for uid, uname in users_cache.items():
+            if uname.lower().startswith(q):
+                return uid
+        # Substring match.
+        for uid, uname in users_cache.items():
+            if q in uname.lower():
+                return uid
+        return ""
+
+    result = _search(name_or_id)
+    if result:
+        return result
+    # Fetch user list and retry.
     _refresh_users()
-    for uid, uname in users_cache.items():
-        if uname.lower() == name_or_id.lower():
-            return uid
-    return ""
+    return _search(name_or_id)
+
+
+def _parse_dm_args(arg):
+    """Parse '/dm @User Name message text' into (user, message).
+
+    Strategy: try progressively longer user names (greedy) until one
+    resolves. Fall back to first-word split.
+    """
+    words = arg.split()
+    if len(words) < 2:
+        return arg, ""
+
+    # Ensure user cache is populated.
+    if not users_cache:
+        _refresh_users()
+
+    # Try longest-first: "/dm @Maxime Rivest hello" → try "Maxime Rivest",
+    # then "Maxime". The remaining words are the message.
+    for i in range(len(words) - 1, 0, -1):
+        candidate = " ".join(words[:i]).lstrip("@")
+        uid = _resolve_user_id(candidate)
+        if uid:
+            return candidate, " ".join(words[i:])
+
+    # Fall back to first word = user, rest = message.
+    return words[0], " ".join(words[1:])
 
 
 def _refresh_users():
@@ -322,12 +365,11 @@ def handle_command(code):
         return _switch_channel(new_id, new_name)
 
     elif cmd in ("/dm",):
-        # DM a user: /dm @alice hey there
+        # DM a user: /dm @Maxime Rivest hey there
+        # Greedy match: try longest possible user name, shortest message.
         if not arg:
             return {"success": False, "error": "usage: /dm @user message", "vars": message_count}
-        parts2 = arg.split(None, 1)
-        user_target = parts2[0]
-        dm_text = parts2[1] if len(parts2) > 1 else ""
+        user_target, dm_text = _parse_dm_args(arg)
         if not dm_text:
             return {"success": False, "error": "usage: /dm @user message", "vars": message_count}
         dm_id, err = _open_dm(user_target)
