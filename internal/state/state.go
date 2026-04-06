@@ -347,8 +347,11 @@ func (s *Store) readLocked() (*File, error) {
 
 func (s *Store) writeLocked(f *File) error {
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("chmod state dir: %w", err)
 	}
 
 	data, err := yaml.Marshal(f)
