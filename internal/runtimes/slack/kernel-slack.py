@@ -11,13 +11,20 @@ ctl(status)         → channel info
 
 Environment:
   SLACK_BOT_TOKEN    Required. Bot token (xoxb-...)
+  SLACK_APP_TOKEN    Optional. App-level token (xapp-...) for Socket Mode
   SLACK_CHANNEL      Channel name or ID (default: general)
   SLACK_HISTORY      Number of messages to show (default: 10)
 """
 
+import hashlib
+import base64
 import json
 import os
+import socket
+import ssl
+import struct
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -46,6 +53,254 @@ def _api(method, **kwargs):
             return json.loads(resp.read())
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
+
+
+# ── Minimal WebSocket client (stdlib only) ───────────────────
+
+class SimpleWebSocket:
+    """Minimal RFC 6455 WebSocket client. Supports text frames only."""
+
+    def __init__(self, url, timeout=30):
+        self.timeout = timeout
+        self._sock = None
+        self._connect(url)
+
+    def _connect(self, url):
+        # Parse wss://host/path
+        assert url.startswith("wss://"), f"only wss:// supported: {url}"
+        rest = url[6:]
+        slash = rest.find("/")
+        if slash == -1:
+            host, path = rest, "/"
+        else:
+            host, path = rest[:slash], rest[slash:]
+        port = 443
+
+        raw = socket.create_connection((host, port), timeout=self.timeout)
+        ctx = ssl.create_default_context()
+        self._sock = ctx.wrap_socket(raw, server_hostname=host)
+
+        # WebSocket handshake
+        key = base64.b64encode(os.urandom(16)).decode()
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"\r\n"
+        )
+        self._sock.sendall(handshake.encode())
+
+        # Read HTTP response headers
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("WebSocket handshake failed")
+            resp += chunk
+
+        status_line = resp.split(b"\r\n")[0]
+        if b"101" not in status_line:
+            raise ConnectionError(f"WebSocket handshake rejected: {status_line}")
+
+    def recv(self):
+        """Read one text frame. Returns str or None on close."""
+        try:
+            header = self._recv_exact(2)
+        except (ConnectionError, OSError):
+            return None
+        if header is None:
+            return None
+
+        opcode = header[0] & 0x0F
+        masked = bool(header[1] & 0x80)
+        length = header[1] & 0x7F
+
+        if length == 126:
+            length = struct.unpack("!H", self._recv_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._recv_exact(8))[0]
+
+        if masked:
+            mask = self._recv_exact(4)
+            data = self._recv_exact(length)
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        else:
+            data = self._recv_exact(length)
+
+        if opcode == 0x8:  # close
+            return None
+        if opcode == 0x9:  # ping
+            self._send_frame(0xA, data)  # pong
+            return self.recv()
+        if opcode == 0x1:  # text
+            return data.decode("utf-8", errors="replace")
+        # Binary or other — skip
+        return self.recv()
+
+    def send(self, text):
+        """Send a text frame (masked, per RFC 6455 client requirement)."""
+        self._send_frame(0x1, text.encode())
+
+    def _send_frame(self, opcode, data):
+        mask = os.urandom(4)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        header = bytes([0x80 | opcode])
+        length = len(data)
+        if length < 126:
+            header += bytes([0x80 | length])
+        elif length < 65536:
+            header += bytes([0x80 | 126]) + struct.pack("!H", length)
+        else:
+            header += bytes([0x80 | 127]) + struct.pack("!Q", length)
+        self._sock.sendall(header + mask + masked)
+
+    def close(self):
+        try:
+            self._send_frame(0x8, b"")
+            self._sock.close()
+        except Exception:
+            pass
+
+    def _recv_exact(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self._sock.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("connection closed")
+            buf += chunk
+        return buf
+
+
+# ── Socket Mode ──────────────────────────────────────────────
+
+_socket_mode_thread = None
+_socket_mode_ws = None
+
+
+def _start_socket_mode():
+    """Connect to Slack Socket Mode and listen for events in a background thread."""
+    global _socket_mode_thread, _socket_mode_ws
+    if not APP_TOKEN:
+        return  # No app-level token — skip Socket Mode.
+
+    def _run():
+        global _socket_mode_ws
+        while True:
+            try:
+                # Get WebSocket URL.
+                req = urllib.request.Request(
+                    f"{BASE}/apps.connections.open",
+                    data=b"",
+                    headers={"Authorization": f"Bearer {APP_TOKEN}",
+                             "Content-Type": "application/x-www-form-urlencoded"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    result = json.loads(resp.read())
+                if not result.get("ok"):
+                    _emit_event("error", {"msg": f"Socket Mode connect failed: {result.get('error', 'unknown')}"})
+                    time.sleep(10)
+                    continue
+
+                ws_url = result["url"]
+                ws = SimpleWebSocket(ws_url, timeout=60)
+                _socket_mode_ws = ws
+
+                while True:
+                    msg = ws.recv()
+                    if msg is None:
+                        break  # Disconnected — reconnect.
+                    _handle_socket_event(msg)
+
+            except Exception as e:
+                _emit_event("error", {"msg": f"Socket Mode error: {e}"})
+            finally:
+                _socket_mode_ws = None
+
+            # Reconnect after a brief pause.
+            time.sleep(3)
+
+    _socket_mode_thread = threading.Thread(target=_run, daemon=True)
+    _socket_mode_thread.start()
+
+
+def _handle_socket_event(raw):
+    """Process a Socket Mode envelope."""
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+
+    # Acknowledge the envelope immediately (required by Socket Mode).
+    envelope_id = envelope.get("envelope_id")
+    if envelope_id and _socket_mode_ws:
+        try:
+            _socket_mode_ws.send(json.dumps({"envelope_id": envelope_id}))
+        except Exception:
+            pass
+
+    evt_type = envelope.get("type")
+    if evt_type == "events_api":
+        payload = envelope.get("payload", {})
+        event = payload.get("event", {})
+        _handle_slack_event(event)
+    elif evt_type == "disconnect":
+        # Slack asks us to reconnect.
+        if _socket_mode_ws:
+            _socket_mode_ws.close()
+
+
+def _handle_slack_event(event):
+    """Convert a Slack event into a rat kernel event."""
+    event_type = event.get("type", "")
+
+    if event_type == "message":
+        # Skip bot's own messages and message_changed/deleted subtypes.
+        subtype = event.get("subtype", "")
+        if subtype in ("bot_message", "message_changed", "message_deleted"):
+            return
+        if event.get("bot_id"):
+            return
+        # Skip our own messages.
+        if event.get("user") == bot_user_id:
+            return
+
+        user = _resolve_user(event.get("user", ""))
+        text = event.get("text", "")
+        ch = event.get("channel", "")
+
+        # Resolve channel name.
+        ch_name = ch
+        if ch.startswith("C"):
+            for name, cid in channels_cache.items():
+                if cid == ch:
+                    ch_name = f"#{name}"
+                    break
+        elif ch.startswith("D"):
+            ch_name = "DM"
+
+        # Replace user mentions.
+        import re
+        def replace_mention(m):
+            uid = m.group(1)
+            return f"@{_resolve_user(uid)}"
+        text = re.sub(r"<@(U[A-Z0-9]+)>", replace_mention, text)
+
+        _emit_event("message", {
+            "from": user,
+            "text": text,
+            "channel": ch_name,
+        })
+
+
+def _emit_event(event_type, data):
+    """Emit a kernel event on stdout (picked up by Go's reader loop)."""
+    send({"op": "event", "type": event_type, "data": data})
 
 
 # ── State ────────────────────────────────────────────────────
@@ -307,9 +562,13 @@ def _refresh_users():
 
 # ── Protocol ─────────────────────────────────────────────────
 
+_send_lock = threading.Lock()
+
+
 def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    with _send_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
 
 
 def handle_run(code):
@@ -525,6 +784,9 @@ def ensure_init():
 
     # Auto-join the channel so we can post without manual /invite.
     _api("conversations.join", channel=channel_id)
+
+    # Start Socket Mode for real-time inbound messages.
+    _start_socket_mode()
 
     return None
 
