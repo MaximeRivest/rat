@@ -394,9 +394,13 @@ def _forward_to_agent(from_user, text, ch_name, raw_channel):
     if _agent_exchange_count == 0 and AGENT_URL not in _mcp_sessions:
         _agent_reset()
 
+    # Extract [REMEMBER] from user input too (explicit memory requests).
+    _save_memory_items(text)
+
     prompt = (
         f'Slack message from {from_user} in {ch_name}: "{text}" '
-        f'\u2014 Write a short reply. If no reply is needed, respond with exactly: NO_REPLY'
+        f'\u2014 Write a short reply. To save a fact for later, include a line starting with [REMEMBER]. '
+        f'If no reply is needed, respond with exactly: NO_REPLY'
     )
     try:
         reply = _mcp_run(AGENT_URL, prompt)
@@ -409,7 +413,7 @@ def _forward_to_agent(from_user, text, ch_name, raw_channel):
     if not reply or "NO_REPLY" in reply:
         return
 
-    # Extract and save any [REMEMBER] lines.
+    # Extract and save any [REMEMBER] lines from agent output.
     _save_memory_items(reply)
     reply = _strip_remember_lines(reply)
 
