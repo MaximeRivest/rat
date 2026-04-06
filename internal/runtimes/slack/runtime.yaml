@@ -11,3 +11,9 @@ kernel:
 frontend:
   type: repl
   prompt: "slack> "
+
+install:
+  check_env: [SLACK_BOT_TOKEN]
+  smoke:
+    run: "/help"
+    expect: "Slack kernel commands"

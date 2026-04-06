@@ -363,19 +363,29 @@ def handle_complete(code, cursor):
 
 # ── Main loop ────────────────────────────────────────────────
 
-def init():
-    """Initialize: validate token, resolve channel."""
-    global channel_id, channel_name, bot_user_id
+_initialized = False
+_init_error = ""
+
+
+def ensure_init():
+    """Lazy init: connect to Slack on first real operation, not on ping."""
+    global _initialized, _init_error, channel_id, channel_name, bot_user_id
+
+    if _initialized:
+        if _init_error:
+            return {"success": False, "error": _init_error}
+        return None
+    _initialized = True
 
     if not TOKEN:
-        send({"ok": False, "error": "SLACK_BOT_TOKEN not set. Get one at https://api.slack.com/apps"})
-        sys.exit(1)
+        _init_error = "SLACK_BOT_TOKEN not set. Export it and restart: rat restart slack"
+        return {"success": False, "error": _init_error}
 
     # Verify token and get bot user ID.
     auth = _api("auth.test")
     if not auth.get("ok"):
-        send({"ok": False, "error": f"auth failed: {auth.get('error', 'invalid token')}"})
-        sys.exit(1)
+        _init_error = f"auth failed: {auth.get('error', 'invalid token')}"
+        return {"success": False, "error": _init_error}
     bot_user_id = auth.get("user_id", "")
 
     # Resolve channel.
@@ -390,13 +400,12 @@ def init():
             cname = next(iter(channels_cache))
             cid = channels_cache[cname]
         else:
-            send({"ok": False, "error": f"channel '{ch}' not found and no channels accessible"})
-            sys.exit(1)
+            _init_error = f"channel '{ch}' not found and no channels accessible"
+            return {"success": False, "error": _init_error}
 
     channel_id, channel_name = cid, cname
+    return None
 
-
-init()
 
 for line in sys.stdin:
     line = line.strip()
@@ -415,19 +424,40 @@ for line in sys.stdin:
         send({"ok": True})
 
     elif op == "run":
-        send(handle_run(req.get("code", "")))
+        err = ensure_init()
+        if err:
+            send(err)
+        else:
+            send(handle_run(req.get("code", "")))
 
     elif op == "look_overview":
-        send(handle_look_overview())
+        err = ensure_init()
+        if err:
+            send({"text": err["error"]})
+        else:
+            send(handle_look_overview())
 
     elif op == "look_at":
-        send(handle_look_at(req.get("at", "")))
+        err = ensure_init()
+        if err:
+            send({"text": err["error"]})
+        else:
+            send(handle_look_at(req.get("at", "")))
 
     elif op == "complete":
-        send(handle_complete(req.get("code", ""), req.get("cursor", 0)))
+        err = ensure_init()
+        if err:
+            send({"text": "No completions."})
+        else:
+            send(handle_complete(req.get("code", ""), req.get("cursor", 0)))
 
     elif op == "status":
-        state = f"idle\nruntime_version: Slack #{channel_name}"
+        if _initialized and not _init_error:
+            state = f"idle\nruntime_version: Slack #{channel_name}"
+        elif _init_error:
+            state = f"error\n{_init_error}"
+        else:
+            state = "idle\nruntime_version: Slack (not connected)"
         send({"text": state})
 
     elif op == "shutdown":
