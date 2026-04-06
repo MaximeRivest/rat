@@ -57,6 +57,10 @@ Examples:
 				if err := installPythonRuntime(); err != nil {
 					return err
 				}
+			case "slack":
+				if err := installSlackRuntime(); err != nil {
+					return err
+				}
 			default:
 				if err := installGenericRuntime(lang); err != nil {
 					return err
