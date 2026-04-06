@@ -304,8 +304,96 @@ def _handle_slack_event(event):
             _forward_to_agent(user, text, ch_name, ch)
 
 
+# ── Agent memory ────────────────────────────────────────────
+
+_agent_exchange_count = 0
+_AGENT_MAX_EXCHANGES = 20  # reset pi session after this many exchanges
+_MEMORY_PATH = os.path.expanduser("~/.config/rat/slack-bot-memory.md")
+
+_AGENT_SYSTEM_PROMPT = """You are a Slack bot powered by rat. You receive messages from Slack users and reply concisely.
+
+Rules:
+- Be helpful, concise, and friendly.
+- If a message doesn't need a reply (e.g. "ok", "thanks", reactions), respond with exactly: NO_REPLY
+- You can remember things about users. To save a memory, include a line like:
+  [REMEMBER] Alice prefers morning meetings
+  [REMEMBER] Project X deadline is March 15
+- Your memories persist across conversation resets.
+
+{memory}"""
+
+
+def _load_memory():
+    """Load persistent memory from disk."""
+    try:
+        with open(_MEMORY_PATH, "r") as f:
+            return f.read().strip()
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def _save_memory_items(text):
+    """Extract [REMEMBER] lines from agent output and append to memory file."""
+    lines = text.split("\n")
+    new_memories = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[REMEMBER]"):
+            fact = stripped[len("[REMEMBER]"):].strip()
+            if fact:
+                new_memories.append(fact)
+    if not new_memories:
+        return
+    os.makedirs(os.path.dirname(_MEMORY_PATH), exist_ok=True)
+    with open(_MEMORY_PATH, "a") as f:
+        for fact in new_memories:
+            f.write(f"- {fact}\n")
+    _emit_event("progress", {"msg": f"remembered {len(new_memories)} fact(s)"})
+
+
+def _strip_remember_lines(text):
+    """Remove [REMEMBER] lines from text before sending to Slack."""
+    return "\n".join(
+        line for line in text.split("\n")
+        if not line.strip().startswith("[REMEMBER]")
+    ).strip()
+
+
+def _agent_reset():
+    """Reset the agent session and re-prime with system prompt + memory."""
+    global _agent_exchange_count
+    _agent_exchange_count = 0
+
+    # Clear MCP session so we get a fresh one.
+    _mcp_sessions.pop(AGENT_URL, None)
+
+    try:
+        _mcp_ensure_session(AGENT_URL)
+        # Reset the pi kernel.
+        _mcp_ctl(AGENT_URL, "reset")
+        time.sleep(1)
+        # Re-prime with system prompt + memory.
+        memory = _load_memory()
+        memory_section = f"Your memories:\n{memory}" if memory else "No memories yet."
+        system = _AGENT_SYSTEM_PROMPT.format(memory=memory_section)
+        _mcp_run(AGENT_URL, system)
+        _emit_event("progress", {"msg": "agent session reset (memory preserved)"})
+    except Exception as e:
+        _emit_event("error", {"msg": f"agent reset failed: {e}"})
+
+
 def _forward_to_agent(from_user, text, ch_name, raw_channel):
     """Forward an inbound message to the agent kernel and send the reply back."""
+    global _agent_exchange_count
+
+    # Reset if we've hit the exchange limit.
+    if _agent_exchange_count >= _AGENT_MAX_EXCHANGES:
+        _agent_reset()
+
+    # Prime on first exchange.
+    if _agent_exchange_count == 0 and AGENT_URL not in _mcp_sessions:
+        _agent_reset()
+
     prompt = (
         f'Slack message from {from_user} in {ch_name}: "{text}" '
         f'\u2014 Write a short reply. If no reply is needed, respond with exactly: NO_REPLY'
@@ -316,15 +404,22 @@ def _forward_to_agent(from_user, text, ch_name, raw_channel):
         _emit_event("error", {"msg": f"agent error: {e}"})
         return
 
+    _agent_exchange_count += 1
+
     if not reply or "NO_REPLY" in reply:
+        return
+
+    # Extract and save any [REMEMBER] lines.
+    _save_memory_items(reply)
+    reply = _strip_remember_lines(reply)
+
+    if not reply:
         return
 
     # Send reply back to Slack.
     if raw_channel.startswith("D"):
-        # DM — reply in the same DM channel.
         ok, err = _send_message(reply, target=raw_channel)
     else:
-        # Channel — reply in the same channel.
         ok, err = _send_message(reply, target=raw_channel)
 
     if ok:
@@ -399,7 +494,21 @@ def _mcp_run(url, code):
         "name": "run",
         "arguments": {"code": code},
     })
-    # Extract text from MCP tool result.
+    return _extract_mcp_text(result)
+
+
+def _mcp_ctl(url, op):
+    """Call the 'ctl' tool on an MCP server."""
+    _mcp_ensure_session(url)
+    result = _mcp_call(url, "tools/call", {
+        "name": "ctl",
+        "arguments": {"op": op},
+    })
+    return _extract_mcp_text(result)
+
+
+def _extract_mcp_text(result):
+    """Extract text content from an MCP tool result."""
     content = result.get("result", {}).get("content", [])
     texts = []
     for item in content:
