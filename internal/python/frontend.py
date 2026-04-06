@@ -229,7 +229,7 @@ class ActivityWatcher:
 _BAR     = "\033[2;35m"   # dim magenta for the border
 _LABEL   = "\033[2;37m"   # dim white for the label
 _CODE    = "\033[2m"      # dim default for code
-_OUTPUT  = "\033[2m"      # dim default for output
+_OUTPUT  = "\033[2;33m"   # dim yellow for output
 _ERR_DIM = "\033[2;31m"   # dim red for failed marker
 _R       = "\033[0m"
 
@@ -269,7 +269,7 @@ def _format_activity(entries, own_client=""):
             lines.append(f"{_BAR}\u258d {_CODE}{cl}{_R}")
         if out_lines:
             for ol in out_lines:
-                lines.append(f"{_BAR}\u258d {_OUTPUT}{ol}{_R}")
+                lines.append(f"{_BAR}\u258d  {_OUTPUT}{ol}{_R}")
         lines.append("")  # blank line between entries
     return "\n".join(lines)
 
@@ -323,14 +323,19 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
 
                     def watcher():
                         while not stop.wait(0.5):
-                            entries = self._activity.check()
-                            if entries:
-                                ptk_print(ANSI(_format_activity(entries, self._client_name)))
-                                # Refresh var count after remote activity.
-                                self._refresh_var_count()
-                                # Seed remote code into prompt_toolkit's
-                                # in-memory history for up-arrow recall.
-                                self._seed_history(entries)
+                            try:
+                                entries = self._activity.check()
+                                if entries:
+                                    ptk_print(ANSI(_format_activity(entries, self._client_name)))
+                                    # Refresh var count after remote activity.
+                                    self._refresh_var_count()
+                                    # Seed remote code into prompt_toolkit's
+                                    # in-memory history for up-arrow recall.
+                                    self._seed_history(entries)
+                            except Exception:
+                                import traceback
+                                traceback.print_exc()
+                                pass
 
                     thread = threading.Thread(target=watcher, daemon=True)
                     thread.start()
@@ -616,10 +621,11 @@ def main():
                         help="Python version string")
     args = parser.parse_args()
 
-    # Ctrl+Z detaches (same as Ctrl+D) — rat owns the kernel lifecycle.
+    # Ctrl+Z detaches with exit code 2 → Go repl returns to shell.
+    # Ctrl+D exits IPython normally with exit code 0 → Go repl shows picker.
     def _sigtstp_handler(signum, frame):
         print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
-        sys.exit(0)
+        sys.exit(2)
     _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
 
     # Check IPython is available

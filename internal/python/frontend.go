@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/maximerivest/rat/internal/cachedir"
 )
 
 //go:embed frontend.py
@@ -33,8 +35,12 @@ func RunFrontend(name string, port int, cwd string, venv string, pyVersion strin
 		return fmt.Errorf("write frontend script: %w", err)
 	}
 
-	// Activity log lives next to the kernel script.
-	activityPath := filepath.Join(filepath.Dir(scriptPath), "activity.jsonl")
+	// Activity log lives in the canonical cache dir (same as the kernel daemon).
+	kdir, err := cachedir.Kernels(name)
+	if err != nil {
+		return fmt.Errorf("resolve cache dir: %w", err)
+	}
+	activityPath := filepath.Join(kdir, "activity.jsonl")
 
 	serverURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
 	args := append(append([]string{}, cmdArgs...), scriptPath,
@@ -58,14 +64,11 @@ func RunFrontend(name string, port int, cwd string, venv string, pyVersion strin
 }
 
 func writeFrontendScript(name string) (string, error) {
-	dir, err := os.UserCacheDir()
+	kdir, err := cachedir.Kernels(name)
 	if err != nil {
-		dir, err = os.UserConfigDir()
-		if err != nil {
-			dir = filepath.Join(os.Getenv("HOME"), ".cache")
-		}
+		return "", err
 	}
-	path := filepath.Join(dir, "rat", "kernels", name, "python-frontend.py")
+	path := filepath.Join(kdir, "python-frontend.py")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}

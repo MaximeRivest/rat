@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -83,13 +84,11 @@ func dirWritable(dir string) bool {
 }
 
 func defaultCacheDir() string {
-	if dir, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(dir, "rat")
+	dir, err := cachedir.Rat()
+	if err != nil {
+		return filepath.Join(os.Getenv("HOME"), ".cache", "rat")
 	}
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "rat")
-	}
-	return filepath.Join(os.Getenv("HOME"), ".cache", "rat")
+	return dir
 }
 
 func shellMissingDeps(check shellEnvCheck) []string {

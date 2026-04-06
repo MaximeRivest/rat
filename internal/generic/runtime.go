@@ -27,6 +27,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
 )
 
@@ -454,13 +455,12 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 		return nil, err
 	}
 
-	// Activity log lives in the cache dir next to the kernel script.
-	activityDir, err := os.UserCacheDir()
+	// Activity log lives in the canonical cache dir.
+	kdir, err := cachedir.Kernels(name)
 	if err != nil {
-		activityDir = filepath.Join(os.Getenv("HOME"), ".cache")
+		return nil, fmt.Errorf("resolve cache dir: %w", err)
 	}
-	activityPath := filepath.Join(activityDir, "rat", "kernels", name, "activity.jsonl")
-	os.MkdirAll(filepath.Dir(activityPath), 0o700)
+	activityPath := filepath.Join(kdir, "activity.jsonl")
 	_ = os.Remove(activityPath)
 
 	k := &Kernel{

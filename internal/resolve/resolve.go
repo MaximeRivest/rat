@@ -95,8 +95,20 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		result.Name = fmt.Sprintf("%s.%d", result.Name, n)
-		result.IsNew = true // force caller to check/create
+		instanceName := fmt.Sprintf("%s.%d", result.Name, n)
+		// Check if the instance already exists in state.
+		for _, k := range kernels {
+			if k.Name == instanceName {
+				return &Result{
+					Name: k.Name,
+					Lang: k.Lang,
+					Cwd:  k.Cwd,
+					Venv: k.Venv,
+				}, nil
+			}
+		}
+		result.Name = instanceName
+		result.IsNew = true
 		return result, nil
 	}
 

@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/maximerivest/rat/internal/cachedir"
+	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/repl"
 	s "github.com/maximerivest/rat/internal/termstyle"
@@ -33,6 +35,7 @@ func rootHelp() string {
 		helpLine("rat run <lang> '…'", "One-liner"),
 		helpLine("rat look <lang>", "See what's inside"),
 		helpLine("rat tail <lang>", "See recent activity"),
+		helpLine("rat pick", "Switch between kernels"),
 		helpLine("rat cancel <lang>", "Unstick"),
 		helpLine("rat restart <lang>", "Fresh start"),
 		helpLine("rat status", "What's running"),
@@ -89,6 +92,94 @@ func init() {
 		&cobra.Group{ID: "daily", Title: "Daily use"},
 		&cobra.Group{ID: "setup", Title: "Setup & management"},
 	)
+
+	// Wire up picker hooks so the repl package can discover kernels
+	// and resolve picker selections without importing commands.
+	repl.SetRunningKernelsFunc(func() ([]repl.KernelInfo, error) {
+		kernels, err := store().ListRunning()
+		if err != nil {
+			return nil, err
+		}
+		var out []repl.KernelInfo
+		for _, k := range kernels {
+			out = append(out, repl.KernelInfo{Name: k.Name, Lang: k.Lang, Cwd: k.Cwd})
+		}
+		return out, nil
+	})
+
+	repl.SetAllKernelsFunc(func() ([]repl.KernelInfo, error) {
+		kernels, err := store().ListKnown()
+		if err != nil {
+			return nil, err
+		}
+		var out []repl.KernelInfo
+		for _, k := range kernels {
+			out = append(out, repl.KernelInfo{
+				Name:    k.Name,
+				Lang:    k.Lang,
+				Cwd:     k.Cwd,
+				Started: k.Started.Unix(),
+			})
+		}
+		return out, nil
+	})
+
+	repl.SetAllRuntimesFunc(func() ([]repl.RuntimeInfo, error) {
+		runtimes, err := store().ListRuntimes()
+		if err != nil {
+			return nil, err
+		}
+		var out []repl.RuntimeInfo
+		for _, rt := range runtimes {
+			out = append(out, repl.RuntimeInfo{
+				Name: rt.Name,
+				Lang: rt.Lang,
+				Cwd:  rt.Cwd,
+			})
+		}
+		return out, nil
+	})
+
+	repl.SetStopKernelFunc(func(name string) {
+		_ = daemon.Stop(store(), name)
+	})
+
+	repl.ResolvePickerFunc = func(lang string, instance int, name string) (*repl.Config, error) {
+		// Use the kernel name directly if available (handles cross-project).
+		input := name
+		if input == "" {
+			input = lang
+			if instance >= 2 {
+				input = fmt.Sprintf("%s.%d", lang, instance)
+			}
+		}
+		k, _, err := ensureKernel(input)
+		if err != nil {
+			return nil, err
+		}
+		activityLog := activityLogPath(k.Name)
+		var rtCfg *generic.RuntimeConfig
+		var configDir string
+		if k.Lang != "sh" && k.Lang != "py" {
+			if cfgPath, err := findRuntimeConfig(k.Lang); err == nil {
+				if cfg, err := generic.LoadConfig(cfgPath); err == nil {
+					rtCfg = cfg
+					configDir = filepath.Dir(cfgPath)
+				}
+			}
+		}
+		return &repl.Config{
+			Name:          k.Name,
+			Lang:          k.Lang,
+			Port:          k.Port,
+			Cwd:           k.Cwd,
+			Venv:          k.Venv,
+			ActivityLog:   activityLog,
+			RuntimeConfig: rtCfg,
+			ConfigDir:     configDir,
+			Instance:      instance,
+		}, nil
+	}
 }
 
 // Execute runs the root command.
@@ -219,11 +310,11 @@ func discoverSiblings(baseName string, current int) []int {
 	return instances
 }
 
-// activityLogPath returns the expected activity log path for a kernel.
+// activityLogPath returns the canonical activity log path for a kernel.
 func activityLogPath(name string) string {
-	dir, err := os.UserCacheDir()
+	kdir, err := cachedir.Kernels(name)
 	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".cache")
+		return filepath.Join(os.Getenv("HOME"), ".cache", "rat", "kernels", name, "activity.jsonl")
 	}
-	return filepath.Join(dir, "rat", "kernels", name, "activity.jsonl")
+	return filepath.Join(kdir, "activity.jsonl")
 }

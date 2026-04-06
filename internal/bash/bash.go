@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/tmuxutil"
 )
@@ -837,14 +838,7 @@ func detectBashVersion() string {
 }
 
 func kernelDataDir(name string) (string, error) {
-	if dir, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(dir, "rat", "kernels", name), nil
-	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
-	}
-	return filepath.Join(dir, "rat", "kernels", name), nil
+	return cachedir.Kernels(name)
 }
 
 func uniqueID() string {

@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/tmuxutil"
 )
@@ -413,11 +414,7 @@ func (p *Pi) tmuxRun(args ...string) error {
 }
 
 func kernelDataDir(name string) (string, error) {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir = filepath.Join(os.Getenv("HOME"), ".cache")
-	}
-	return filepath.Join(dir, "rat", "kernels", name), nil
+	return cachedir.Kernels(name)
 }
 
 func uniqueID() string {

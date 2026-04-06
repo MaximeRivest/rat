@@ -17,6 +17,7 @@ import (
 	"github.com/maximerivest/rat/internal/bash"
 	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/python"
+	"github.com/maximerivest/rat/internal/runtimes"
 )
 
 // Config for the REPL session.
@@ -38,27 +39,149 @@ type Config struct {
 }
 
 // Run starts an interactive REPL session connected to the kernel.
+// On Ctrl-D (normal exit), shows a picker to switch between kernels.
+// On Ctrl-Z (exit code 2), returns directly to the shell.
 func Run(cfg Config) error {
+	for {
+		exitCode := RunOnce(cfg)
+
+		// Exit code 2 = Ctrl-Z / explicit quit → straight to shell.
+		if exitCode == 2 {
+			return nil
+		}
+
+		// Show picker if there are multiple kernels in this project.
+		baseName := cfg.Name
+		// Strip instance suffix to get base name.
+		if dot := strings.LastIndex(baseName, "."); dot > 0 {
+			rest := baseName[dot+1:]
+			allDigits := len(rest) > 0
+			for _, c := range rest {
+				if c < '0' || c > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				baseName = baseName[:dot]
+			}
+		}
+
+		items := DiscoverPickerItems(baseName, cfg.Cwd)
+
+		// Always show picker on Ctrl-D so the user can switch kernels,
+		// start new ones, or quit to shell from there.
+
+		// Clear screen for a clean picker.
+		fmt.Fprint(os.Stdout, "\033[2J\033[H")
+
+		result := ShowPicker(items, cfg.Lang, cfg.Instance, cfg.Name)
+		if result.Quit {
+			return nil
+		}
+
+		// Reconnect with selected target.
+		newCfg, err := resolvePickerResult(result)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rat] switch error: %v\n", err)
+			return nil
+		}
+		cfg = *newCfg
+	}
+}
+
+// RunOnce runs the REPL frontend once and returns the exit code.
+func RunOnce(cfg Config) int {
+	var err error
+
 	// Built-in kernels with hardcoded frontends.
 	switch cfg.Lang {
 	case "sh":
-		return bash.Attach(cfg.Name)
+		err = bash.Attach(cfg.Name)
+		return exitCodeFromError(err)
 	case "py":
-		return python.RunFrontend(cfg.Name, cfg.Port, cfg.Cwd, cfg.Venv, "")
+		err = python.RunFrontend(cfg.Name, cfg.Port, cfg.Cwd, cfg.Venv, "")
+		return exitCodeFromError(err)
 	}
 
 	// Generic runtimes — dispatch on frontend type from runtime.yaml.
 	if cfg.RuntimeConfig != nil {
 		switch cfg.RuntimeConfig.FrontendType() {
 		case "tmux":
-			return generic.TmuxAttach(cfg.Name)
+			err = generic.TmuxAttach(cfg.Name)
+			return exitCodeFromError(err)
 		case "native":
-			return runNativeFrontend(cfg)
+			err = runNativeFrontend(cfg)
+			return exitCodeFromError(err)
 		}
 	}
 
-	// Default: generic MCP-connected REPL.
-	return runGenericRepl(cfg)
+	// Default: try the shared prompt_toolkit frontend, fall back to bare Go REPL.
+	err = runSharedFrontend(cfg)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		// Python or prompt_toolkit not available — use bare Go REPL.
+		_ = runGenericRepl(cfg)
+		return 0
+	}
+	return 0
+}
+
+// exitCodeFromError extracts the exit code from an exec.ExitError.
+func exitCodeFromError(err error) int {
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
+// ResolvePickerFunc is set by the caller to resolve a picker selection
+// into a full Config. This avoids circular imports with the commands package.
+// name is the kernel name (may be empty for new kernels).
+var ResolvePickerFunc func(lang string, instance int, name string) (*Config, error)
+
+func resolvePickerResult(result pickerResult) (*Config, error) {
+	if ResolvePickerFunc == nil {
+		return nil, fmt.Errorf("picker resolve not configured")
+	}
+	return ResolvePickerFunc(result.Lang, result.Instance, result.Name)
+}
+
+// runSharedFrontend tries to launch the shared prompt_toolkit frontend.
+// Returns an error if Python isn't available (caller should fall back).
+func runSharedFrontend(cfg Config) error {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		return err
+	}
+
+	frontendPath, err := runtimes.ExtractFrontend()
+	if err != nil {
+		return err
+	}
+
+	mcpURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port)
+	args := []string{
+		frontendPath,
+		"--server", mcpURL,
+		"--name", cfg.Name,
+		"--lang", cfg.Lang,
+	}
+	if cfg.ActivityLog != "" {
+		args = append(args, "--activity-log", cfg.ActivityLog)
+	}
+
+	proc := exec.Command(python, args...)
+	proc.Dir = cfg.Cwd
+	proc.Stdin = os.Stdin
+	proc.Stdout = os.Stdout
+	proc.Stderr = os.Stderr
+	return proc.Run()
 }
 
 // runNativeFrontend launches a runtime's native frontend command

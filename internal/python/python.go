@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
 )
 
@@ -552,14 +553,11 @@ func detectPythonCommand(venv string) (string, []string, error) {
 }
 
 func writeKernelScript(name string) (string, error) {
-	dir, err := os.UserCacheDir()
+	kdir, err := cachedir.Kernels(name)
 	if err != nil {
-		dir, err = os.UserConfigDir()
-		if err != nil {
-			dir = filepath.Join(os.Getenv("HOME"), ".cache")
-		}
+		return "", err
 	}
-	path := filepath.Join(dir, "rat", "kernels", name, "python-kernel.py")
+	path := filepath.Join(kdir, "python-kernel.py")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}

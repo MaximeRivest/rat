@@ -59,6 +59,12 @@
       { "command": "rat.removeRuntime", "title": "Remove", "icon": "$(trash)" },
       { "command": "rat.insertCell", "title": "Rat: Insert Cell" }
     ],
+    "viewsWelcome": [
+      {
+        "view": "ratRuntimes",
+        "contents": "No runtimes for this workspace.\nRun a code cell or [add a runtime](command:rat.addRuntime) to get started."
+      }
+    ],
     "menus": {
       "view/title": [
         { "command": "rat.addRuntime", "when": "view == ratRuntimes", "group": "navigation" },

@@ -11,11 +11,8 @@ kernel:
   args: ["--no-save", "--no-restore"]
 
 frontend:
-  type: native
-  command: "python3 {config_dir}/frontend-r.py --server {mcp_url} --name {name} --activity-log {activity_log}"
-  fallback:
-    type: repl
-    prompt: "r> "
+  type: repl
+  prompt: "r> "
 
 install:
   runtime:

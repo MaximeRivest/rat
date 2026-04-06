@@ -1,12 +1,12 @@
 """
-R frontend for rat — radian-style REPL routed through the shared MCP kernel.
+Shared prompt_toolkit frontend for rat.
 
-Uses prompt_toolkit for the input experience (syntax highlighting, multi-line
-editing, history, toolbar) and routes execution + completions to the shared
-kernel. Everything the human types goes through MCP — same namespace as Claude.
+Works for any language — R, Julia, JavaScript, or custom runtimes.
+Routes all execution and completions through the shared MCP kernel.
+Everything the human types goes through MCP — same namespace as Claude.
 
 Usage (called by Go binary):
-    python3 frontend-r.py --server http://127.0.0.1:8720/mcp --name r@rat
+    python3 frontend.py --server http://127.0.0.1:8720/mcp --name r@rat --lang r
 """
 
 import argparse
@@ -86,13 +86,12 @@ def _mcp_notify(url, method, params=None):
         pass
 
 
-def _make_client_name(prefix):
+def _make_client_name(lang):
     try:
         tty = os.path.basename(os.ttyname(sys.stdin.fileno()))
     except OSError:
         tty = f"pid-{os.getpid()}"
-    return f"{prefix}@{tty}"
-
+    return f"rat-{lang}-repl@{tty}"
 
 
 def _mcp_init(url, client_name):
@@ -133,42 +132,112 @@ def _strip_hint(s):
     return _HINT_RE.sub("", s)
 
 
-# ── R expression completeness detection ──────────────────────
+# ── Language-specific configuration ──────────────────────────
+
+# Pygments lexer classes by language.
+_LEXER_MAP = {
+    "r":  ("pygments.lexers", "SLexer"),
+    "jl": ("pygments.lexers", "JuliaLexer"),
+    "js": ("pygments.lexers", "JavaScriptLexer"),
+}
+
+# Prompt strings by language.
+_PROMPT_MAP = {
+    "r":  ("r> ", "r+ "),
+    "jl": ("jl> ", "jl> "),
+    "js": ("js> ", "js> "),
+}
+
+# Display names for the banner.
+_DISPLAY_MAP = {
+    "r":  "R",
+    "jl": "Julia",
+    "js": "JavaScript",
+    "py": "Python",
+    "sh": "Shell",
+    "pi": "pi",
+}
+
+# Languages that support ? inspection.
+_INSPECT_LANGS = {"r", "jl", "py"}
+
+
+def _get_lexer(lang):
+    """Try to load a pygments lexer for the language."""
+    if lang not in _LEXER_MAP:
+        return None
+    try:
+        from prompt_toolkit.lexers import PygmentsLexer
+        mod_name, cls_name = _LEXER_MAP[lang]
+        mod = __import__(mod_name, fromlist=[cls_name])
+        cls = getattr(mod, cls_name)
+        return PygmentsLexer(cls)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _get_prompts(lang):
+    """Return (primary_prompt, continuation_prompt) for a language."""
+    return _PROMPT_MAP.get(lang, (f"{lang}> ", f"{lang}> "))
+
+
+def _get_display(lang):
+    """Human-readable language name."""
+    return _DISPLAY_MAP.get(lang, lang)
+
+
+# ── Expression completeness detection ────────────────────────
 
 def _is_complete_r(code):
     """Heuristic: check if an R expression looks complete."""
     code = code.strip()
     if not code:
         return True
-
-    # Remove strings and comments for bracket counting.
     cleaned = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
     cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cleaned)
     cleaned = re.sub(r"'(?:[^'\\]|\\.)*'", "''", cleaned)
-
     opens = cleaned.count('(') + cleaned.count('[') + cleaned.count('{')
     closes = cleaned.count(')') + cleaned.count(']') + cleaned.count('}')
     if opens > closes:
         return False
-
-    # Trailing operators suggest continuation.
     last_line = code.rstrip().split('\n')[-1].rstrip()
     if last_line and last_line[-1] in ('+', '-', '*', '/', '|', '&', ',', '=', '~', '\\'):
         return False
     if last_line.endswith('%>%') or last_line.endswith('|>'):
         return False
-
     return True
+
+
+def _is_complete_bracket(code):
+    """Generic bracket-based completeness for JS, Julia, etc."""
+    code = code.strip()
+    if not code:
+        return True
+    # Remove strings and comments.
+    cleaned = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
+    cleaned = re.sub(r'//.*$', '', cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cleaned)
+    cleaned = re.sub(r"'(?:[^'\\]|\\.)*'", "''", cleaned)
+    cleaned = re.sub(r'`(?:[^`\\]|\\.)*`', '``', cleaned)
+    opens = cleaned.count('(') + cleaned.count('[') + cleaned.count('{')
+    closes = cleaned.count(')') + cleaned.count(']') + cleaned.count('}')
+    return opens <= closes
+
+
+def _is_complete(lang, code):
+    """Check if code is a complete expression for the given language."""
+    if lang == "r":
+        return _is_complete_r(code)
+    return _is_complete_bracket(code)
 
 
 # ── Activity watcher ─────────────────────────────────────────
 
-# Activity colors — use ANSI 16 colors so terminal themes control readability.
-_BAR     = "\033[2;35m"   # dim magenta for the border
-_LABEL   = "\033[2;37m"   # dim white for the label
-_CODE    = "\033[2m"      # dim default for code
-_OUTPUT  = "\033[2;33m"   # dim yellow for output
-_ERR_DIM = "\033[2;31m"   # dim red for failed marker
+_BAR     = "\033[2;35m"
+_LABEL   = "\033[2;37m"
+_CODE    = "\033[2m"
+_OUTPUT  = "\033[2;33m"
+_ERR_DIM = "\033[2;31m"
 _R       = "\033[0m"
 
 
@@ -230,12 +299,11 @@ def _activity_label(entry, own_client=""):
         return "activity"
     if own_client and client == own_client:
         return "you"
-    if client.startswith("rat-r-repl@"):
-        return f"repl {client.split('@', 1)[1]}"
-    if client.startswith("rat-py-repl@"):
-        return f"Python repl {client.split('@', 1)[1]}"
+    # Strip the repl@tty prefix to show just the tty.
+    for prefix in ("rat-r-repl@", "rat-py-repl@", "rat-jl-repl@", "rat-js-repl@"):
+        if client.startswith(prefix):
+            return f"repl {client.split('@', 1)[1]}"
     return client
-
 
 
 def _format_activity(entries, own_client=""):
@@ -247,21 +315,16 @@ def _format_activity(entries, own_client=""):
         mark = "✓" if ok else "✗"
         mark_color = _LABEL if ok else _ERR_DIM
         label = _activity_label(e, own_client)
-
-        # Filter blank code lines.
         code_lines = [cl for cl in code.split("\n") if cl.strip()][:6]
         out_lines = [ol for ol in output.split("\n") if ol.strip()][:6]
-
-        # Header: thin bar + label.
         lines.append(f"{_BAR}▍{mark_color} {label} {mark}{_R}")
         for cl in code_lines:
             lines.append(f"{_BAR}▍ {_CODE}{cl}{_R}")
         if out_lines:
             for ol in out_lines:
                 lines.append(f"{_BAR}▍  {_OUTPUT}{ol}{_R}")
-        lines.append("")  # blank line between entries
+        lines.append("")
     return "\n".join(lines)
-
 
 
 def _read_recent_activity(path, limit=10):
@@ -287,11 +350,14 @@ def _read_recent_activity(path, limit=10):
 # ── prompt_toolkit REPL ──────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="R frontend for rat")
+    parser = argparse.ArgumentParser(description="Shared rat frontend")
     parser.add_argument("--server", required=True, help="MCP server URL")
-    parser.add_argument("--name", default="r", help="Kernel name")
+    parser.add_argument("--name", default="kernel", help="Kernel name")
+    parser.add_argument("--lang", default="", help="Language (r, jl, js, ...)")
     parser.add_argument("--activity-log", default=None, help="Activity log path")
     args = parser.parse_args()
+
+    lang = args.lang
 
     # Ctrl+Z detaches with exit code 2 → Go repl returns to shell.
     import signal as _signal
@@ -301,7 +367,7 @@ def main():
     _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
 
     # Connect to kernel.
-    client_name = _make_client_name("rat-r-repl")
+    client_name = _make_client_name(lang)
     r = _mcp_init(args.server, client_name)
     if "_error" in r:
         print(f"Cannot connect to kernel at {args.server}", file=sys.stderr)
@@ -315,10 +381,10 @@ def main():
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.patch_stdout import patch_stdout
-        from prompt_toolkit.formatted_text import HTML, ANSI, FormattedText
+        from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit import print_formatted_text as ptk_print
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.styles import Style, merge_styles, style_from_pygments_cls
+        from prompt_toolkit.styles import Style
         from prompt_toolkit.keys import Keys
     except ImportError:
         print("prompt_toolkit not installed. Install: pip install prompt-toolkit", file=sys.stderr)
@@ -326,15 +392,9 @@ def main():
         _basic_repl(args)
         return
 
-    # Try to get R syntax highlighting via pygments.
-    # Keep token colors on terminal defaults so light and dark themes stay readable.
-    lexer = None
-    try:
-        from prompt_toolkit.lexers import PygmentsLexer
-        from pygments.lexers import SLexer
-        lexer = PygmentsLexer(SLexer)
-    except ImportError:
-        pass
+    lexer = _get_lexer(lang)
+    primary_prompt, cont_prompt = _get_prompts(lang)
+    display_name = _get_display(lang)
 
     # Activity watcher.
     activity = ActivityWatcher(args.activity_log)
@@ -342,11 +402,9 @@ def main():
 
     # ── Style ────────────────────────────────────────────────
 
-    base_style = Style.from_dict({
-        # Prompt — use ANSI names so terminal theme controls the shade.
+    style = Style.from_dict({
         "prompt":           "ansiblue bold",
         "prompt.cont":      "ansigray bold",
-        # Toolbar.
         "bottom-toolbar":           "bg:#262626 #d0d0d0 noreverse",
         "bottom-toolbar.text":      "noreverse",
         "rat.label":                "fg:#00d7ff bold noreverse",
@@ -354,15 +412,13 @@ def main():
         "rat.sep":                  "fg:#8a8a8a noreverse",
         "rat.dot":                  "fg:#8a8a8a noreverse",
         "rat.green":                "fg:#00d75f noreverse",
-        # Completion menu — use reverse video for portability.
+        "rat.tab.active":           "fg:#00d7ff bold noreverse",
+        "rat.tab.inactive":         "fg:#8a8a8a noreverse",
         "completion-menu.completion":             "bg:ansiblack ansiwhite",
         "completion-menu.completion.current":     "bg:ansiblue ansiwhite bold",
         "completion-menu.meta.completion":         "bg:ansiblack ansigray",
         "completion-menu.meta.completion.current": "bg:ansiblue ansigray",
     })
-
-    # Keep syntax tokens on terminal defaults. Only style the UI chrome.
-    style = base_style
 
     # ── State ────────────────────────────────────────────────
 
@@ -386,7 +442,7 @@ def main():
 
     # ── Completions ──────────────────────────────────────────
 
-    class RCompleter(Completer):
+    class LangCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.text
             cursor = document.cursor_position
@@ -401,7 +457,6 @@ def main():
                         if parts:
                             label = parts[0]
                             meta = parts[1] if len(parts) > 1 else ""
-                            # Find word start.
                             start = cursor
                             while start > 0 and text[start - 1] not in " \t\n(,=[{":
                                 start -= 1
@@ -420,25 +475,21 @@ def main():
         """Submit if expression is complete, else insert newline."""
         buf = event.current_buffer
         text = buf.text
-
-        # If already multi-line and cursor not at end, just insert newline.
         if buf.cursor_position < len(text):
             buf.insert_text("\n")
             return
-
-        if _is_complete_r(text):
+        if _is_complete(lang, text):
             buf.validate_and_handle()
         else:
             state.in_multiline = True
             buf.insert_text("\n")
-            # Auto-indent: count open braces/parens on previous lines.
             indent = _suggest_indent(text)
             if indent > 0:
                 buf.insert_text("  " * indent)
 
     @bindings.add("escape", "enter")
     def _(event):
-        """Alt+Enter: force newline (for manually entering multi-line code)."""
+        """Alt+Enter: force newline."""
         state.in_multiline = True
         event.current_buffer.insert_text("\n")
 
@@ -455,12 +506,58 @@ def main():
 
     @bindings.add("c-z")
     def _(event):
-        """Ctrl-Z: leave the REPL."""
-        event.app.exit(exception=EOFError)
+        """Ctrl-Z: leave the REPL (skip picker)."""
+        event.app.exit(result="__rat_quit__")
+
+    # ── Tab cycling: Alt + vim keys ──────────────────────────
+    # Alt-l / Alt-h: next/prev instance of the same language.
+    # Alt-j / Alt-k: next/prev language in the same project.
+    # These exec into `rat <target>`, replacing the current process.
+
+    def _cycle(lst, current, direction):
+        """Return next/prev item in a list, wrapping around."""
+        if len(lst) <= 1:
+            return current
+        try:
+            idx = lst.index(current)
+        except ValueError:
+            return lst[0]
+        return lst[(idx + direction) % len(lst)]
+
+    def _switch_instance(event, direction):
+        """Switch to next/prev instance."""
+        target = _cycle(siblings, instance, direction)
+        if target == instance:
+            return
+        event.app.exit(result=f"__rat_switch__ {lang} {target}")
+
+    def _switch_lang(event, direction):
+        """Switch to next/prev language."""
+        target = _cycle(project_langs, lang, direction)
+        if target == lang:
+            return
+        event.app.exit(result=f"__rat_switch__ {target}")
+
+    @bindings.add("escape", "l")  # Alt-l: next instance
+    def _(event):
+        _switch_instance(event, 1)
+
+    @bindings.add("escape", "h")  # Alt-h: prev instance
+    def _(event):
+        _switch_instance(event, -1)
+
+    @bindings.add("escape", "j")  # Alt-j: next language
+    def _(event):
+        _switch_lang(event, 1)
+
+    @bindings.add("escape", "k")  # Alt-k: prev language
+    def _(event):
+        _switch_lang(event, -1)
 
     def _suggest_indent(code):
         """Count net open brackets for auto-indent level."""
         cleaned = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
+        cleaned = re.sub(r'//.*$', '', cleaned, flags=re.MULTILINE)
         cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cleaned)
         cleaned = re.sub(r"'(?:[^'\\]|\\.)*'", "''", cleaned)
         level = 0
@@ -475,8 +572,8 @@ def main():
 
     def get_prompt():
         if state.in_multiline:
-            return [("class:prompt.cont", "r+ ")]
-        return [("class:prompt", "r> ")]
+            return [("class:prompt.cont", cont_prompt)]
+        return [("class:prompt", primary_prompt)]
 
     # ── Toolbar ──────────────────────────────────────────────
 
@@ -484,14 +581,12 @@ def main():
         import shutil
         cols = shutil.get_terminal_size((80, 24)).columns
 
-        # Left side: rat <display> │ <name>
         left_parts = []
         left_parts.append(("class:rat.label", " rat "))
-        left_parts.append(("class:rat.bar", " r "))
+        left_parts.append(("class:rat.bar", f" {display_name} "))
         left_parts.append(("class:rat.sep", "│"))
         left_parts.append(("class:rat.bar", f" {args.name} "))
 
-        # Right side: shared • N vars • F2:vars • Ctrl+D exit
         right_segs = []
         right_segs.append(("class:rat.green", "shared"))
         right_segs.append(("class:rat.bar", f"{state.var_count} vars"))
@@ -505,14 +600,12 @@ def main():
         right_segs.append(("class:rat.bar", "F2:vars"))
         right_segs.append(("class:rat.bar", "Ctrl+D exit"))
 
-        # Join right segments with dot separators
         right_parts = []
         for i, seg in enumerate(right_segs):
             if i > 0:
                 right_parts.append(("class:rat.dot", " • "))
             right_parts.append(seg)
 
-        # Calculate padding
         left_len = sum(len(t) for _, t in left_parts)
         right_len = sum(len(t) for _, t in right_parts)
         pad = max(1, cols - left_len - right_len)
@@ -526,7 +619,7 @@ def main():
         "rat", "kernels", args.name,
     )
     os.makedirs(hist_dir, exist_ok=True)
-    hist_file = os.path.join(hist_dir, "r-history")
+    hist_file = os.path.join(hist_dir, f"{lang}-history")
     replay_recent_activity = os.path.exists(hist_file) and os.path.getsize(hist_file) > 0
     history = FileHistory(hist_file)
 
@@ -534,7 +627,7 @@ def main():
 
     session = PromptSession(
         history=history,
-        completer=RCompleter(),
+        completer=LangCompleter(),
         lexer=lexer,
         multiline=False,
         key_bindings=bindings,
@@ -544,50 +637,46 @@ def main():
         enable_open_in_editor=True,
     )
 
-    server = args.server
     info = r.get("serverInfo", {})
-    server_name = info.get("name", args.name)
 
     # ── Banner ───────────────────────────────────────────────
 
-    # Query R version from the kernel.
-    r_version = ""
+    runtime_version = ""
     try:
-        status_r = _tool(server, "status", {}, timeout=5)
+        status_r = _tool(args.server, "status", {}, timeout=5)
         status_text = _text(status_r)
         for line in status_text.split("\n"):
             if "runtime_version" in line:
-                r_version = line.split(":", 1)[1].strip()
+                runtime_version = line.split(":", 1)[1].strip()
                 break
     except Exception:
         pass
 
-    # ANSI 16 colors — terminal theme controls the actual shades.
     BLUE = "\033[34m"
     DIM_ = "\033[2m"
     BOLD = "\033[1m"
     R = "\033[0m"
 
-    # Clear screen so prompt starts at top, toolbar at bottom.
     print("\033[2J\033[H", end="")
-    print(f"  {BLUE}rat{R} {BOLD}{args.name}{R} — {r_version or 'R'} on {server}")
+    version_label = runtime_version or display_name
+    print(f"  {BLUE}rat{R} {BOLD}{args.name}{R} — {version_label} on {args.server}")
     print(f"  {DIM_}Shared namespace · other clients see your variables{R}")
-    print(f"  {DIM_}Type {R}{BOLD}q(){R}{DIM_} or {R}{BOLD}Ctrl-D{R}{DIM_} to exit · {R}{BOLD}?name{R}{DIM_} to inspect · {R}{BOLD}Alt+Enter{R}{DIM_} for newline{R}")
+    hints = [f"{BOLD}Ctrl-D{R}{DIM_} exit"]
+    if lang in _INSPECT_LANGS:
+        hints.insert(0, f"{BOLD}?name{R}{DIM_} inspect")
+    hints.insert(len(hints) - 1, f"{BOLD}Alt+Enter{R}{DIM_} newline")
+    print(f"  {DIM_}" + " · ".join(hints) + f"{R}")
     print()
 
-    # ── ANSI helpers for output ──────────────────────────────
+    # ── REPL loop ────────────────────────────────────────────
 
     RED = "\033[31m"
     DIMGRAY = "\033[2m"
-
-    # ── REPL loop ────────────────────────────────────────────
 
     buffer = ""
     stop = threading.Event()
     try:
         with patch_stdout():
-            # Start activity watcher INSIDE patch_stdout so
-            # background prints don't corrupt the prompt.
             if replay_recent_activity:
                 recent_entries = _read_recent_activity(args.activity_log)
                 if recent_entries:
@@ -614,12 +703,18 @@ def main():
                 except EOFError:
                     break
 
+                # Handle Ctrl-Z (quit without picker).
+                if isinstance(line, str) and line == "__rat_quit__":
+                    stop.set()
+                    print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
+                    sys.exit(2)
+
                 if buffer:
                     buffer += "\n" + line
                 else:
                     buffer = line
 
-                if not _is_complete_r(buffer):
+                if not _is_complete(lang, buffer):
                     continue
 
                 code = buffer.strip()
@@ -630,11 +725,11 @@ def main():
                     continue
 
                 # ? inspection.
-                if code.startswith("?"):
+                if lang in _INSPECT_LANGS and code.startswith("?"):
                     sym = code.lstrip("?").strip()
                     if sym:
                         try:
-                            result = _tool(server, "look", {"at": sym}, timeout=10)
+                            result = _tool(args.server, "look", {"at": sym}, timeout=10)
                             out = _text(result)
                             if out:
                                 print(out)
@@ -642,21 +737,22 @@ def main():
                             print(f"{RED}[rat] error: {e}{R}")
                     continue
 
-                if code in ("q()", "quit()", "exit", "exit()"):
-                    break
+                if code in ("q()", "quit()", "exit", "exit()", ":q"):
+                    stop.set()
+                    print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
+                    sys.exit(2)
 
                 # Execute on the shared kernel.
                 activity.mark_own(code)
                 state.is_busy = True
                 t0 = time.monotonic()
                 try:
-                    result = _tool(server, "run", {"code": code})
+                    result = _tool(args.server, "run", {"code": code})
                     elapsed = time.monotonic() - t0
                     state.last_time_ms = int(elapsed * 1000)
                     state.is_busy = False
                     state.exec_count += 1
 
-                    # Parse var count from hint if available.
                     raw_text = _text(result)
                     hint_match = _HINT_RE.search(raw_text)
                     if hint_match:
@@ -668,7 +764,6 @@ def main():
                     out = _strip_hint(raw_text)
                     if out:
                         if _is_err(result):
-                            # Color errors red.
                             ptk_print(ANSI(f"{RED}{out}{R}"))
                         else:
                             print(out)
@@ -677,20 +772,29 @@ def main():
                     state.is_busy = False
                     ptk_print(ANSI(f"{RED}[rat] error: {e}{R}"))
                     ptk_print(ANSI(f"{DIMGRAY}[rat] kernel may have stopped. "
-                          f"Ctrl-D to exit, then 'rat r' to reconnect.{R}"))
+                          f"Ctrl-D to exit, then 'rat {lang}' to reconnect.{R}"))
 
     finally:
         stop.set()
-        print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
 
 
 def _basic_repl(args):
     """Fallback REPL without prompt_toolkit."""
-    import readline  # noqa: for basic line editing
+    lang = args.lang
+    prompt_str, cont_str = _get_prompts(lang)
+    try:
+        import readline  # noqa: for basic line editing
+    except ImportError:
+        pass
+    client_name = _make_client_name(lang)
+    r = _mcp_init(args.server, client_name)
+    if "_error" in r:
+        print(f"Cannot connect to kernel at {args.server}", file=sys.stderr)
+        sys.exit(1)
     server = args.server
     buffer = ""
     while True:
-        prompt = "r> " if not buffer else "r+ "
+        prompt = prompt_str if not buffer else cont_str
         try:
             line = input(prompt)
         except (KeyboardInterrupt, EOFError):
@@ -699,13 +803,13 @@ def _basic_repl(args):
             buffer += "\n" + line
         else:
             buffer = line
-        if not _is_complete_r(buffer):
+        if not _is_complete(lang, buffer):
             continue
         code = buffer.strip()
         buffer = ""
         if not code:
             continue
-        if code in ("q()", "quit()", "exit"):
+        if code in ("q()", "quit()", "exit", "exit()", ":q"):
             break
         try:
             result = _tool(server, "run", {"code": code})
@@ -714,6 +818,7 @@ def _basic_repl(args):
                 print(out)
         except Exception as e:
             print(f"[rat] error: {e}")
+    print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
 
 
 if __name__ == "__main__":
