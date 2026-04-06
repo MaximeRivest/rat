@@ -357,7 +357,7 @@ func (s *Store) writeLocked(f *File) error {
 	}
 
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
