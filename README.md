@@ -277,7 +277,7 @@ kernel:
 
 The kernel script reads JSON lines from stdin, writes JSON lines to stdout. See [docs/custom-runtimes.md](docs/custom-runtimes.md) for the full guide and [KERNEL-PROTOCOL.md](KERNEL-PROTOCOL.md) for the wire format.
 
-Built-in runtimes (R, pi, Slack) use the same mechanism.
+Built-in runtimes (R, pi) use the same mechanism.
 
 ---
 
@@ -343,7 +343,7 @@ Management
 | `r` | R console | generic (JSON) | jsonlite |
 | `pi` | pi agent | generic (tmux) | @mariozechner/pi-coding-agent |
 
-More via [custom runtimes](docs/custom-runtimes.md). Julia, Node.js, Slack are in progress.
+More via [custom runtimes](docs/custom-runtimes.md). Julia and Node.js are in progress.
 
 ---
 
