@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"github.com/maximerivest/rat/internal/cachedir"
 )
@@ -52,8 +50,7 @@ func RunFrontend(name string, port int, cwd string, venv string, pyVersion strin
 		"--python-version", pyVersion,
 	)
 
-	// Ignore SIGTSTP (Ctrl+Z) — rat owns the kernel lifecycle.
-	signal.Ignore(syscall.SIGTSTP)
+	ignoreSuspendSignal()
 
 	cmd := exec.Command(cmdPath, args...)
 	cmd.Stdin = os.Stdin

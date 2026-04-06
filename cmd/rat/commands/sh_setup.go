@@ -18,9 +18,10 @@ type shellEnvCheck struct {
 	Supported   bool
 	SupportNote string
 
-	BashPath string
-	TmuxPath string
-	SttyPath string
+	BashPath       string
+	PowerShellPath string
+	TmuxPath       string
+	SttyPath       string
 
 	PackageManager string
 	StateDir       string
@@ -39,12 +40,19 @@ func inspectShellEnv() shellEnvCheck {
 	case "linux", "darwin":
 		check.Supported = true
 	case "windows":
-		check.SupportNote = "Shell sharing currently requires a POSIX environment. On Windows, use WSL and install rat inside WSL."
+		check.Supported = true
+		check.SupportNote = "Using PowerShell as the shared shell runtime."
 	default:
 		check.SupportNote = fmt.Sprintf("Shell sharing is not implemented on %s yet.", runtime.GOOS)
 	}
 
 	check.BashPath, _ = exec.LookPath("bash")
+	for _, candidate := range []string{"pwsh", "powershell"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			check.PowerShellPath = path
+			break
+		}
+	}
 	check.TmuxPath, _ = exec.LookPath("tmux")
 	check.SttyPath, _ = exec.LookPath("stty")
 	check.PackageManager = detectPackageManager()
@@ -93,14 +101,20 @@ func defaultCacheDir() string {
 
 func shellMissingDeps(check shellEnvCheck) []string {
 	var missing []string
-	if check.BashPath == "" {
-		missing = append(missing, "bash")
-	}
-	if check.TmuxPath == "" {
-		missing = append(missing, "tmux")
-	}
-	if check.SttyPath == "" {
-		missing = append(missing, "stty")
+	if runtime.GOOS == "windows" {
+		if check.PowerShellPath == "" {
+			missing = append(missing, "powershell")
+		}
+	} else {
+		if check.BashPath == "" {
+			missing = append(missing, "bash")
+		}
+		if check.TmuxPath == "" {
+			missing = append(missing, "tmux")
+		}
+		if check.SttyPath == "" {
+			missing = append(missing, "stty")
+		}
 	}
 	if !check.ConfigWritable {
 		missing = append(missing, "config-dir")
@@ -113,7 +127,10 @@ func shellMissingDeps(check shellEnvCheck) []string {
 
 func shellInstallHint(check shellEnvCheck) string {
 	if runtime.GOOS == "windows" {
-		return "Install WSL, then inside WSL install tmux and bash, and run rat there."
+		if check.PowerShellPath == "" {
+			return "Install PowerShell 7 (pwsh) or enable Windows PowerShell."
+		}
+		return ""
 	}
 
 	needTmux := check.TmuxPath == ""
@@ -163,9 +180,13 @@ func printShellDoctor(check shellEnvCheck) {
 	fmt.Printf("OS: %s/%s\n\n", check.GOOS, check.GOARCH)
 
 	statusLine("shell platform", check.Supported, check.SupportNote)
-	statusLine("bash", check.BashPath != "", valueOrNote(check.BashPath, "not found"))
-	statusLine("tmux", check.TmuxPath != "", valueOrNote(check.TmuxPath, "not found"))
-	statusLine("stty", check.SttyPath != "", valueOrNote(check.SttyPath, "not found"))
+	if runtime.GOOS == "windows" {
+		statusLine("powershell", check.PowerShellPath != "", valueOrNote(check.PowerShellPath, "not found"))
+	} else {
+		statusLine("bash", check.BashPath != "", valueOrNote(check.BashPath, "not found"))
+		statusLine("tmux", check.TmuxPath != "", valueOrNote(check.TmuxPath, "not found"))
+		statusLine("stty", check.SttyPath != "", valueOrNote(check.SttyPath, "not found"))
+	}
 	statusLine("config dir", check.ConfigWritable, check.StateDir)
 	statusLine("cache dir", check.CacheWritable, check.CacheDir)
 

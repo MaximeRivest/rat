@@ -16,9 +16,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/procutil"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -107,7 +107,7 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	procutil.ConfigureBackgroundProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -130,7 +130,7 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	if err := store.Put(k); err != nil {
 		// Kill the process we just started — state is the source of truth
-		syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+		_ = procutil.Terminate(cmd.Process.Pid)
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
@@ -180,16 +180,16 @@ func StopAll(store *state.Store) (int, error) {
 // Used when daemon.Start finds a stale/unhealthy kernel it needs to replace.
 func forceStopAndRemove(store *state.Store, k *state.Kernel) {
 	if k.PID > 0 {
-		syscall.Kill(k.PID, syscall.SIGTERM)
+		_ = procutil.Terminate(k.PID)
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if !isAlive(k.PID) {
+			if !procutil.IsAlive(k.PID) {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if isAlive(k.PID) {
-			syscall.Kill(k.PID, syscall.SIGKILL)
+		if procutil.IsAlive(k.PID) {
+			_ = procutil.Kill(k.PID)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -207,7 +207,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	}
 
 	// Send SIGTERM
-	if err := syscall.Kill(k.PID, syscall.SIGTERM); err != nil {
+	if err := procutil.Terminate(k.PID); err != nil {
 		// Process already gone — just mark stopped
 		store.MarkStopped(k.Name)
 		return nil
@@ -216,7 +216,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	// Wait up to 3 seconds for graceful shutdown
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !isAlive(k.PID) {
+		if !procutil.IsAlive(k.PID) {
 			store.MarkStopped(k.Name)
 			return nil
 		}
@@ -224,7 +224,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	}
 
 	// Escalate to SIGKILL
-	syscall.Kill(k.PID, syscall.SIGKILL)
+	_ = procutil.Kill(k.PID)
 	time.Sleep(100 * time.Millisecond)
 	store.MarkStopped(k.Name)
 	return nil
@@ -304,12 +304,4 @@ func readBody(resp *http.Response) ([]byte, error) {
 	buf := make([]byte, 4096)
 	n, _ := resp.Body.Read(buf)
 	return buf[:n], nil
-}
-
-func isAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }

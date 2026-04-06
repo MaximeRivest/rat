@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package bash implements the Kernel interface for a shared bash session.
 //
 // The shell itself lives inside a tmux session. Humans attach with `rat sh`
