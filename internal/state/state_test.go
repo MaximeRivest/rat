@@ -329,6 +329,22 @@ func TestStateFilePersistence(t *testing.T) {
 	}
 }
 
+func TestStateFileWritten0600(t *testing.T) {
+	s := tempStore(t)
+
+	if err := s.Put(Kernel{Name: "sh", Lang: "sh", Port: 8720, PID: os.Getpid(), Cwd: "/tmp", Started: time.Now()}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	info, err := os.Stat(s.Path())
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state file mode = %#o, want 0o600", got)
+	}
+}
+
 func TestPutDefaultsToRunning(t *testing.T) {
 	s := tempStore(t)
 
