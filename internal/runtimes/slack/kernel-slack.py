@@ -12,6 +12,7 @@ ctl(status)         → channel info
 Environment:
   SLACK_BOT_TOKEN    Required. Bot token (xoxb-...)
   SLACK_APP_TOKEN    Optional. App-level token (xapp-...) for Socket Mode
+  RAT_SLACK_AGENT    Optional. MCP URL of agent kernel for auto-replies
   SLACK_CHANNEL      Channel name or ID (default: general)
   SLACK_HISTORY      Number of messages to show (default: 10)
 """
@@ -56,6 +57,7 @@ def _api(method, **kwargs):
 
 
 APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
+AGENT_URL = os.environ.get("RAT_SLACK_AGENT", "")
 
 
 # ── Minimal WebSocket client (stdlib only) ───────────────────
@@ -296,6 +298,114 @@ def _handle_slack_event(event):
             "text": text,
             "channel": ch_name,
         })
+
+        # Forward to agent if configured.
+        if AGENT_URL:
+            _forward_to_agent(user, text, ch_name, ch)
+
+
+def _forward_to_agent(from_user, text, ch_name, raw_channel):
+    """Forward an inbound message to the agent kernel and send the reply back."""
+    prompt = (
+        f'Slack message from {from_user} in {ch_name}: "{text}" '
+        f'\u2014 Write a short reply. If no reply is needed, respond with exactly: NO_REPLY'
+    )
+    try:
+        reply = _mcp_run(AGENT_URL, prompt)
+    except Exception as e:
+        _emit_event("error", {"msg": f"agent error: {e}"})
+        return
+
+    if not reply or "NO_REPLY" in reply:
+        return
+
+    # Send reply back to Slack.
+    if raw_channel.startswith("D"):
+        # DM — reply in the same DM channel.
+        ok, err = _send_message(reply, target=raw_channel)
+    else:
+        # Channel — reply in the same channel.
+        ok, err = _send_message(reply, target=raw_channel)
+
+    if ok:
+        _emit_event("message", {
+            "from": "rat (agent)",
+            "text": reply,
+            "channel": ch_name,
+        })
+    else:
+        _emit_event("error", {"msg": f"agent reply failed: {err}"})
+
+
+# ── Minimal MCP client ──────────────────────────────────────
+
+_mcp_sessions = {}  # url → session_id (after initialize)
+
+
+def _mcp_call(url, method, params=None):
+    """Make a JSON-RPC call to an MCP server."""
+    import random
+    req_id = random.randint(1, 999999)
+    body = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "method": method,
+        "params": params or {},
+    }
+    data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    # Include session ID if we have one.
+    session_id = _mcp_sessions.get(url)
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        # Capture session ID from response.
+        sid = resp.headers.get("Mcp-Session-Id")
+        if sid:
+            _mcp_sessions[url] = sid
+        return json.loads(resp.read())
+
+
+def _mcp_ensure_session(url):
+    """Initialize an MCP session if we don't have one."""
+    if url in _mcp_sessions:
+        return
+    result = _mcp_call(url, "initialize", {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "rat-slack-agent", "version": "0.1.0"},
+    })
+    # Send initialized notification.
+    notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    data = json.dumps(notif).encode()
+    headers = {"Content-Type": "application/json"}
+    session_id = _mcp_sessions.get(url)
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass  # Notifications don't return a response body.
+
+
+def _mcp_run(url, code):
+    """Call the 'run' tool on an MCP server. Returns the text output."""
+    _mcp_ensure_session(url)
+    result = _mcp_call(url, "tools/call", {
+        "name": "run",
+        "arguments": {"code": code},
+    })
+    # Extract text from MCP tool result.
+    content = result.get("result", {}).get("content", [])
+    texts = []
+    for item in content:
+        if item.get("type") == "text":
+            texts.append(item.get("text", ""))
+    return "\n".join(texts).strip()
 
 
 def _emit_event(event_type, data):
