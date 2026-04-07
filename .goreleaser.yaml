@@ -1,0 +1,38 @@
+version: 2
+
+builds:
+  - main: ./cmd/rat
+    binary: rat
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X github.com/maximerivest/rat/cmd/rat/commands.Version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: binary
+    name_template: "rat-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^website:"
+      - "^test:"
+
+release:
+  github:
+    owner: MaximeRivest
+    name: rat
+  draft: false
+  prerelease: auto
