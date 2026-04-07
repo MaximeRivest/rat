@@ -1,0 +1,50 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Custom Runtimes
+description: Add any language with a YAML file and a kernel script.
+---
+
+# Custom Runtimes
+
+Add any language by dropping a `runtime.yaml` and a kernel script in `~/.config/rat/runtimes/<lang>/`. No Go code, no recompilation.
+
+## runtime.yaml
+
+```yaml
+name: ruby
+display: Ruby
+
+detect:
+  commands: [ruby]
+  env: RAT_RUBY
+
+kernel:
+  type: json
+  script: kernel.rb
+```
+
+## Kernel script
+
+The kernel script reads JSON lines from stdin, writes JSON lines to stdout. The wire format is documented in the [Kernel Protocol](/reference/kernel-protocol).
+
+## Built-in runtimes
+
+The built-in runtimes (R, pi) use the same mechanism — there's nothing special about them.
+
+## Architecture
+
+```text
+rat (Go binary)
+├── CLI           install, run, look, status, start, stop, ...
+├── REPL          rat py → IPython connected to shared kernel via MCP
+├── MCP server    rat serve → HTTP or stdio
+├── Resolver      project-scoped naming (py@myproject)
+└── Kernels
+     ├── python   built-in, IPython + jedi
+     ├── bash     built-in, direct PTY
+     ├── r        generic JSON kernel (runtime.yaml + kernel.R)
+     ├── pi       generic tmux kernel (runtime.yaml + bridge.ts)
+     └── custom   ~/.config/rat/runtimes/<lang>/
+```
+
+The MCP server is Go. The kernel subprocess runs in the user's interpreter with access to their packages. Communication is JSON lines over pipes.

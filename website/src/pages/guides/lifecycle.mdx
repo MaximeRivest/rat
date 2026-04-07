@@ -1,0 +1,57 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Lifecycle
+description: Auto-start, explicit start/stop, and cleanup.
+---
+
+# Lifecycle
+
+Kernels auto-start on first use. No manual start/stop needed for normal work.
+
+```bash frame="terminal" title="Terminal"
+rat run py 'x = 42'
+```
+
+Not running? Starts automatically.
+
+```bash frame="terminal" title="Terminal"
+rat py
+```
+
+Not running? Starts automatically.
+
+```bash frame="terminal" title="Terminal"
+rat look py
+```
+
+Not running? Starts automatically.
+
+## Explicit control
+
+```bash frame="terminal" title="Terminal"
+rat start py
+```
+
+```bash frame="terminal" title="Terminal"
+rat stop py
+```
+
+Preserves state entry.
+
+```bash frame="terminal" title="Terminal"
+rat stop --all
+```
+
+## Cleanup
+
+```bash frame="terminal" title="Terminal"
+rat remove py-ml
+```
+
+Delete state entry entirely.
+
+```bash frame="terminal" title="Terminal"
+rat remove --all
+```
+
+Clean slate.

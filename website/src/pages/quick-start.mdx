@@ -1,0 +1,83 @@
+---
+layout: ../layouts/DocsLayout.astro
+title: Quick Start
+description: Set up Python and run your first shared session in 60 seconds.
+---
+
+# Quick Start
+
+## Install rat and Python support
+
+```bash frame="terminal" title="Terminal"
+curl -fsSL https://runanything.dev/install.sh | sh
+rat install py
+```
+
+## Start a REPL
+
+```bash frame="terminal" title="Terminal"
+rat py
+```
+
+```python
+In [1]: import pandas as pd
+In [2]: df = pd.read_csv("sales.csv")
+In [3]: df.shape
+```
+
+```text
+(1000, 12)
+```
+
+Leave it open.
+
+## Connect Claude Desktop
+
+`rat install py` already configured Claude Desktop. Open it and say:
+
+> "Describe the dataframe I just loaded."
+
+Claude sees the same `df` — same kernel, same namespace. No copy-paste, no export.
+
+## Run one-liners
+
+From another terminal:
+
+```bash frame="terminal" title="Terminal"
+rat run py 'print(df.columns.tolist())'
+```
+
+```text
+['date', 'product', 'region', 'revenue', ...]
+```
+
+## Inspect state
+
+```bash frame="terminal" title="Terminal"
+rat look py
+```
+
+```text
+Variables:
+  df    DataFrame  (1000, 12)  780KB
+  pd    module     pandas
+```
+
+```bash frame="terminal" title="Terminal"
+rat look py --at df
+```
+
+```text
+pandas.DataFrame · (1000, 12) · 780KB
+Columns: date (datetime64), product (object), region (object), revenue (float64), ...
+Head:
+  date        product   region   revenue
+  2024-01-01  Widget A  East     1234.56
+  ...
+```
+
+## Next steps
+
+- [REPL Guide](/guides/repl) — syntax highlighting, tab completion, magic commands
+- [Project Scoping](/guides/project-scoping) — how kernels are isolated per project
+- [App Builders](/guides/app-builders) — connect from your own code

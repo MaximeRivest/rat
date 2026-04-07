@@ -1,0 +1,45 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: App Builders
+description: Start kernels as MCP servers and connect from your app.
+---
+
+# App Builders
+
+## Start a kernel
+
+```bash frame="terminal" title="Terminal"
+rat serve py --http --port 8717 --cwd ~/project --venv ~/project/.venv
+```
+
+```bash frame="terminal" title="Terminal"
+rat serve r --http --port 8718
+```
+
+```bash frame="terminal" title="Terminal"
+rat serve py
+```
+
+Stdio mode (default) for local integrations.
+
+## Connect from your app
+
+```javascript
+const py = new McpClient("http://localhost:8717/mcp");
+await py.callTool("run", { code: "x = 42" });
+await py.callTool("look");
+await py.callTool("look", { at: "df" });
+await py.callTool("ctl", { op: "reset" });
+```
+
+## Claude Desktop / Cursor config
+
+```json
+{
+  "mcpServers": {
+    "python": { "url": "http://127.0.0.1:8717/mcp" }
+  }
+}
+```
+
+`rat install` writes this automatically.

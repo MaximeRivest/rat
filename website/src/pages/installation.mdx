@@ -1,0 +1,65 @@
+---
+layout: ../layouts/DocsLayout.astro
+title: Installation
+description: Install rat on macOS or Linux.
+---
+
+# Installation
+
+## macOS and Linux
+
+```bash frame="terminal" title="Terminal"
+curl -fsSL https://runanything.dev/install.sh | sh
+```
+
+This downloads the latest release binary and places it on your `PATH`.
+
+## Set up a language
+
+```bash frame="terminal" title="Terminal"
+rat install py
+```
+
+```text
+✓ Python 3.12.1 detected
+✓ ipython installed into .venv
+✓ jedi installed into .venv
+✓ Claude Desktop config updated
+```
+
+Available runtimes:
+
+| Runtime | What `rat install` does |
+|---------|------------------------|
+| `py` | Detects venv, installs IPython + jedi |
+| `sh` | Nothing — bash is already there |
+| `r` | Installs jsonlite |
+| `pi` | Checks tmux + pi-coding-agent |
+
+Multiple at once:
+
+```bash frame="terminal" title="Terminal"
+rat install py r sh
+```
+
+## Interactive setup
+
+```bash frame="terminal" title="Terminal"
+rat setup
+```
+
+Walks you through runtime selection, venv detection, and client configuration interactively.
+
+## Verify
+
+```bash frame="terminal" title="Terminal"
+rat doctor py
+```
+
+Checks that the runtime, dependencies, and MCP configuration are all healthy.
+
+## Update
+
+```bash frame="terminal" title="Terminal"
+rat update
+```

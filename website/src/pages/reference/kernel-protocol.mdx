@@ -1,0 +1,33 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Kernel Protocol
+description: The wire format between rat and kernel subprocesses.
+---
+
+# Kernel Protocol
+
+rat communicates with kernel subprocesses over JSON lines on stdin/stdout. The full specification is in [KERNEL-PROTOCOL.md](https://github.com/MaximeRivest/rat/blob/main/KERNEL-PROTOCOL.md).
+
+## MCP tools
+
+Every kernel exposes exactly three MCP tools:
+
+| Tool | What it does |
+|------|-------------|
+| `run` | Execute code or provide input |
+| `look` | Inspect variables, complete code, see state |
+| `ctl` | Reset, cancel, restart |
+
+## Wire format
+
+The kernel reads JSON requests from stdin (one per line) and writes JSON responses to stdout (one per line). Stderr is reserved for the language runtime's own diagnostics.
+
+```json
+{"id":"1","method":"run","params":{"code":"x = 42"}}
+```
+
+```json
+{"id":"1","result":{"output":"","error":null}}
+```
+
+See the full [KERNEL-PROTOCOL.md](https://github.com/MaximeRivest/rat/blob/main/KERNEL-PROTOCOL.md) for request/response schemas, streaming, and error handling.

@@ -1,0 +1,133 @@
+---
+layout: ../layouts/DocsLayout.astro
+title: Run AnyThing
+description: One binary. Every REPL language. Every client shares one namespace.
+landingTitle: Run AnyThing.
+showToc: false
+---
+
+## One binary. Every REPL. Shared namespace.
+
+rat wraps language runtimes as MCP servers. Start a Python kernel in your terminal — then connect from Claude Desktop, VS Code, Cursor, or any MCP client. Same variables. Same session. Zero glue code.
+
+---
+
+<div class="not-prose mt-8 space-y-10">
+
+  <div>
+    <div class="mb-3">
+      <div class="text-lg font-semibold text-slate-900">1. Install & set up a language</div>
+      <p class="mt-1 text-sm text-slate-500">One curl. One install command. Done.</p>
+    </div>
+
+```bash frame="terminal" title="Terminal"
+curl -fsSL https://runanything.dev/install.sh | sh
+```
+
+```bash frame="terminal" title="Terminal"
+rat install py
+```
+
+  </div>
+
+  <div>
+    <div class="mb-3">
+      <div class="text-lg font-semibold text-slate-900">2. Open a REPL</div>
+      <p class="mt-1 text-sm text-slate-500">Full IPython with syntax highlighting, tab completion, and magic commands.</p>
+    </div>
+
+```bash frame="terminal" title="Terminal"
+rat py
+```
+
+```python
+In [1]: df = pd.read_csv("sales.csv")
+In [2]: df.head()
+```
+
+  </div>
+
+  <div>
+    <div class="mb-3">
+      <div class="text-lg font-semibold text-slate-900">3. Connect an AI — same session</div>
+      <p class="mt-1 text-sm text-slate-500">Open Claude Desktop. "Analyze the dataframe I just loaded." It sees the same <code>df</code>.</p>
+    </div>
+
+```text
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ Terminal  │ │  Claude  │ │  VS Code │
+│  rat py   │ │ Desktop  │ │  ext     │
+└─────┬────┘ └────┬─────┘ └────┬─────┘
+      └───────────┴──────┬─────┘
+                         │
+              http://127.0.0.1:8717/mcp
+                         │
+                   one Python kernel
+```
+
+  </div>
+
+</div>
+
+---
+
+## Three tools. That's the whole API.
+
+<div class="not-prose mt-6">
+<table class="w-full text-sm">
+<thead><tr class="border-b border-slate-200"><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">Tool</th><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">What it does</th></tr></thead>
+<tbody>
+<tr class="border-b border-slate-100"><td class="px-4 py-2"><code>run</code></td><td class="px-4 py-2 text-slate-600">Execute code or provide input</td></tr>
+<tr class="border-b border-slate-100"><td class="px-4 py-2"><code>look</code></td><td class="px-4 py-2 text-slate-600">Inspect variables, complete code, see state</td></tr>
+<tr><td class="px-4 py-2"><code>ctl</code></td><td class="px-4 py-2 text-slate-600">Reset, cancel, restart</td></tr>
+</tbody>
+</table>
+</div>
+
+Same three tools for every language. Same three tools whether you're a human in a terminal, an LLM, or a notebook app.
+
+---
+
+## Why rat
+
+<div class="not-prose mt-6 grid gap-4 sm:grid-cols-2">
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div class="mb-2 text-lg font-semibold text-slate-900">Shared namespace</div>
+    <p class="text-sm leading-relaxed text-slate-500">Your terminal, Claude, VS Code, and Cursor all see the same variables. Load data once, use it everywhere.</p>
+  </div>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div class="mb-2 text-lg font-semibold text-slate-900">Project-scoped kernels</div>
+    <p class="text-sm leading-relaxed text-slate-500"><code>rat py</code> in <code>{"~/project-a"}</code> is separate from <code>{"~/project-b"}</code>. Automatic isolation, no configuration.</p>
+  </div>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div class="mb-2 text-lg font-semibold text-slate-900">Any language</div>
+    <p class="text-sm leading-relaxed text-slate-500">Python, R, bash, pi agent built in. Add any language with a YAML file and a kernel script — no Go code.</p>
+  </div>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+    <div class="mb-2 text-lg font-semibold text-slate-900">Native MCP</div>
+    <p class="text-sm leading-relaxed text-slate-500">Every kernel is an MCP server. Works with Claude Desktop, Cursor, and any MCP client out of the box.</p>
+  </div>
+</div>
+
+---
+
+## Get started
+
+<div class="not-prose mt-4 grid gap-3 sm:grid-cols-2">
+  <a href="/installation" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Installation →</div>
+    <div class="mt-1 text-sm text-slate-500">Install on macOS or Linux in one command</div>
+  </a>
+  <a href="/quick-start" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Quick Start →</div>
+    <div class="mt-1 text-sm text-slate-500">Set up Python and run your first shared session</div>
+  </a>
+  <a href="/guides/repl" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">REPL Guide →</div>
+    <div class="mt-1 text-sm text-slate-500">Full-featured terminal sessions with shared state</div>
+  </a>
+  <a href="/reference/commands" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Command Reference →</div>
+    <div class="mt-1 text-sm text-slate-500">Every command, flag, and option</div>
+  </a>
+</div>

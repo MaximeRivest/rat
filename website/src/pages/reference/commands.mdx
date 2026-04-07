@@ -1,0 +1,41 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Commands
+description: Every rat command, flag, and option.
+---
+
+# Commands
+
+## Daily use
+
+| Command | Description |
+|---------|-------------|
+| `rat <lang>` | Open REPL (auto-starts kernel) |
+| `rat run <runtime> '<code>'` | Execute code |
+| `rat look <runtime> [--at SYM]` | Inspect namespace |
+| `rat tail <runtime>` | Recent activity |
+| `rat pick` | Interactive kernel picker |
+| `rat cancel <runtime>` | Interrupt execution |
+| `rat reset <runtime>` | Clear namespace |
+| `rat restart <runtime>` | Fresh start |
+
+## Setup
+
+| Command | Description |
+|---------|-------------|
+| `rat install <lang> [<lang>...]` | Set up runtimes + deps |
+| `rat setup` | Interactive wizard |
+| `rat add <name> [dir]` | Register named runtime |
+| `rat remove <name> [--all]` | Delete state entry |
+
+## Management
+
+| Command | Description |
+|---------|-------------|
+| `rat status [-v]` | What's running |
+| `rat start <runtime>` | Start a kernel |
+| `rat stop <runtime> [--all]` | Stop a kernel |
+| `rat serve <name> [--http]` | MCP server (for app builders) |
+| `rat doctor [<lang>]` | Diagnostics |
+| `rat version` | Version info |
+| `rat update` | Update rat |

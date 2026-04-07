@@ -1,0 +1,22 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Languages
+description: Supported languages and their kernel types.
+---
+
+# Languages
+
+## Built-in
+
+| Lang | REPL | Kernel type | `rat install` installs |
+|------|------|-------------|----------------------|
+| `py` | IPython | built-in (JSON) | ipython, jedi into venv |
+| `sh` | bash | built-in (PTY) | nothing |
+| `r` | R console | generic (JSON) | jsonlite |
+| `pi` | pi agent | generic (tmux) | @mariozechner/pi-coding-agent |
+
+## Adding more
+
+Any language can be added via [custom runtimes](/guides/custom-runtimes). Drop a `runtime.yaml` and a kernel script in `~/.config/rat/runtimes/<lang>/`.
+
+Julia and Node.js are in progress.

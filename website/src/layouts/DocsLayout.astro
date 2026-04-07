@@ -1,0 +1,214 @@
+---
+import "../styles/global.css";
+import Navbar from "../components/Navbar.astro";
+
+const { frontmatter } = Astro.props;
+const title = frontmatter?.title ? `rat | ${frontmatter.title}` : "rat — Run AnyThing";
+const description = frontmatter?.description ?? "One binary. Every REPL language. Every client shares one namespace.";
+const showToc = frontmatter?.showToc ?? true;
+const landingTitle = frontmatter?.landingTitle ?? "";
+const currentPath = Astro.url.pathname;
+
+const sidebar = [
+  { label: "Overview", href: "/" },
+  { label: "Installation", href: "/installation" },
+  { label: "Quick Start", href: "/quick-start" },
+  { label: "REPL", href: "/guides/repl" },
+  { label: "One-Liners", href: "/guides/one-liners" },
+  { label: "Project Scoping", href: "/guides/project-scoping" },
+  { label: "Lifecycle", href: "/guides/lifecycle" },
+  { label: "App Builders", href: "/guides/app-builders" },
+  { label: "Custom Runtimes", href: "/guides/custom-runtimes" },
+  { label: "VS Code Extension", href: "/guides/vscode" },
+  { label: "Commands", href: "/reference/commands" },
+  { label: "Kernel Protocol", href: "/reference/kernel-protocol" },
+  { label: "Languages", href: "/reference/languages" },
+];
+
+const groups = [
+  { heading: null, items: sidebar.slice(0, 3) },
+  { heading: "Guides", items: sidebar.slice(3, 10) },
+  { heading: "Reference", items: sidebar.slice(10) },
+];
+
+const isActive = (href: string) => {
+  const hrefPath = href.replace(/\/$/, "") || "/";
+  const cleanPath = currentPath.replace(/\/$/, "") || "/";
+  return hrefPath === cleanPath || (hrefPath !== "/" && cleanPath.startsWith(hrefPath));
+};
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=block" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=block" rel="stylesheet" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+  </head>
+  <body class="bg-slate-50 text-slate-900" style="font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased;">
+    <div class="min-h-screen">
+      <Navbar sidebar={sidebar} currentPath={currentPath} />
+
+      <main class="mx-auto grid max-w-6xl gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[200px_1fr_200px]">
+        <!-- Left sidebar -->
+        <aside class="hidden lg:block">
+          <div class="sticky top-24 space-y-6 text-sm text-slate-600">
+            {groups.map((group) => (
+              <nav class="space-y-1">
+                {group.heading && (
+                  <div class="px-3 pb-1 text-[11px] font-semibold tracking-[0.15em] uppercase text-slate-400">
+                    {group.heading}
+                  </div>
+                )}
+                {group.items.map((item) => (
+                  <a
+                    class:list={[
+                      "block rounded-lg px-3 py-1.5 transition hover:text-sky-500",
+                      {
+                        "bg-slate-100 font-medium text-slate-900 shadow-inner outline outline-slate-300": isActive(item.href),
+                      },
+                    ]}
+                    href={item.href}
+                    aria-current={isActive(item.href) ? "page" : undefined}
+                  >
+                    {item.label}
+                  </a>
+                ))}
+              </nav>
+            ))}
+          </div>
+        </aside>
+
+        <!-- Content -->
+        <section class="min-w-0" data-toc-content>
+          {landingTitle && (
+            <div class="mb-10">
+              <h1 class="landing-title">{landingTitle}</h1>
+            </div>
+          )}
+
+          <article class="prose prose-slate max-w-none">
+            <slot />
+          </article>
+        </section>
+
+        <!-- Right TOC -->
+        <aside class:list={["hidden", { "lg:block": showToc, hidden: !showToc }]}>
+          <div class="sticky top-24">
+            <div class="text-[11px] font-semibold tracking-[0.2em] text-slate-400 uppercase">
+              On this page
+            </div>
+            <div class="toc-wrap mt-4 text-sm text-slate-600">
+              <div class="toc-rail" aria-hidden="true">
+                <span class="toc-rail-track"></span>
+                <span class="toc-rail-fill"></span>
+                <span class="toc-indicator">•</span>
+              </div>
+              <div class="toc-list" data-toc-list></div>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script is:inline>
+    (() => {
+      document.querySelectorAll('.expressive-code + .expressive-code').forEach(el => el.classList.add('ec-output'));
+
+      const scope = document.querySelector("[data-toc-content]");
+      const headings = Array.from(scope?.querySelectorAll("h1[id]:not(.no-toc), h2[id]:not(.no-toc), h3[id]:not(.no-toc)") ?? []);
+
+      const copyText = async (v) => {
+        if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(v); return; }
+        const t = document.createElement("textarea"); t.value = v; t.setAttribute("readonly","true"); t.style.position="absolute"; t.style.left="-9999px"; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove();
+      };
+
+      for (const h of headings) {
+        if (h.querySelector(".heading-anchor")) continue;
+        const a = document.createElement("a");
+        a.className = "heading-anchor"; a.href = `#${h.id}`; a.setAttribute("aria-label","Copy link"); a.textContent = "#";
+        h.addEventListener("click", async (e) => {
+          e.preventDefault();
+          try { await copyText(`${location.origin}${location.pathname}#${h.id}`); } catch {}
+          history.replaceState(null, "", a.href);
+          a.classList.add("is-copied"); setTimeout(() => a.classList.remove("is-copied"), 1400);
+        });
+        h.insertBefore(a, h.firstChild);
+      }
+
+      const tocWrap = document.querySelector(".toc-wrap");
+      const tocIndicator = document.querySelector(".toc-indicator");
+      const tocList = tocWrap?.querySelector("[data-toc-list]");
+      const tocHeadings = Array.from(scope?.querySelectorAll("h1[id]:not(.no-toc), h2[id]:not(.no-toc)") ?? []);
+
+      if (!tocWrap || !tocList || !tocHeadings.length) { tocWrap?.classList.add("hidden"); return; }
+
+      tocList.replaceChildren();
+      for (const h of tocHeadings) {
+        const depth = h.tagName === "H1" ? 1 : 2;
+        const link = document.createElement("a");
+        link.className = `toc-link block depth-${depth}`;
+        link.dataset.tocLink = "";
+        link.href = `#${h.id}`;
+        const text = document.createElement("span");
+        text.className = "toc-text";
+        const clone = h.cloneNode(true);
+        clone.querySelectorAll(".heading-anchor").forEach(n => n.remove());
+        text.textContent = clone.textContent?.trim() || h.id;
+        link.append(text);
+        tocList.append(link);
+      }
+
+      const tocLinks = Array.from(tocWrap.querySelectorAll("[data-toc-link]"));
+      let tocRailStart = 0;
+
+      const updateToc = () => {
+        let activeId = tocHeadings[0]?.id;
+        for (const h of tocHeadings) { if (h.getBoundingClientRect().top <= 140) activeId = h.id; }
+        for (const link of tocLinks) {
+          link.classList.toggle("is-active", link.getAttribute("href")?.replace("#","") === activeId);
+        }
+
+        if (!tocIndicator || !tocLinks.length) return;
+        const tops = tocHeadings.map(h => h.getBoundingClientRect().top + window.scrollY);
+        const offsets = tocLinks.map(l => ({ top: l.offsetTop, height: l.offsetHeight }));
+        if (!offsets.length) return;
+        const ih = tocIndicator.offsetHeight || 0;
+        const scrollY = window.scrollY + 140;
+        let idx = 0;
+        for (let i = 0; i < tops.length; i++) { if (scrollY >= tops[i]) idx = i; }
+        const ni = Math.min(idx + 1, tops.length - 1);
+        const span = Math.max(tops[ni] - tops[idx], 1);
+        const progress = Math.min(1, Math.max(0, (scrollY - tops[idx]) / span));
+        const sp = offsets[idx]?.top + (offsets[idx]?.height - ih) / 2;
+        const ep = offsets[ni]?.top + (offsets[ni]?.height - ih) / 2;
+        tocIndicator.style.transform = `translateY(${sp + (ep - sp) * progress}px)`;
+
+        const first = offsets[0], last = offsets[offsets.length-1];
+        tocRailStart = first.top + (first.height - ih) / 2;
+        const end = last.top + (last.height - ih) / 2 + ih;
+        tocWrap.style.setProperty("--toc-rail-start", `${tocRailStart}px`);
+        tocWrap.style.setProperty("--toc-rail-end", `${Math.max(0, tocWrap.offsetHeight - end)}px`);
+
+        requestAnimationFrame(() => {
+          const wr = tocWrap.getBoundingClientRect();
+          const ir = tocIndicator.getBoundingClientRect();
+          tocWrap.style.setProperty("--toc-indicator", `${Math.max(0, ir.top - wr.top + ir.height / 2 - tocRailStart)}px`);
+        });
+      };
+
+      updateToc();
+      window.addEventListener("scroll", updateToc, { passive: true });
+      window.addEventListener("resize", updateToc);
+    })();
+    </script>
+  </body>
+</html>

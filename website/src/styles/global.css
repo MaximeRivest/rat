@@ -1,0 +1,275 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+:root {
+  scroll-padding-top: 96px;
+}
+
+body {
+  @apply bg-slate-50 font-light text-slate-900;
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+code, pre {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-feature-settings: "liga" 1, "calt" 1;
+}
+
+.site-header {
+  @apply sticky top-0 z-40 border-b border-slate-200 bg-white/80 backdrop-blur;
+  @apply transition-all duration-300 ease-in-out;
+
+  &.is-scrolled {
+    @apply shadow-sm;
+  }
+}
+
+/* ── Prose overrides ───────────────────────────────────────────── */
+
+.prose {
+  @apply font-light;
+}
+
+.prose p {
+  @apply leading-relaxed;
+}
+
+.prose h1 {
+  @apply text-4xl font-extrabold tracking-tight;
+  letter-spacing: -0.035em;
+}
+
+.prose h2 {
+  @apply mt-12 text-2xl font-semibold tracking-tight;
+  letter-spacing: -0.025em;
+}
+
+.prose h3 {
+  @apply mt-8 text-lg font-semibold;
+  letter-spacing: -0.01em;
+}
+
+.prose h4 {
+  @apply text-slate-500;
+}
+
+.prose strong {
+  @apply font-semibold;
+}
+
+.prose :is(h1, h2, h3) {
+  scroll-margin-top: 120px;
+  position: relative;
+}
+
+/* ── Inline code ───────────────────────────────────────────────── */
+
+code, .code {
+  &:before, &:after { content: ""; }
+  @apply rounded border border-slate-300 bg-slate-100 px-1 py-0.5 font-mono font-light text-sm;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+pre code {
+  @apply border-0 bg-transparent p-0;
+}
+
+/* ── Merged terminal blocks ────────────────────────────────────── */
+
+.expressive-code + .expressive-code {
+  margin-top: -1rem !important;
+}
+
+.expressive-code + .expressive-code figure {
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
+  border-top: none !important;
+  box-shadow: none !important;
+}
+
+.expressive-code:has(+ .expressive-code) figure {
+  border-bottom-left-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.expressive-code + .expressive-code .header,
+.expressive-code + .expressive-code .copy {
+  display: none !important;
+}
+
+/* ── Terminal prompt ───────────────────────────────────────────── */
+
+.expressive-code figure.is-terminal pre .ec-line:first-child .code::before {
+  content: "$ ";
+  color: #00adff;
+  opacity: 0.7;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* ── Expressive-code global overrides ──────────────────────────── */
+
+.expressive-code figure.is-terminal {
+  border-radius: 12px !important;
+  overflow: hidden !important;
+  box-shadow: none !important;
+}
+
+.ec-output figure {
+  box-shadow: none !important;
+  overflow: hidden !important;
+}
+
+.expressive-code pre {
+  font-family: "JetBrains Mono", ui-monospace, monospace !important;
+  font-size: 0.82rem !important;
+  line-height: 1.7 !important;
+  letter-spacing: -0.01em;
+}
+
+/* ── Code cells (standalone blocks, NOT following another block) ── */
+
+.expressive-code:not(.ec-output) figure:not(.is-terminal) {
+  --ec-codeBg: #f1f5f9 !important;
+  --ec-codeFg: #64748b !important;
+  --ec-brdCol: #e2e8f0 !important;
+  --ec-frm-edBg: #f1f5f9 !important;
+  --ec-frm-frameBoxShdCssVal: none !important;
+  --ec-sbThumbCol: #cbd5e133 !important;
+  --ec-sbThumbHoverCol: #94a3b866 !important;
+  border-radius: 10px !important;
+}
+
+.expressive-code:not(.ec-output) figure:not(.is-terminal) pre {
+  --ec-codeBg: #f1f5f9 !important;
+  background: #f1f5f9 !important;
+}
+
+.expressive-code:not(.ec-output) figure:not(.is-terminal) .ec-line span[style] {
+  --0: #64748b !important;
+  --0bg: transparent !important;
+}
+
+.expressive-code:not(.ec-output) figure:not(.is-terminal) .copy button {
+  --ec-frm-inlBtnFg: #64748b !important;
+  --ec-frm-inlBtnBg: transparent !important;
+  --ec-frm-inlBtnBrd: #cbd5e1 !important;
+  --ec-frm-inlBtnBrdOpa: 1 !important;
+  --ec-frm-inlBtnBgIdleOpa: 0 !important;
+  background: #f1f5f9 !important;
+  border-radius: 6px !important;
+}
+
+.expressive-code:not(.ec-output) figure:not(.is-terminal) .header {
+  display: none !important;
+}
+
+/* ── Tables ────────────────────────────────────────────────────── */
+
+.prose table {
+  @apply overflow-hidden rounded-xl border border-slate-200;
+}
+
+.prose th {
+  @apply text-xs font-semibold tracking-wide uppercase;
+}
+
+/* ── Heading anchors ───────────────────────────────────────────── */
+
+.prose :is(h1, h2, h3) .heading-anchor {
+  @apply absolute inline-flex items-center text-lg text-slate-400 no-underline opacity-0;
+  left: -1em;
+  top: 50%;
+  transform: translateY(-50%);
+  transition: opacity 140ms ease, color 140ms ease;
+}
+
+.prose :is(h1, h2, h3):hover {
+  @apply cursor-pointer;
+}
+
+.prose :is(h1, h2, h3):hover .heading-anchor {
+  @apply opacity-100;
+}
+
+.prose :is(h1, h2, h3) .heading-anchor.is-copied {
+  @apply text-emerald-500 opacity-100;
+}
+
+/* ── TOC sidebar ───────────────────────────────────────────────── */
+
+.toc-wrap {
+  position: relative;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.toc-list {
+  display: grid;
+  gap: 8px;
+}
+
+.toc-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+}
+
+.toc-rail-track, .toc-rail-fill {
+  position: absolute;
+  left: 6px;
+  width: 1px;
+}
+
+.toc-rail-track {
+  top: var(--toc-rail-start, 0px);
+  bottom: var(--toc-rail-end, 0px);
+  background: rgba(148, 163, 184, 0.35);
+}
+
+.toc-rail-fill {
+  top: var(--toc-rail-start, 0px);
+  height: var(--toc-indicator, 0px);
+  background: rgba(71, 85, 105, 0.7);
+}
+
+.toc-indicator {
+  position: absolute;
+  left: -0.5px;
+  top: -2px;
+  display: inline-flex;
+  transition: transform 120ms ease;
+  font-size: 2em;
+  color: #00adff;
+}
+
+.toc-link {
+  display: block;
+  color: inherit;
+  transition: color 120ms ease;
+  @apply text-slate-500;
+
+  &.depth-2 {
+    @apply ml-2 text-xs text-slate-400;
+  }
+
+  &.is-active {
+    @apply text-slate-700;
+    color: #0f172a;
+    font-weight: 600;
+  }
+}
+
+/* ── Landing title ─────────────────────────────────────────────── */
+
+.landing-title {
+  @apply text-6xl font-black tracking-tight text-slate-900 lg:text-7xl;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+}

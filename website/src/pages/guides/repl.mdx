@@ -1,0 +1,81 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: REPL
+description: Full-featured terminal sessions with shared state.
+---
+
+# REPL
+
+```bash frame="terminal" title="Terminal"
+rat py
+```
+
+Full IPython. Syntax highlighting, tab completion, `?` help, `%magic`. The namespace is shared — everything you do is visible to connected clients.
+
+## Other languages
+
+```bash frame="terminal" title="Terminal"
+rat r
+```
+
+```bash frame="terminal" title="Terminal"
+rat sh
+```
+
+```bash frame="terminal" title="Terminal"
+rat pi
+```
+
+## Inspect
+
+```bash frame="terminal" title="Terminal"
+rat look py
+```
+
+Variable overview — names, types, sizes.
+
+```bash frame="terminal" title="Terminal"
+rat look py --at df
+```
+
+Deep inspection of a single variable — type, shape, head, column dtypes.
+
+## History
+
+```bash frame="terminal" title="Terminal"
+rat tail py
+```
+
+```bash frame="terminal" title="Terminal"
+rat tail py --n 20
+```
+
+Recent activity — what was executed, by whom, when.
+
+## Control
+
+```bash frame="terminal" title="Terminal"
+rat cancel py
+```
+
+Interrupt execution (Ctrl-C equivalent).
+
+```bash frame="terminal" title="Terminal"
+rat reset py
+```
+
+Clear namespace, keep process alive.
+
+```bash frame="terminal" title="Terminal"
+rat restart py
+```
+
+Kill the kernel subprocess and start fresh.
+
+## Kernel picker
+
+```bash frame="terminal" title="Terminal"
+rat pick
+```
+
+Interactive picker — arrow keys, Enter to connect. Also appears on `Ctrl-D` from any REPL.

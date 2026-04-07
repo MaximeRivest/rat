@@ -1,0 +1,138 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" type="image/png" href="/favicon.png"><title>rat | REPL</title><meta name="description" content="Full-featured terminal sessions with shared state."><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=block" rel="stylesheet"><link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500&display=block" rel="stylesheet"><meta property="og:title" content="rat | REPL"><meta property="og:description" content="Full-featured terminal sessions with shared state."><meta property="og:type" content="website"><link rel="stylesheet" href="/_astro/app-builders.DV6DDEoL.css"></head> <body class="bg-slate-50 text-slate-900" style="font-family: 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased;"> <div class="min-h-screen"> <header class="site-header"> <div class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6"> <a href="/" class="flex items-center gap-2 text-lg font-bold tracking-tight text-slate-900 hover:text-sky-600 transition"> <span class="text-sky-500">🐀</span> rat
+</a> <div class="flex flex-row-reverse items-center gap-3 text-sm lg:flex-row"> <a class="inline-flex items-center gap-2 rounded-full font-semibold text-slate-500 transition hover:text-slate-900" href="https://github.com/MaximeRivest/rat" target="_blank" rel="noreferrer"> <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"></path></svg> <span class="hidden lg:block">GitHub</span> </a> <!-- Mobile nav --> <div class="lg:hidden"> <div class="relative"> <button id="docs-mobile-nav-trigger" class="inline-flex max-w-32 items-center gap-2 rounded-lg border border-slate-200 px-4 py-1 text-sm font-medium text-slate-700 transition hover:border-slate-300" aria-haspopup="menu" aria-expanded="false"> <span class="line-clamp-1 text-sm text-ellipsis"> REPL </span> <span class="text-lg text-slate-400">▾</span> </button> <div id="docs-mobile-nav-menu" class="absolute right-0 z-20 mt-2 hidden min-w-[200px] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg" role="menu"> <div class="px-2 py-2"> <a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/" role="menuitem"> Overview </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/installation" role="menuitem"> Installation </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/quick-start" role="menuitem"> Quick Start </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 bg-slate-100 font-medium text-slate-900" href="/guides/repl" role="menuitem"> REPL </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/one-liners" role="menuitem"> One-Liners </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/project-scoping" role="menuitem"> Project Scoping </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/lifecycle" role="menuitem"> Lifecycle </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/app-builders" role="menuitem"> App Builders </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/custom-runtimes" role="menuitem"> Custom Runtimes </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/guides/vscode" role="menuitem"> VS Code Extension </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/reference/commands" role="menuitem"> Commands </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/reference/kernel-protocol" role="menuitem"> Kernel Protocol </a><a class="block rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" href="/reference/languages" role="menuitem"> Languages </a> </div> </div> </div> </div> </div> </div> <script>
+    (() => {
+      const navBar = document.querySelector(".site-header");
+      const setScrolled = () => navBar.classList.toggle("is-scrolled", window.scrollY > 0);
+      setScrolled();
+      window.addEventListener("scroll", setScrolled, { passive: true });
+
+      const trigger = document.getElementById("docs-mobile-nav-trigger");
+      const menu = document.getElementById("docs-mobile-nav-menu");
+      if (trigger && menu) {
+        const toggle = (open) => {
+          menu.classList.toggle("hidden", !open);
+          trigger.setAttribute("aria-expanded", open ? "true" : "false");
+        };
+        trigger.addEventListener("click", (e) => { e.preventDefault(); toggle(menu.classList.contains("hidden")); });
+        document.addEventListener("click", (e) => { if (!menu.contains(e.target) && !trigger.contains(e.target)) toggle(false); });
+        document.addEventListener("keydown", (e) => { if (e.key === "Escape") toggle(false); });
+      }
+    })();
+  </script> </header> <main class="mx-auto grid max-w-6xl gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[200px_1fr_200px]"> <!-- Left sidebar --> <aside class="hidden lg:block"> <div class="sticky top-24 space-y-6 text-sm text-slate-600"> <nav class="space-y-1">  <a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/"> Overview </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/installation"> Installation </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/quick-start"> Quick Start </a> </nav><nav class="space-y-1"> <div class="px-3 pb-1 text-[11px] font-semibold tracking-[0.15em] uppercase text-slate-400"> Guides </div> <a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500 bg-slate-100 font-medium text-slate-900 shadow-inner outline outline-slate-300" href="/guides/repl" aria-current="page"> REPL </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/one-liners"> One-Liners </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/project-scoping"> Project Scoping </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/lifecycle"> Lifecycle </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/app-builders"> App Builders </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/custom-runtimes"> Custom Runtimes </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/guides/vscode"> VS Code Extension </a> </nav><nav class="space-y-1"> <div class="px-3 pb-1 text-[11px] font-semibold tracking-[0.15em] uppercase text-slate-400"> Reference </div> <a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/reference/commands"> Commands </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/reference/kernel-protocol"> Kernel Protocol </a><a class="block rounded-lg px-3 py-1.5 transition hover:text-sky-500" href="/reference/languages"> Languages </a> </nav> </div> </aside> <!-- Content --> <section class="min-w-0" data-toc-content>  <article class="prose prose-slate max-w-none"> <h1 id="repl">REPL</h1>
+<div class="expressive-code"><link rel="stylesheet" href="/_astro/ec.j8ru5.css"/><script type="module" src="/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat py"><div></div></button></div></figure></div>
+<p>Full IPython. Syntax highlighting, tab completion, <code>?</code> help, <code>%magic</code>. The namespace is shared — everything you do is visible to connected clients.</p>
+<h2 id="other-languages">Other languages</h2>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">r</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat r"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">sh</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat sh"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">pi</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat pi"><div></div></button></div></figure></div>
+<h2 id="inspect">Inspect</h2>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">look</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat look py"><div></div></button></div></figure></div>
+<p>Variable overview — names, types, sizes.</p>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">look</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span><span style="--0:#D4D4D4"> </span><span style="--0:#569CD6">--at</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">df</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat look py --at df"><div></div></button></div></figure></div>
+<p>Deep inspection of a single variable — type, shape, head, column dtypes.</p>
+<h2 id="history">History</h2>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">tail</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat tail py"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">tail</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span><span style="--0:#D4D4D4"> </span><span style="--0:#569CD6">--n</span><span style="--0:#D4D4D4"> </span><span style="--0:#B5CEA8">20</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat tail py --n 20"><div></div></button></div></figure></div>
+<p>Recent activity — what was executed, by whom, when.</p>
+<h2 id="control">Control</h2>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">cancel</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat cancel py"><div></div></button></div></figure></div>
+<p>Interrupt execution (Ctrl-C equivalent).</p>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">reset</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat reset py"><div></div></button></div></figure></div>
+<p>Clear namespace, keep process alive.</p>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">restart</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">py</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat restart py"><div></div></button></div></figure></div>
+<p>Kill the kernel subprocess and start fresh.</p>
+<h2 id="kernel-picker">Kernel picker</h2>
+<div class="expressive-code"><figure class="frame is-terminal has-title"><figcaption class="header"><span class="title">Terminal</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#DCDCAA">rat</span><span style="--0:#D4D4D4"> </span><span style="--0:#CE9178">pick</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="rat pick"><div></div></button></div></figure></div>
+<p>Interactive picker — arrow keys, Enter to connect. Also appears on <code>Ctrl-D</code> from any REPL.</p> </article> </section> <!-- Right TOC --> <aside class="hidden lg:block"> <div class="sticky top-24"> <div class="text-[11px] font-semibold tracking-[0.2em] text-slate-400 uppercase">
+On this page
+</div> <div class="toc-wrap mt-4 text-sm text-slate-600"> <div class="toc-rail" aria-hidden="true"> <span class="toc-rail-track"></span> <span class="toc-rail-fill"></span> <span class="toc-indicator">•</span> </div> <div class="toc-list" data-toc-list></div> </div> </div> </aside> </main> </div> <script>
+    (() => {
+      document.querySelectorAll('.expressive-code + .expressive-code').forEach(el => el.classList.add('ec-output'));
+
+      const scope = document.querySelector("[data-toc-content]");
+      const headings = Array.from(scope?.querySelectorAll("h1[id]:not(.no-toc), h2[id]:not(.no-toc), h3[id]:not(.no-toc)") ?? []);
+
+      const copyText = async (v) => {
+        if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(v); return; }
+        const t = document.createElement("textarea"); t.value = v; t.setAttribute("readonly","true"); t.style.position="absolute"; t.style.left="-9999px"; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove();
+      };
+
+      for (const h of headings) {
+        if (h.querySelector(".heading-anchor")) continue;
+        const a = document.createElement("a");
+        a.className = "heading-anchor"; a.href = `#${h.id}`; a.setAttribute("aria-label","Copy link"); a.textContent = "#";
+        h.addEventListener("click", async (e) => {
+          e.preventDefault();
+          try { await copyText(`${location.origin}${location.pathname}#${h.id}`); } catch {}
+          history.replaceState(null, "", a.href);
+          a.classList.add("is-copied"); setTimeout(() => a.classList.remove("is-copied"), 1400);
+        });
+        h.insertBefore(a, h.firstChild);
+      }
+
+      const tocWrap = document.querySelector(".toc-wrap");
+      const tocIndicator = document.querySelector(".toc-indicator");
+      const tocList = tocWrap?.querySelector("[data-toc-list]");
+      const tocHeadings = Array.from(scope?.querySelectorAll("h1[id]:not(.no-toc), h2[id]:not(.no-toc)") ?? []);
+
+      if (!tocWrap || !tocList || !tocHeadings.length) { tocWrap?.classList.add("hidden"); return; }
+
+      tocList.replaceChildren();
+      for (const h of tocHeadings) {
+        const depth = h.tagName === "H1" ? 1 : 2;
+        const link = document.createElement("a");
+        link.className = `toc-link block depth-${depth}`;
+        link.dataset.tocLink = "";
+        link.href = `#${h.id}`;
+        const text = document.createElement("span");
+        text.className = "toc-text";
+        const clone = h.cloneNode(true);
+        clone.querySelectorAll(".heading-anchor").forEach(n => n.remove());
+        text.textContent = clone.textContent?.trim() || h.id;
+        link.append(text);
+        tocList.append(link);
+      }
+
+      const tocLinks = Array.from(tocWrap.querySelectorAll("[data-toc-link]"));
+      let tocRailStart = 0;
+
+      const updateToc = () => {
+        let activeId = tocHeadings[0]?.id;
+        for (const h of tocHeadings) { if (h.getBoundingClientRect().top <= 140) activeId = h.id; }
+        for (const link of tocLinks) {
+          link.classList.toggle("is-active", link.getAttribute("href")?.replace("#","") === activeId);
+        }
+
+        if (!tocIndicator || !tocLinks.length) return;
+        const tops = tocHeadings.map(h => h.getBoundingClientRect().top + window.scrollY);
+        const offsets = tocLinks.map(l => ({ top: l.offsetTop, height: l.offsetHeight }));
+        if (!offsets.length) return;
+        const ih = tocIndicator.offsetHeight || 0;
+        const scrollY = window.scrollY + 140;
+        let idx = 0;
+        for (let i = 0; i < tops.length; i++) { if (scrollY >= tops[i]) idx = i; }
+        const ni = Math.min(idx + 1, tops.length - 1);
+        const span = Math.max(tops[ni] - tops[idx], 1);
+        const progress = Math.min(1, Math.max(0, (scrollY - tops[idx]) / span));
+        const sp = offsets[idx]?.top + (offsets[idx]?.height - ih) / 2;
+        const ep = offsets[ni]?.top + (offsets[ni]?.height - ih) / 2;
+        tocIndicator.style.transform = `translateY(${sp + (ep - sp) * progress}px)`;
+
+        const first = offsets[0], last = offsets[offsets.length-1];
+        tocRailStart = first.top + (first.height - ih) / 2;
+        const end = last.top + (last.height - ih) / 2 + ih;
+        tocWrap.style.setProperty("--toc-rail-start", `${tocRailStart}px`);
+        tocWrap.style.setProperty("--toc-rail-end", `${Math.max(0, tocWrap.offsetHeight - end)}px`);
+
+        requestAnimationFrame(() => {
+          const wr = tocWrap.getBoundingClientRect();
+          const ir = tocIndicator.getBoundingClientRect();
+          tocWrap.style.setProperty("--toc-indicator", `${Math.max(0, ir.top - wr.top + ir.height / 2 - tocRailStart)}px`);
+        });
+      };
+
+      updateToc();
+      window.addEventListener("scroll", updateToc, { passive: true });
+      window.addEventListener("resize", updateToc);
+    })();
+    </script> </body> </html>

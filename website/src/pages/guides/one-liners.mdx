@@ -1,0 +1,43 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: One-Liners
+description: Execute code without entering the REPL.
+---
+
+# One-Liners
+
+```bash frame="terminal" title="Terminal"
+rat run py 'x = 42; print(x)'
+```
+
+```text
+42
+```
+
+## Any language
+
+```bash frame="terminal" title="Terminal"
+rat run sh 'ls -la'
+```
+
+```bash frame="terminal" title="Terminal"
+rat run r 'summary(mtcars)'
+```
+
+## Shared state
+
+One-liners run in the same kernel as the REPL. Variables persist:
+
+```bash frame="terminal" title="Terminal"
+rat run py 'x = 42'
+```
+
+```bash frame="terminal" title="Terminal"
+rat run py 'print(x + 1)'
+```
+
+```text
+43
+```
+
+The kernel auto-starts if it isn't running.
