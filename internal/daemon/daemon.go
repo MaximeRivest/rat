@@ -16,9 +16,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/procutil"
 	"github.com/maximerivest/rat/internal/securefs"
 	"github.com/maximerivest/rat/internal/state"
 )
@@ -104,7 +104,7 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	procutil.ConfigureBackgroundProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -127,14 +127,18 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	if err := store.Put(k); err != nil {
 		// Kill the process we just started — state is the source of truth
-		syscall.Kill(cmd.Process.Pid, syscall.SIGTERM)
+		_ = procutil.Terminate(cmd.Process.Pid)
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
 	// Wait for the HTTP endpoint to become ready
+	logPath := filepath.Join(logDir, opts.Name+".log")
 	if err := waitReady(port, StartupMax); err != nil {
-		// Kernel started but isn't responding — leave it running,
-		// user can check logs. Don't remove from state.
+		// Surface the real error from the kernel log if available.
+		tail := readLogTail(logPath, 512)
+		if tail != "" {
+			return &k, fmt.Errorf("%s", strings.TrimSpace(tail))
+		}
 		return &k, fmt.Errorf("kernel started (PID %d) but not responding on :%d: %w", k.PID, port, err)
 	}
 
@@ -177,16 +181,16 @@ func StopAll(store *state.Store) (int, error) {
 // Used when daemon.Start finds a stale/unhealthy kernel it needs to replace.
 func forceStopAndRemove(store *state.Store, k *state.Kernel) {
 	if k.PID > 0 {
-		syscall.Kill(k.PID, syscall.SIGTERM)
+		_ = procutil.Terminate(k.PID)
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if !isAlive(k.PID) {
+			if !procutil.IsAlive(k.PID) {
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if isAlive(k.PID) {
-			syscall.Kill(k.PID, syscall.SIGKILL)
+		if procutil.IsAlive(k.PID) {
+			_ = procutil.Kill(k.PID)
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -204,7 +208,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	}
 
 	// Send SIGTERM
-	if err := syscall.Kill(k.PID, syscall.SIGTERM); err != nil {
+	if err := procutil.Terminate(k.PID); err != nil {
 		// Process already gone — just mark stopped
 		store.MarkStopped(k.Name)
 		return nil
@@ -213,7 +217,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	// Wait up to 3 seconds for graceful shutdown
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if !isAlive(k.PID) {
+		if !procutil.IsAlive(k.PID) {
 			store.MarkStopped(k.Name)
 			return nil
 		}
@@ -221,7 +225,7 @@ func stopKernel(store *state.Store, k *state.Kernel) error {
 	}
 
 	// Escalate to SIGKILL
-	syscall.Kill(k.PID, syscall.SIGKILL)
+	_ = procutil.Kill(k.PID)
 	time.Sleep(100 * time.Millisecond)
 	store.MarkStopped(k.Name)
 	return nil
@@ -307,10 +311,26 @@ func openKernelLog(logDir, name string) (*os.File, error) {
 	return securefs.OpenPrivateAppend(filepath.Join(logDir, name+".log"))
 }
 
-func isAlive(pid int) bool {
-	if pid <= 0 {
-		return false
+// readLogTail reads the last n bytes of a log file.
+func readLogTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
 	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+	size := info.Size()
+	readN := int64(n)
+	if readN > size {
+		readN = size
+	}
+	buf := make([]byte, readN)
+	_, err = f.ReadAt(buf, size-readN)
+	if err != nil {
+		return ""
+	}
+	return string(buf)
 }

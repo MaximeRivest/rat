@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maximerivest/rat/internal/daemon"
+	pydetect "github.com/maximerivest/rat/internal/python"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -102,11 +103,18 @@ func detectPythonForSetup() (path, version string) {
 	}
 	for _, candidate := range []string{"python3", "python"} {
 		if p, err := exec.LookPath(candidate); err == nil {
-			return p, pythonVersion(p)
+			if !pydetect.IsWindowsStoreAlias(p) {
+				return p, pythonVersion(p)
+			}
 		}
 	}
 	if p, err := exec.LookPath("py"); err == nil {
 		return p, pythonVersion(p)
+	}
+	if runtime.GOOS == "windows" {
+		if p := pydetect.FindWindowsPython(); p != "" {
+			return p, pythonVersion(p)
+		}
 	}
 	return "", ""
 }

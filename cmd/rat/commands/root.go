@@ -222,6 +222,13 @@ func handleREPL(input string, args []string) error {
 
 	k, action, err := ensureKernel(input)
 	if err != nil {
+		// Signpost: suggest rat setup for common missing-runtime errors.
+		errStr := err.Error()
+		if strings.Contains(errStr, "not found") || strings.Contains(errStr, "not responding") {
+			fmt.Fprintf(os.Stderr, "rat: %s\n", err)
+			fmt.Fprintf(os.Stderr, "\nRun %s to install dependencies.\n", s.Bold("rat setup"))
+			return err
+		}
 		return err
 	}
 

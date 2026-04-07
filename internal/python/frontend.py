@@ -114,7 +114,7 @@ def _mcp_notify(url, method, params=None):
 def _make_client_name(prefix):
     try:
         tty = os.path.basename(os.ttyname(sys.stdin.fileno()))
-    except OSError:
+    except (OSError, AttributeError):
         tty = f"pid-{os.getpid()}"
     return f"{prefix}@{tty}"
 
@@ -604,7 +604,8 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
 
 def main():
     import signal as _signal
-    _signal.signal(_signal.SIGTSTP, _signal.SIG_IGN)  # block until args parsed
+    if hasattr(_signal, 'SIGTSTP'):
+        _signal.signal(_signal.SIGTSTP, _signal.SIG_IGN)  # block until args parsed
 
     parser = argparse.ArgumentParser(description="IPython frontend for rat py")
     parser.add_argument("--server", default="http://127.0.0.1:8717/mcp",
@@ -626,7 +627,8 @@ def main():
     def _sigtstp_handler(signum, frame):
         print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
         sys.exit(2)
-    _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
+    if hasattr(_signal, 'SIGTSTP'):
+        _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
 
     # Check IPython is available
     try:

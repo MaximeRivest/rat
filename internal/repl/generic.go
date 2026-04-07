@@ -18,7 +18,6 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -111,14 +110,7 @@ func runGenericRepl(cfg Config) error {
 		prompt = cfg.RuntimeConfig.Frontend.Fallback.Prompt
 	}
 
-	// Ctrl+Z detaches (same as Ctrl+D) — rat owns the kernel lifecycle.
-	szCh := make(chan os.Signal, 1)
-	signal.Notify(szCh, syscall.SIGTSTP)
-	go func() {
-		<-szCh
-		fmt.Printf("\nDetached. Kernel still running. Reconnect: rat %s\n", cfg.Lang)
-		os.Exit(0)
-	}()
+	setupDetachSignal(cfg.Lang)
 
 	// Handle Ctrl-C gracefully — don't exit, just cancel current input.
 	sigCh := make(chan os.Signal, 1)

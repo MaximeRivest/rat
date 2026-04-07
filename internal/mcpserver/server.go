@@ -26,6 +26,7 @@ import (
 
 	"github.com/maximerivest/rat/internal/activity"
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/procutil"
 )
 
 // New creates an MCP server wired to the given kernel.
@@ -722,8 +723,10 @@ func processTreeMemoryPS(rootPID int) int {
 // WorkingSetSize is in bytes (not KB), so we convert.
 
 func processTreeMemoryWMIC(rootPID int) int {
-	out, err := exec.Command("wmic", "process", "get",
-		"ParentProcessId,ProcessId,WorkingSetSize", "/FORMAT:CSV").Output()
+	cmd := exec.Command("wmic", "process", "get",
+		"ParentProcessId,ProcessId,WorkingSetSize", "/FORMAT:CSV")
+	procutil.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return 0
 	}

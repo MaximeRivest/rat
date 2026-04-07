@@ -19,6 +19,7 @@ import (
 
 	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/procutil"
 )
 
 // activityEntry is a JSON line written to the activity log so that
@@ -349,6 +350,7 @@ func (p *Python) ensureStartedLocked() error {
 	cmd := exec.Command(p.cmdPath, args...)
 	cmd.Dir = p.cwd
 	cmd.Env = os.Environ()
+	procutil.HideWindow(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -509,7 +511,9 @@ func truncateLog(s string, n int) string {
 
 func detectPythonVersion(cmdPath string, cmdArgs []string) string {
 	args := append(append([]string{}, cmdArgs...), "-c", "import platform; print(platform.python_version())")
-	out, err := exec.Command(cmdPath, args...).Output()
+	cmd := exec.Command(cmdPath, args...)
+	procutil.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -543,13 +547,62 @@ func detectPythonCommand(venv string) (string, []string, error) {
 	}
 	for _, candidate := range []string{"python3", "python"} {
 		if path, err := exec.LookPath(candidate); err == nil {
-			return path, nil, nil
+			if !IsWindowsStoreAlias(path) {
+				return path, nil, nil
+			}
 		}
 	}
 	if path, err := exec.LookPath("py"); err == nil {
 		return path, []string{"-3"}, nil
 	}
+	// On Windows, probe well-known install locations as a last resort.
+	if runtime.GOOS == "windows" {
+		if p := FindWindowsPython(); p != "" {
+			return p, nil, nil
+		}
+	}
 	return "", nil, fmt.Errorf("python not found (tried RAT_PYTHON, active venv, python3, python, py -3)")
+}
+
+// IsWindowsStoreAlias returns true if path points to the Windows Store
+// python.exe stub (inside WindowsApps) which is not a real interpreter.
+func IsWindowsStoreAlias(path string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	// Resolve symlinks / reparse points to get the real location.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		resolved = path
+	}
+	norm := strings.ToLower(filepath.ToSlash(resolved))
+	return strings.Contains(norm, "windowsapps")
+}
+
+// FindWindowsPython searches common Windows install directories for python.exe.
+func FindWindowsPython() string {
+	// Ordered from most-specific to least.
+	var roots []string
+	if local := os.Getenv("LOCALAPPDATA"); local != "" {
+		roots = append(roots, filepath.Join(local, "Programs", "Python"))
+	}
+	roots = append(roots,
+		`C:\Program Files\Python`,
+		`C:\Program Files (x86)\Python`,
+	)
+	for _, root := range roots {
+		// Look for e.g. Python312\python.exe, Python311\python.exe, etc.
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "python.exe"))
+		if len(matches) == 0 {
+			// Also try root itself (some installers put python.exe directly).
+			matches, _ = filepath.Glob(filepath.Join(root+"*", "python.exe"))
+		}
+		if len(matches) > 0 {
+			// Pick the last match (highest version by lexicographic sort).
+			return matches[len(matches)-1]
+		}
+	}
+	return ""
 }
 
 func writeKernelScript(name string) (string, error) {

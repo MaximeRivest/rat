@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/maximerivest/rat/internal/bash"
@@ -46,7 +48,8 @@ func Run(cfg Config) error {
 		exitCode := RunOnce(cfg)
 
 		// Exit code 2 = Ctrl-Z / explicit quit → straight to shell.
-		if exitCode == 2 {
+		// Any non-zero exit = error → stay in terminal so the user sees the message.
+		if exitCode != 0 {
 			return nil
 		}
 
@@ -97,6 +100,17 @@ func RunOnce(cfg Config) int {
 	// Built-in kernels with hardcoded frontends.
 	switch cfg.Lang {
 	case "sh":
+		if runtime.GOOS == "windows" {
+			err = runSharedFrontend(cfg)
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					return exitErr.ExitCode()
+				}
+				_ = runGenericRepl(cfg)
+				return 0
+			}
+			return 0
+		}
 		err = bash.Attach(cfg.Name)
 		return exitCodeFromError(err)
 	case "py":
@@ -155,7 +169,7 @@ func resolvePickerResult(result pickerResult) (*Config, error) {
 // runSharedFrontend tries to launch the shared prompt_toolkit frontend.
 // Returns an error if Python isn't available (caller should fall back).
 func runSharedFrontend(cfg Config) error {
-	python, err := exec.LookPath("python3")
+	python, err := findFrontendPython(cfg.Venv)
 	if err != nil {
 		return err
 	}
@@ -182,6 +196,33 @@ func runSharedFrontend(cfg Config) error {
 	proc.Stdout = os.Stdout
 	proc.Stderr = os.Stderr
 	return proc.Run()
+}
+
+func findFrontendPython(venv string) (string, error) {
+	if venv != "" {
+		path := filepath.Join(venv, "bin", "python")
+		if runtime.GOOS == "windows" {
+			path = filepath.Join(venv, "Scripts", "python.exe")
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	for _, candidate := range []string{"python3", "python"} {
+		path, err := exec.LookPath(candidate)
+		if err == nil && !python.IsWindowsStoreAlias(path) {
+			return path, nil
+		}
+	}
+	if path, err := exec.LookPath("py"); err == nil {
+		return path, nil
+	}
+	if runtime.GOOS == "windows" {
+		if path := python.FindWindowsPython(); path != "" {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("python not found")
 }
 
 // runNativeFrontend launches a runtime's native frontend command

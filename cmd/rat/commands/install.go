@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -84,9 +85,13 @@ func installShellRuntime() error {
 	missing := shellMissingDeps(check)
 	if len(missing) > 0 {
 		fmt.Println("")
-		statusLine("bash", check.BashPath != "", valueOrNote(check.BashPath, "not found"))
-		statusLine("tmux", check.TmuxPath != "", valueOrNote(check.TmuxPath, "not found"))
-		statusLine("stty", check.SttyPath != "", valueOrNote(check.SttyPath, "not found"))
+		if runtime.GOOS == "windows" {
+			statusLine("powershell", check.PowerShellPath != "", valueOrNote(check.PowerShellPath, "not found"))
+		} else {
+			statusLine("bash", check.BashPath != "", valueOrNote(check.BashPath, "not found"))
+			statusLine("tmux", check.TmuxPath != "", valueOrNote(check.TmuxPath, "not found"))
+			statusLine("stty", check.SttyPath != "", valueOrNote(check.SttyPath, "not found"))
+		}
 		statusLine("config dir", check.ConfigWritable, check.StateDir)
 		statusLine("cache dir", check.CacheWritable, check.CacheDir)
 		if hint := shellInstallHint(check); hint != "" {
@@ -120,9 +125,13 @@ func installShellRuntime() error {
 	text := extractText(result)
 
 	fmt.Println("")
-	statusLine("bash", true, check.BashPath)
-	statusLine("tmux", true, check.TmuxPath)
-	statusLine("stty", true, check.SttyPath)
+	if runtime.GOOS == "windows" {
+		statusLine("powershell", true, check.PowerShellPath)
+	} else {
+		statusLine("bash", true, check.BashPath)
+		statusLine("tmux", true, check.TmuxPath)
+		statusLine("stty", true, check.SttyPath)
+	}
 	statusLine("kernel", true, fmt.Sprintf("http://127.0.0.1:%d/mcp", k.Port))
 	fmt.Println("")
 	if text != "" {

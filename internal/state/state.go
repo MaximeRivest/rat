@@ -8,12 +8,13 @@ package state
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/procutil"
 	"github.com/maximerivest/rat/internal/securefs"
 	"gopkg.in/yaml.v3"
 )
@@ -396,7 +397,7 @@ func normalizeKernels(kernels []Kernel) bool {
 			changed = true
 		}
 
-		if k.Status == StatusRunning && !isAlive(k.PID) {
+		if k.Status == StatusRunning && !procutil.IsAlive(k.PID) {
 			k.Status = StatusStopped
 			k.PID = 0
 			k.Port = 0
@@ -422,27 +423,12 @@ func normalizeKernels(kernels []Kernel) bool {
 	return changed
 }
 
-// isAlive checks if a process with the given PID exists.
-// Uses kill(pid, 0) which checks existence without sending a signal.
-func isAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
-}
-
 // isPortInUse does a quick check by trying to listen on the port.
 func isPortInUse(port int) bool {
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return true // can't check, assume in use
+		return true
 	}
-	defer syscall.Close(fd)
-
-	syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-
-	addr := syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}
-	err = syscall.Bind(fd, &addr)
-	return err != nil
+	_ = ln.Close()
+	return false
 }

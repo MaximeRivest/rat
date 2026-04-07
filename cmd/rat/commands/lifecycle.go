@@ -55,7 +55,7 @@ var setupCmd = &cobra.Command{
 	Short:   "Interactive setup wizard",
 	GroupID: "setup",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("setup not yet implemented")
+		return runSetup()
 	},
 }
 
