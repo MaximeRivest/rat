@@ -10,22 +10,41 @@ Add any language by dropping a `runtime.yaml` and a kernel script in `~/.config/
 
 ## runtime.yaml
 
+Here's the built-in R runtime as an example:
+
 ```yaml
-name: ruby
-display: Ruby
+name: r
+display: R
 
 detect:
-  commands: [ruby]
-  env: RAT_RUBY
+  commands: [Rscript, R]
+  env: RAT_R
 
 kernel:
   type: json
-  script: kernel.rb
+  script: kernel.R
+  args: ["--no-save", "--no-restore"]
+
+frontend:
+  type: repl
+  prompt: "r> "
+
+install:
+  runtime:
+    manager: r
+    deps: [jsonlite]
+  smoke:
+    run: "1 + 1"
+    expect: "2"
 ```
+
+Two kernel types are supported:
+- **json**: a subprocess speaking the JSON kernel protocol over stdin/stdout
+- **tmux**: an interactive REPL running in a tmux session with a bridge script
 
 ## Kernel script
 
-The kernel script reads JSON lines from stdin, writes JSON lines to stdout. The wire format is documented in the [Kernel Protocol](/reference/kernel-protocol).
+For `json` kernels, the script reads JSON lines from stdin and writes JSON lines to stdout. The wire format is documented in the [Kernel Protocol](/reference/kernel-protocol).
 
 ## Built-in runtimes
 

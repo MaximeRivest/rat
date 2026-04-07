@@ -33,7 +33,23 @@ Leave it open.
 
 ## Connect Claude Desktop
 
-`rat install py` already configured Claude Desktop. Open it and say:
+Check the kernel's URL:
+
+```bash frame="terminal" title="Terminal"
+rat status -v
+```
+
+Add it to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "python": { "url": "http://127.0.0.1:8717/mcp" }
+  }
+}
+```
+
+Restart Claude Desktop and say:
 
 > "Describe the dataframe I just loaded."
 

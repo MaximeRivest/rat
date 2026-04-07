@@ -10,12 +10,13 @@ rat communicates with kernel subprocesses over JSON lines on stdin/stdout. The f
 
 ## MCP tools
 
-Every kernel exposes exactly three MCP tools:
+Every kernel exposes exactly four MCP tools:
 
 | Tool | What it does |
 |------|-------------|
 | `run` | Execute code or provide input |
 | `look` | Inspect variables, complete code, see state |
+| `tail` | Recent activity log |
 | `ctl` | Reset, cancel, restart |
 
 ## Wire format

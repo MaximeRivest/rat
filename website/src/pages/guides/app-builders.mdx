@@ -34,6 +34,18 @@ await py.callTool("ctl", { op: "reset" });
 
 ## Claude Desktop / Cursor config
 
+Start a kernel, then point your client at it:
+
+```bash frame="terminal" title="Terminal"
+rat start py
+```
+
+```bash frame="terminal" title="Terminal"
+rat status -v
+```
+
+Add the URL to your client config (e.g. `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -42,4 +54,4 @@ await py.callTool("ctl", { op: "reset" });
 }
 ```
 
-`rat install` writes this automatically.
+The port is auto-assigned starting from 8717. Check `rat status -v` for the actual URL.

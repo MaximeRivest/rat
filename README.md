@@ -41,15 +41,16 @@ rat wraps language runtimes as MCP servers. One kernel, many clients.
                     one namespace
 ```
 
-Three MCP tools. That's the entire kernel API:
+Four MCP tools. That's the entire kernel API:
 
 | Tool | What it does |
 |------|-------------|
 | `run` | Execute code or provide input |
 | `look` | Inspect variables, complete code, see state |
+| `tail` | Recent activity log |
 | `ctl` | Reset, cancel, restart |
 
-Same three tools for every language. Same three tools whether you're a human in a terminal, an LLM, or a notebook app.
+Same four tools for every language. Same four tools whether you're a human in a terminal, an LLM, or a notebook app.
 
 ---
 
@@ -121,7 +122,7 @@ rat look py --at df      # inspect df in detail
 
 ```bash
 rat tail py              # recent activity
-rat tail py --n 20       # last 20 entries
+rat tail py -n 20        # last 20 entries
 ```
 
 ### Control
@@ -250,6 +251,15 @@ await py.callTool("ctl", { op: "reset" });
 
 ### Claude Desktop / Cursor config
 
+Start a kernel, then point your client at it:
+
+```bash
+rat start py
+rat status -v    # note the URL
+```
+
+Add the URL to your client config (e.g. `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
@@ -258,7 +268,7 @@ await py.callTool("ctl", { op: "reset" });
 }
 ```
 
-`rat install` writes this automatically.
+The port is auto-assigned starting from 8717. Check `rat status -v` for the actual URL.
 
 ---
 
@@ -267,16 +277,29 @@ await py.callTool("ctl", { op: "reset" });
 Add any language by dropping a `runtime.yaml` and a kernel script in `~/.config/rat/runtimes/<lang>/`. No Go code, no recompilation.
 
 ```yaml
-name: ruby
-display: Ruby
+name: r
+display: R
 
 detect:
-  commands: [ruby]
-  env: RAT_RUBY
+  commands: [Rscript, R]
+  env: RAT_R
 
 kernel:
   type: json
-  script: kernel.rb
+  script: kernel.R
+  args: ["--no-save", "--no-restore"]
+
+frontend:
+  type: repl
+  prompt: "r> "
+
+install:
+  runtime:
+    manager: r
+    deps: [jsonlite]
+  smoke:
+    run: "1 + 1"
+    expect: "2"
 ```
 
 The kernel script reads JSON lines from stdin, writes JSON lines to stdout. See [docs/custom-runtimes.md](docs/custom-runtimes.md) for the full guide and [KERNEL-PROTOCOL.md](KERNEL-PROTOCOL.md) for the wire format.
