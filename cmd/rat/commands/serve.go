@@ -26,6 +26,7 @@ import (
 var (
 	serveHTTPFlag    bool
 	servePort        int
+	serveHost        string
 	serveCwd         string
 	serveLangFlag    string
 	serveNameFlag    string
@@ -38,6 +39,7 @@ var (
 func init() {
 	serveCmd.Flags().BoolVar(&serveHTTPFlag, "http", false, "Run as HTTP server (default: stdio)")
 	serveCmd.Flags().IntVar(&servePort, "port", 8720, "HTTP port")
+	serveCmd.Flags().StringVar(&serveHost, "host", "127.0.0.1", "Bind address (use 0.0.0.0 for public access)")
 	serveCmd.Flags().StringVar(&serveCwd, "cwd", "", "Working directory (default: current)")
 	serveCmd.Flags().StringVar(&serveLangFlag, "lang", "", "Canonical language (for named runtimes)")
 	serveCmd.Flags().StringVar(&serveNameFlag, "kernel-name", "", "Runtime name recorded in state (default: first arg)")
@@ -65,7 +67,8 @@ a kernel created with 'rat add --runtime'.
 
 Examples:
   rat serve sh              # MCP stdio server for bash
-  rat serve sh --http       # MCP HTTP server on :8720
+  rat serve sh --http       # MCP HTTP server on 127.0.0.1:8720
+  rat serve sh --http --host 0.0.0.0  # public access
   rat serve py --http --port 8717 --cwd ~/project
   rat serve py --http --runtime /opt/python3.11/bin/python3`,
 	Args: cobra.ExactArgs(1),
@@ -128,7 +131,7 @@ func runServe(input string) error {
 	mcpSrv := mcpserver.New(serverName, k, tracker)
 
 	if serveHTTPFlag {
-		return runHTTPServer(mcpSrv, servePort, serverName)
+		return runHTTPServer(mcpSrv, serveHost, servePort, serverName)
 	}
 	return runStdioServer(mcpSrv, serverName)
 }
@@ -196,17 +199,18 @@ func runStdioServer(mcpSrv *server.MCPServer, name string) error {
 	return stdio.Listen(context.Background(), os.Stdin, os.Stdout)
 }
 
-func runHTTPServer(mcpSrv *server.MCPServer, port int, name string) error {
+func runHTTPServer(mcpSrv *server.MCPServer, host string, port int, name string) error {
 	httpSrv := server.NewStreamableHTTPServer(mcpSrv)
 
+	addr := fmt.Sprintf("%s:%d", host, port)
 	fmt.Fprintf(os.Stderr, "%s (HTTP)\n", name)
-	fmt.Fprintf(os.Stderr, "  MCP: http://127.0.0.1:%d/mcp\n\n", port)
+	fmt.Fprintf(os.Stderr, "  MCP: http://%s/mcp\n\n", addr)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
+		Addr:    addr,
 		Handler: httpSrv,
 	}
 

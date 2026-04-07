@@ -57,7 +57,62 @@ def _api(method, **kwargs):
 
 
 APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "")
-AGENT_URL = os.environ.get("RAT_SLACK_AGENT", "")
+_AGENT_RAW = os.environ.get("RAT_SLACK_AGENT", "")
+_agent_resolved_url = ""  # cached resolved URL when _AGENT_RAW is a kernel name
+
+
+def _is_kernel_name(s):
+    """Return True if s looks like a kernel name rather than a URL."""
+    return s and "://" not in s
+
+
+def _resolve_agent_url(force=False):
+    """Resolve AGENT_URL. If _AGENT_RAW is a URL, return it directly.
+    If it's a kernel name, shell out to `rat status -v` and parse the URL.
+    Caches the result; pass force=True to re-resolve (e.g. after connection failure)."""
+    global _agent_resolved_url
+    if not _AGENT_RAW:
+        return ""
+    if not _is_kernel_name(_AGENT_RAW):
+        return _AGENT_RAW
+    if _agent_resolved_url and not force:
+        return _agent_resolved_url
+    try:
+        import subprocess
+        out = subprocess.check_output(["rat", "status", "-v"], timeout=5,
+                                      stderr=subprocess.DEVNULL).decode()
+        # Parse lines like:  http://127.0.0.1:8718/mcp
+        # They appear right after lines containing the kernel name.
+        found = False
+        for line in out.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(_AGENT_RAW + " ") or stripped == _AGENT_RAW:
+                found = True
+                continue
+            if found and stripped.startswith("http"):
+                _agent_resolved_url = stripped
+                return _agent_resolved_url
+            if found and not stripped:
+                # Blank line = end of this kernel's block
+                break
+        _emit_event("error", {"msg": f"agent kernel '{_AGENT_RAW}' not found or not running"})
+        return ""
+    except Exception as e:
+        _emit_event("error", {"msg": f"failed to resolve agent kernel: {e}"})
+        return ""
+
+
+def _invalidate_agent_url():
+    """Clear cached agent URL so the next call re-resolves."""
+    global _agent_resolved_url
+    _agent_resolved_url = ""
+    # Also clear MCP session since the URL changed.
+    for url in list(_mcp_sessions):
+        if _is_kernel_name(_AGENT_RAW):
+            _mcp_sessions.pop(url, None)
+
+
+AGENT_URL = property(lambda self: _resolve_agent_url())  # not used; kept for grep
 
 
 # ── Minimal WebSocket client (stdlib only) ───────────────────
@@ -300,7 +355,7 @@ def _handle_slack_event(event):
         })
 
         # Forward to agent if configured.
-        if AGENT_URL:
+        if _AGENT_RAW:
             _forward_to_agent(user, text, ch_name, ch)
 
 
@@ -364,35 +419,50 @@ def _agent_reset():
     global _agent_exchange_count
     _agent_exchange_count = 0
 
+    url = _resolve_agent_url(force=True)
+    if not url:
+        return
+
     # Clear MCP session so we get a fresh one.
-    _mcp_sessions.pop(AGENT_URL, None)
+    _mcp_sessions.pop(url, None)
 
     try:
-        _mcp_ensure_session(AGENT_URL)
+        _mcp_ensure_session(url)
         # Reset the pi kernel.
-        _mcp_ctl(AGENT_URL, "reset")
+        _mcp_ctl(url, "reset")
         time.sleep(1)
         # Re-prime with system prompt + memory.
         memory = _load_memory()
         memory_section = f"Your memories:\n{memory}" if memory else "No memories yet."
         system = _AGENT_SYSTEM_PROMPT.format(memory=memory_section)
-        _mcp_run(AGENT_URL, system)
+        _mcp_run(url, system)
         _emit_event("progress", {"msg": "agent session reset (memory preserved)"})
     except Exception as e:
         _emit_event("error", {"msg": f"agent reset failed: {e}"})
+        _invalidate_agent_url()
 
 
 def _forward_to_agent(from_user, text, ch_name, raw_channel):
     """Forward an inbound message to the agent kernel and send the reply back."""
     global _agent_exchange_count
 
+    url = _resolve_agent_url()
+    if not url:
+        return
+
     # Reset if we've hit the exchange limit.
     if _agent_exchange_count >= _AGENT_MAX_EXCHANGES:
         _agent_reset()
+        url = _resolve_agent_url()
+        if not url:
+            return
 
     # Prime on first exchange.
-    if _agent_exchange_count == 0 and AGENT_URL not in _mcp_sessions:
+    if _agent_exchange_count == 0 and url not in _mcp_sessions:
         _agent_reset()
+        url = _resolve_agent_url()
+        if not url:
+            return
 
     # Extract [REMEMBER] from user input too (explicit memory requests).
     _save_memory_items(text)
@@ -403,9 +473,10 @@ def _forward_to_agent(from_user, text, ch_name, raw_channel):
         f'If no reply is needed, respond with exactly: NO_REPLY'
     )
     try:
-        reply = _mcp_run(AGENT_URL, prompt)
+        reply = _mcp_run(url, prompt)
     except Exception as e:
         _emit_event("error", {"msg": f"agent error: {e}"})
+        _invalidate_agent_url()
         return
 
     _agent_exchange_count += 1

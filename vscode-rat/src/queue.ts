@@ -5,6 +5,10 @@
  * kernel namespace stays consistent.  While a cell is running the
  * queue polls `ctl(status)` and pops an input box when the kernel
  * reports "waiting_for_input".
+ *
+ * Supports two modes:
+ *   - "notebook" — fenced code cells in markdown; output injected as ```output blocks
+ *   - "source"   — logical blocks in .py/.r/.jl files; output shown as inline decorations
  */
 
 import * as fs from "fs";
@@ -14,16 +18,36 @@ import * as vscode from "vscode";
 import { refindCell, type CodeCell } from "./cells";
 import { upsertOutput } from "./output";
 import { getClient, type McpClient } from "./rat";
+import {
+  showRunning,
+  clearRunning,
+  showResult,
+  appendToOutputChannel,
+} from "./inlineOutput";
+import type { SourceBlock } from "./blocks";
 
 // ── Types ──────────────────────────────────────────────────
 
-export interface QueueItem {
+export interface NotebookItem {
+  kind: "notebook";
   cell: CodeCell;
   editor: vscode.TextEditor;
   runtimeName: string;
   cwd: string;
   lang: string;
 }
+
+export interface SourceItem {
+  kind: "source";
+  block: SourceBlock;
+  code: string;
+  editor: vscode.TextEditor;
+  runtimeName: string;
+  cwd: string;
+  lang: string;
+}
+
+export type QueueItem = NotebookItem | SourceItem;
 
 export type QueueState = "idle" | "running" | "paused";
 
@@ -104,7 +128,11 @@ export class ExecutionQueue {
     const item = this.items.shift()!;
 
     try {
-      await this.run(item);
+      if (item.kind === "notebook") {
+        await this.runNotebook(item);
+      } else {
+        await this.runSource(item);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       vscode.window.showErrorMessage(`Rat: ${msg}`);
@@ -118,30 +146,27 @@ export class ExecutionQueue {
     }
   }
 
-  private async run(item: QueueItem): Promise<void> {
-    const { cell, editor, runtimeName, cwd, lang } = item;
+  // ── Notebook mode (markdown/quarto) ──────────────────────
+
+  private async runNotebook(item: NotebookItem): Promise<void> {
+    const { cell, editor, runtimeName, cwd } = item;
     if (!cell.executable) return;
 
-    // ── Re-find the cell in the live document ─────────────────
-    // Line numbers go stale when earlier outputs are inserted /
-    // resized.  We match by (code + language + proximity) and
-    // use the FRESH lines for every output write.
     const freshCell = (): { openLine: number; closeLine: number } | null => {
       const found = refindCell(
         editor.document,
         cell.code,
         cell.ratLang,
-        cell.openLine,     // hint — where it was when queued
+        cell.openLine,
       );
       return found ? { openLine: found.openLine, closeLine: found.closeLine } : null;
     };
 
     const fc = freshCell();
-    if (fc === null) return;   // cell was deleted or edited away
+    if (fc === null) return;
 
-    const client = await getClient(runtimeName, cwd, lang);
+    const client = await getClient(runtimeName, cwd, item.lang);
 
-    // cancellation flag
     let cancelled = false;
     this.cancelFn = () => {
       cancelled = true;
@@ -153,22 +178,13 @@ export class ExecutionQueue {
       .getConfiguration("rat")
       .get("maxOutputLines", 100);
 
-    // Poll for partial output + input prompts while the cell executes.
-    // During streaming the code cell doesn't move (we only modify the
-    // output block below it), so one freshCloseLine() at the start is
-    // enough — we re-derive only for the final write.
     let lastPartialLen = 0;
     let inputPromptOpen = false;
-    let tickRunning = false;            // reentrance guard
+    let tickRunning = false;
     const poll = setInterval(async () => {
-      // setInterval + async: ticks don't wait for each other.
-      // Without this guard, tick N+1 fires while tick N is still
-      // awaiting showInputBox → second input box dismisses the
-      // first with undefined → triggers cancel → KeyboardInterrupt.
       if (cancelled || tickRunning) return;
       tickRunning = true;
       try {
-        // ── stream partial output into the document ──
         try {
           const partial = await client.partialOutput();
           if (partial && partial.length > lastPartialLen) {
@@ -183,7 +199,6 @@ export class ExecutionQueue {
             }
           }
         } catch { /* best-effort */ }
-        // ── check for input() prompts ──
         if (!inputPromptOpen && !cancelled) {
           inputPromptOpen = await this.pollInput(client);
         }
@@ -196,7 +211,6 @@ export class ExecutionQueue {
       const result = await client.run(cell.code);
       if (cancelled) return;
 
-      // Final write — re-find in case streaming shifted things.
       const finalFc = freshCell();
       if (finalFc === null) return;
 
@@ -212,11 +226,65 @@ export class ExecutionQueue {
     }
   }
 
-  /**
-   * Check if the kernel is waiting for input().  If so, show a VS Code
-   * input box, send the reply, and return `true`.  Returns `false` if
-   * the kernel was not waiting.
-   */
+  // ── Source mode (.py, .r, .jl, etc.) ─────────────────────
+
+  private async runSource(item: SourceItem): Promise<void> {
+    const { block, code, editor, runtimeName, cwd } = item;
+    const lastLine = block.range.end.line;
+
+    showRunning(editor, lastLine);
+
+    const client = await getClient(runtimeName, cwd, item.lang);
+
+    let cancelled = false;
+    this.cancelFn = () => {
+      cancelled = true;
+      client.abortCurrentRequest();
+      client.cancel();
+    };
+
+    // Poll for input prompts
+    let inputPromptOpen = false;
+    let tickRunning = false;
+    const poll = setInterval(async () => {
+      if (cancelled || tickRunning) return;
+      tickRunning = true;
+      try {
+        if (!inputPromptOpen && !cancelled) {
+          inputPromptOpen = await this.pollInput(client);
+        }
+      } finally {
+        tickRunning = false;
+      }
+    }, 300);
+
+    try {
+      const result = await client.run(code);
+      clearRunning(editor);
+      if (cancelled) return;
+
+      const cleaned = cleanOutput(result.text);
+      const isError = result.isError;
+
+      // Always log to output channel
+      const label = `${item.lang} [line ${block.range.start.line + 1}]`;
+      if (cleaned.trim()) {
+        appendToOutputChannel(label, cleaned);
+      }
+
+      // Inline decoration
+      if (cleaned.trim()) {
+        showResult(editor, lastLine, cleaned, isError);
+      }
+    } finally {
+      clearInterval(poll);
+      clearRunning(editor);
+      this.cancelFn = null;
+    }
+  }
+
+  // ── Shared helpers ───────────────────────────────────────
+
   private async pollInput(client: McpClient): Promise<boolean> {
     try {
       const st = await client.status();
@@ -230,7 +298,6 @@ export class ExecutionQueue {
       if (input !== undefined) {
         await client.sendInput(input);
       } else {
-        // user pressed Escape → cancel execution
         await client.cancel();
       }
       return true;
@@ -288,11 +355,6 @@ function extractPlots(
 const ANSI_RE =
   /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Z0-9]|[0-9A-Za-z=<>])/g;
 
-/**
- * Strip ANSI escape codes and process `\r` (carriage return) so that
- * tqdm / progress bars show only the final frame and terminal colours
- * don’t leak into markdown output blocks.
- */
 function cleanOutput(text: string): string {
   let s = text.replace(ANSI_RE, "");
   if (!s.includes("\r")) return s;

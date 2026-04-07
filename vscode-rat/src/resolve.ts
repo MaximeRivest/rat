@@ -22,6 +22,8 @@ const ALIAS: Record<string, string> = {
   bash: "sh",   sh: "sh", shell: "sh",
   julia: "jl",  jl: "jl", ju: "jl",
   javascript: "js", js: "js", node: "js",
+  pi: "pi",
+  slack: "slack",
 };
 
 export interface RuntimeInfo {

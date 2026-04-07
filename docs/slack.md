@@ -93,9 +93,9 @@ rat status -v
 # pi@home  running
 #   http://127.0.0.1:8724/mcp
 
-# Create the slack bot with the agent option
+# Create the slack bot with the agent option (use kernel name)
 rat add slack-bot --lang slack --cwd ~ \
-  --opt agent=http://127.0.0.1:8724/mcp \
+  --opt agent=pi@home \
   --env SLACK_BOT_TOKEN=xoxb-... \
   --env SLACK_APP_TOKEN=xapp-...
 
@@ -176,7 +176,7 @@ rat start pi-fast
 rat stop slack-bot
 rat remove slack-bot --yes
 rat add slack-bot --lang slack --cwd ~ \
-  --opt agent=http://127.0.0.1:8725/mcp \
+  --opt agent=pi-fast \
   --env SLACK_BOT_TOKEN=xoxb-... \
   --env SLACK_APP_TOKEN=xapp-...
 rat start slack-bot

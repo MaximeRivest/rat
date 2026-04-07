@@ -17,12 +17,13 @@ interface CellSnippet {
   label: string;
 }
 
-const CELL_SNIPPETS: CellSnippet[] = [
+export const CELL_SNIPPETS: CellSnippet[] = [
   { prefix: "py", fence: "python", label: "Python cell" },
   { prefix: "sh", fence: "bash", label: "Shell cell" },
   { prefix: "r", fence: "r", label: "R cell" },
   { prefix: "ju", fence: "julia", label: "Julia cell" },
   { prefix: "js", fence: "javascript", label: "JavaScript cell" },
+  { prefix: "pi", fence: "pi", label: "Pi cell" },
 ];
 
 export class RatSnippetProvider implements vscode.CompletionItemProvider {

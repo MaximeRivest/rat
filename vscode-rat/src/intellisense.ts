@@ -1,5 +1,5 @@
 /**
- * intellisense.ts — Completions + Hover inside code cells.
+ * intellisense.ts — Completions + Hover inside code cells and source files.
  *
  * Completions call `look(code=…, cursor=…)` on the running kernel
  * so they see the live namespace (DataFrames, imported modules, etc.).
@@ -7,9 +7,9 @@
  * Hover calls `look(at=…)` and shows the rich inspection output
  * that rat already formats (type, shape, head, docstring, methods).
  *
- * Both providers only activate when the cursor is inside a code
- * cell — outside cells VS Code's markdown / Quarto extensions keep
- * working normally.
+ * Both providers activate:
+ *   - Inside fenced code cells (notebook mode)
+ *   - Anywhere in source files (.py, .r, .jl, .js, .sh)
  */
 
 import * as vscode from "vscode";
@@ -18,9 +18,56 @@ import {
   cellAtLine,
   codeContext,
   wordAtPosition,
+  type CodeCell,
 } from "./cells";
 import { existingClient } from "./rat";
 import { resolveRuntime } from "./resolve";
+import { detectFileLang } from "./langDetect";
+
+// ── Language ID → fence language for syntax highlighting ───
+
+const LANG_HIGHLIGHT: Record<string, string> = {
+  py: "python",
+  r: "r",
+  jl: "julia",
+  js: "javascript",
+  sh: "bash",
+};
+
+// ── Resolve context: either a cell in a notebook or whole source file ──
+
+interface CellContext {
+  kind: "cell";
+  cell: CodeCell;
+  ratLang: string;
+}
+
+interface SourceContext {
+  kind: "source";
+  ratLang: string;
+}
+
+type CodeCtx = CellContext | SourceContext;
+
+function getContext(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+): CodeCtx | null {
+  const fl = detectFileLang(document);
+
+  if (fl.mode === "source" && fl.ratLang) {
+    return { kind: "source", ratLang: fl.ratLang };
+  }
+
+  // Notebook mode — must be inside a code cell
+  const cells = parseCells(document);
+  const cell = cellAtLine(cells, position.line);
+  if (!cell?.executable) return null;
+  if (position.line <= cell.openLine || position.line >= cell.closeLine) {
+    return null;
+  }
+  return { kind: "cell", cell, ratLang: cell.ratLang };
+}
 
 // ── Completion ─────────────────────────────────────────────
 
@@ -32,14 +79,27 @@ export class RatCompletionProvider
     position: vscode.Position,
     token: vscode.CancellationToken,
   ): Promise<vscode.CompletionItem[] | null> {
-    const cell = getExecutableCell(document, position);
-    if (!cell) return null;
+    const ctx = getContext(document, position);
+    if (!ctx) return null;
 
-    const { name } = resolveRuntime(cell.ratLang, document);
+    const { name } = resolveRuntime(ctx.ratLang, document);
     const client = existingClient(name);
-    if (!client) return null; // kernel not running yet
+    if (!client) return null;
 
-    const { code, cursor } = codeContext(cell, position);
+    let code: string;
+    let cursor: number;
+
+    if (ctx.kind === "cell") {
+      const cc = codeContext(ctx.cell, position);
+      code = cc.code;
+      cursor = cc.cursor;
+    } else {
+      // Source file — send text up to cursor position
+      code = document.getText(
+        new vscode.Range(0, 0, position.line, position.character),
+      );
+      cursor = code.length;
+    }
 
     try {
       const items = await client.complete(code, cursor);
@@ -76,13 +136,19 @@ export class RatHoverProvider implements vscode.HoverProvider {
     position: vscode.Position,
     token: vscode.CancellationToken,
   ): Promise<vscode.Hover | null> {
-    const cell = getExecutableCell(document, position);
-    if (!cell) return null;
+    const ctx = getContext(document, position);
+    if (!ctx) return null;
 
-    const word = wordAtPosition(cell, position);
+    let word: string | null;
+    if (ctx.kind === "cell") {
+      word = wordAtPosition(ctx.cell, position);
+    } else {
+      // Source file — extract word at position directly
+      word = wordAtPositionInSource(document, position);
+    }
     if (!word) return null;
 
-    const { name } = resolveRuntime(cell.ratLang, document);
+    const { name } = resolveRuntime(ctx.ratLang, document);
     const client = existingClient(name);
     if (!client) return null;
 
@@ -90,14 +156,7 @@ export class RatHoverProvider implements vscode.HoverProvider {
       const info = await client.look(word);
       if (token.isCancellationRequested || !info) return null;
 
-      // Pick a language id for syntax-highlighting the output
-      const langId =
-        cell.ratLang === "py"
-          ? "python"
-          : cell.ratLang === "r"
-            ? "r"
-            : cell.lang;
-
+      const langId = LANG_HIGHLIGHT[ctx.ratLang] ?? ctx.ratLang;
       const md = new vscode.MarkdownString();
       md.appendCodeblock(info, langId);
       md.isTrusted = true;
@@ -110,18 +169,18 @@ export class RatHoverProvider implements vscode.HoverProvider {
 
 // ── helper ─────────────────────────────────────────────────
 
-import type { CodeCell } from "./cells";
-
-function getExecutableCell(
+function wordAtPositionInSource(
   document: vscode.TextDocument,
   position: vscode.Position,
-): CodeCell | null {
-  const cells = parseCells(document);
-  const cell = cellAtLine(cells, position.line);
-  if (!cell?.executable) return null;
-  // Only inside the code body — not on the fence lines
-  if (position.line <= cell.openLine || position.line >= cell.closeLine) {
-    return null;
-  }
-  return cell;
+): string | null {
+  const line = document.lineAt(position.line).text;
+  const col = Math.min(position.character, line.length);
+
+  let start = col;
+  while (start > 0 && /[\w.]/.test(line[start - 1])) start--;
+  let end = col;
+  while (end < line.length && /[\w.]/.test(line[end])) end++;
+
+  const word = line.slice(start, end);
+  return word || null;
 }

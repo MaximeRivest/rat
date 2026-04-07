@@ -16,6 +16,14 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
+// ── Debug output ───────────────────────────────────────────
+
+const out = vscode.window.createOutputChannel("Rat");
+
+export function log(msg: string): void {
+  out.appendLine(`[${new Date().toISOString()}] ${msg}`);
+}
+
 // ── CLI helpers ────────────────────────────────────────────
 
 function ratBin(): string {
@@ -55,8 +63,26 @@ function exec(
   });
 }
 
-export async function ratStart(name: string, cwd: string): Promise<void> {
-  await exec(["start", name], cwd);
+/** Start a kernel, returning the resolved name and port. */
+export async function ratStart(
+  name: string,
+  cwd: string,
+): Promise<{ resolvedName: string; port: number } | null> {
+  log(`ratStart("${name}", "${cwd}")`);
+  const { stdout, stderr } = await exec(["start", name], cwd);
+  log(`ratStart stdout: ${stdout.trim()}`);
+  if (stderr.trim()) log(`ratStart stderr: ${stderr.trim()}`);
+  // Parse: "py@myproject started on http://127.0.0.1:8722/mcp (PID 12345)"
+  // Or:    "py@myproject already running on http://127.0.0.1:8722/mcp (PID 12345)"
+  // Output may be on stdout or stderr depending on the command.
+  const combined = stdout + "\n" + stderr;
+  const m = combined.match(/(\S+)\s+(?:started|already running)\s+on\s+http:\/\/[^:]+:(\d+)/);
+  if (m) {
+    log(`ratStart resolved: name=${m[1]} port=${m[2]}`);
+    return { resolvedName: m[1], port: parseInt(m[2], 10) };
+  }
+  log(`ratStart: could not parse output`);
+  return null;
 }
 
 export async function ratStop(name: string): Promise<void> {
@@ -194,8 +220,11 @@ function parseSection<T>(
   const block = yaml.match(re);
   if (!block) return [];
   const results: T[] = [];
-  for (const m of block[1].matchAll(/- name:[^\n]*(\n(?:  [^\n]*\n?)*)/g)) {
-    const entry = "name:" + m[0].slice("- name:".length);
+  // Split block into entries at `    - name:` boundaries.
+  const entries = block[1].split(/(?=^\s*- name:)/m).filter(s => s.trim());
+  for (const raw of entries) {
+    // Flatten indentation so field regexes work.
+    const entry = raw.replace(/^\s*- /, "").replace(/^\s{4,}/gm, "");
     const item = parse(entry);
     if (item) results.push(item);
   }
@@ -442,6 +471,7 @@ export async function getClient(
   cwd: string,
   lang?: string,
 ): Promise<McpClient> {
+  log(`getClient("${name}", "${cwd}", lang=${lang})`);
   // 1. Try existing pool connection
   const existing = pool.get(name);
   if (existing) {
@@ -454,73 +484,52 @@ export async function getClient(
     }
   }
 
-  // 2. Try starting the kernel directly
-  await ratStart(name, cwd);
-  let port = getKernelPort(name);
-  if (port) {
+  log(`getClient: no pool hit for "${name}", calling ratStart`);
+  // 2. Let the CLI resolve the name and start the kernel.
+  //    `rat start py` in cwd resolves to e.g. `py@myproject` automatically.
+  const started = await ratStart(name, cwd);
+  if (started) {
     try {
-      const client = new McpClient(port);
+      const client = new McpClient(started.port);
       await client.initialize();
-      pool.set(name, client);
+      pool.set(started.resolvedName, client);
+      // Also alias the requested name so future lookups hit the pool.
+      if (started.resolvedName !== name) {
+        pool.set(name, client);
+      }
       return client;
     } catch {
-      // Port in state but kernel is dead — continue to install
+      // Port appeared but kernel is dead — continue to install
     }
   }
 
+  log(`getClient: ratStart returned null or connect failed, trying install`);
   // 3. Auto-install: create venv, install deps, start kernel
-  if (!lang) {
-    throw new Error(
-      `Kernel "${name}" failed to start. Try: rat install`,
-    );
-  }
-
+  const installLang = lang ?? name;
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `Rat: setting up ${lang} for ${path.basename(cwd)}…`,
+      title: `Rat: setting up ${installLang} for ${path.basename(cwd)}…`,
       cancellable: false,
     },
-    () => ratInstall(lang, cwd),
+    () => ratInstall(installLang, cwd),
   );
 
-  // After install, check if our kernel is now running
-  port = getKernelPort(name);
-
-  // 4. If name is project-qualified (e.g. "py@proj"), install started
-  //    a kernel with the bare lang name. Register + start ours.
-  if (!port && name !== lang) {
-    // Check if install started the bare-name kernel for THIS project
-    const state = readState();
-    const bareKernel = state.kernels.find(
-      (k) =>
-        k.name === lang &&
-        path.resolve(k.cwd) === path.resolve(cwd),
-    );
-    if (bareKernel) {
-      // The bare name belongs to us — use it directly
-      const client = new McpClient(bareKernel.port);
-      await client.initialize();
-      pool.set(bareKernel.name, client);
-      return client;
+  // 4. After install, try starting again.
+  const retried = await ratStart(name, cwd);
+  if (retried) {
+    const client = new McpClient(retried.port);
+    await client.initialize();
+    pool.set(retried.resolvedName, client);
+    if (retried.resolvedName !== name) {
+      pool.set(name, client);
     }
-
-    // Register and start a project-qualified runtime
-    await ratAdd(name, lang, cwd);
-    await ratStart(name, cwd);
-    port = getKernelPort(name);
+    return client;
   }
 
-  if (!port) {
-    throw new Error(
-      `Kernel "${name}" failed to start. Run: rat doctor ${lang}`,
-    );
-  }
-
-  const client = new McpClient(port);
-  await client.initialize();
-  pool.set(name, client);
-  return client;
+  const errMsg = `Kernel "${name}" failed to start. Run: rat doctor ${installLang}`;
+  log(`getClient: FAILED - ${errMsg}`);
+  throw new Error(errMsg);
 }
 
 /** Return the pool entry without starting anything. */

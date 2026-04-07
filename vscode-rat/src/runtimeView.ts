@@ -15,6 +15,7 @@ import {
   ratStop,
   ratRestart,
   ratRemove,
+  log,
   type KernelInfo,
   type SavedRuntime,
 } from "./rat";
@@ -52,25 +53,39 @@ export class RuntimeTreeProvider
   getChildren(): RuntimeNode[] {
     const state = readState();
     const runningNames = new Set(state.kernels.map((k) => k.name));
+    const workspaceDirs = (vscode.workspace.workspaceFolders ?? []).map(
+      (f) => path.resolve(f.uri.fsPath),
+    );
+    log(`tree: workspaceDirs=${JSON.stringify(workspaceDirs)}`);
+    log(`tree: kernels=${JSON.stringify(state.kernels.map(k => ({ name: k.name, cwd: k.cwd, port: k.port, status: k.status })))}`);
+    log(`tree: runtimes=${JSON.stringify(state.runtimes.map(r => ({ name: r.name, cwd: r.cwd })))}`);
     const nodes: RuntimeNode[] = [];
 
-    // Running kernels
+    // Running kernels — show workspace-local first, then others
+    const local: RuntimeNode[] = [];
+    const other: RuntimeNode[] = [];
     for (const k of state.kernels) {
-      nodes.push(
-        new RuntimeNode(k.name, k.lang, k.cwd, k.venv, true, k.port),
-      );
-    }
-
-    // Saved runtimes that aren't currently running
-    for (const r of state.runtimes) {
-      if (!runningNames.has(r.name)) {
-        nodes.push(
-          new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0),
-        );
+      const node = new RuntimeNode(k.name, k.lang, k.cwd, k.venv, true, k.port);
+      if (workspaceDirs.length === 0 || workspaceDirs.some((d) => path.resolve(k.cwd) === d)) {
+        local.push(node);
+      } else {
+        other.push(node);
       }
     }
 
-    return nodes;
+    // Saved runtimes (not running) — same filtering
+    for (const r of state.runtimes) {
+      if (runningNames.has(r.name)) continue;
+      if (workspaceDirs.length === 0 || workspaceDirs.some((d) => path.resolve(r.cwd) === d)) {
+        local.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
+      } else {
+        other.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
+      }
+    }
+
+    // Only show workspace-local runtimes.
+    // Other-project kernels are irrelevant and confusing.
+    return local;
   }
 }
 

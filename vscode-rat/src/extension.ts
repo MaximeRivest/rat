@@ -2,8 +2,9 @@
  * extension.ts — Entry point.
  *
  * Wires cells, queue, CodeLens, completions, hover, and commands
- * into VS Code.  The extension is intentionally thin — rat handles
- * kernel lifecycle, venv discovery, and execution.
+ * into VS Code.  Supports two modes:
+ *   - "notebook" — markdown/quarto with fenced code cells
+ *   - "source"   — .py/.r/.jl/.js/.sh files sent to REPL
  */
 
 import * as vscode from "vscode";
@@ -29,7 +30,14 @@ import {
 import { showRuntimePicker } from "./runtimePicker";
 import { getRuntimeOverride } from "./resolve";
 import { applyDecorations, disposeDecorations } from "./decorations";
-import { RatSnippetProvider } from "./snippets";
+import { RatSnippetProvider, CELL_SNIPPETS } from "./snippets";
+import { detectFileLang, isRatFile } from "./langDetect";
+import { blockAtCursor, nextBlock, allBlocks } from "./blocks";
+import {
+  clearResults,
+  renderResults,
+  disposeInlineOutput,
+} from "./inlineOutput";
 
 // ── Globals ────────────────────────────────────────────────
 
@@ -78,8 +86,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
     );
   });
 
-  // Providers — registered for markdown + quarto + rmarkdown files
-  const sel: vscode.DocumentSelector = [
+  // ── Providers — notebook files (markdown/quarto) ─────────
+
+  const notebookSel: vscode.DocumentSelector = [
     { language: "markdown" },
     { language: "quarto" },
     { pattern: "**/*.qmd" },
@@ -90,40 +99,90 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const codeLens = new RatCodeLensProvider();
 
   ctx.subscriptions.push(
-    vscode.languages.registerCodeLensProvider(sel, codeLens),
+    vscode.languages.registerCodeLensProvider(notebookSel, codeLens),
     vscode.languages.registerCompletionItemProvider(
-      sel,
+      notebookSel,
       new RatCompletionProvider(),
       ".",
       "(",
       "=",
       "[",
     ),
-    vscode.languages.registerHoverProvider(sel, new RatHoverProvider()),
+    vscode.languages.registerHoverProvider(notebookSel, new RatHoverProvider()),
     vscode.languages.registerCompletionItemProvider(
-      sel,
+      notebookSel,
       new RatSnippetProvider(),
     ),
+  );
+
+  // ── Providers — source files (.py, .r, .jl, .js, .sh) ───
+
+  const sourceSel: vscode.DocumentSelector = [
+    { language: "python" },
+    { language: "r" },
+    { language: "julia" },
+    { language: "javascript" },
+    { language: "shellscript" },
+  ];
+
+  ctx.subscriptions.push(
+    vscode.languages.registerCompletionItemProvider(
+      sourceSel,
+      new RatCompletionProvider(),
+      ".",
+      "(",
+      "=",
+      "[",
+    ),
+    vscode.languages.registerHoverProvider(sourceSel, new RatHoverProvider()),
+  );
+
+  // ── Auto-trigger snippets when prefix typed at line start ───
+  const snippetPrefixes = new Set(CELL_SNIPPETS.map((s) => s.prefix));
+  ctx.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      const ed = vscode.window.activeTextEditor;
+      if (!ed || ed.document !== e.document) return;
+      const fl = detectFileLang(e.document);
+      if (fl.mode !== "notebook") return;
+      for (const ch of e.contentChanges) {
+        if (ch.text.length !== 1) continue;
+        const line = e.document.lineAt(ch.range.start.line);
+        const typed = line.text.trim();
+        if (typed.length > 0 && snippetPrefixes.has(typed)) {
+          vscode.commands.executeCommand("editor.action.triggerSuggest");
+          return;
+        }
+      }
+    }),
   );
 
   // Context key + runtime bar update + decorations on editor switch
   const updateCtx = () => {
     const ed = vscode.window.activeTextEditor;
-    const active = !!ed && isSupported(ed.document);
+    const active = !!ed && isRatFile(ed.document);
     vscode.commands.executeCommand("setContext", "rat.activeFile", active);
+
     updateRuntimeBar(ed);
-    if (ed && isSupported(ed.document)) {
-      applyDecorations(ed);
+    if (ed && isRatFile(ed.document)) {
+      const fl = detectFileLang(ed.document);
+      if (fl.mode === "notebook") {
+        applyDecorations(ed);
+      } else {
+        renderResults(ed);
+      }
     }
   };
   ctx.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(updateCtx),
     vscode.workspace.onDidChangeTextDocument((e) => {
       updateRuntimeBar(vscode.window.activeTextEditor);
-      // Refresh decorations when the document changes
       const ed = vscode.window.activeTextEditor;
-      if (ed && ed.document === e.document && isSupported(ed.document)) {
-        applyDecorations(ed);
+      if (ed && ed.document === e.document && isRatFile(ed.document)) {
+        const fl = detectFileLang(ed.document);
+        if (fl.mode === "notebook") {
+          applyDecorations(ed);
+        }
       }
     }),
   );
@@ -135,8 +194,10 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const reg = (id: string, fn: (...a: any[]) => unknown) =>
     ctx.subscriptions.push(vscode.commands.registerCommand(id, fn));
 
-  reg("rat.runCell", () => runCellCmd(false));
-  reg("rat.runCellAndAdvance", () => runCellCmd(true));
+  reg("rat.runCell", () => runCmd(false));
+
+
+  reg("rat.runCellAndAdvance", () => runCmd(true));
   reg("rat.runAbove", runAboveCmd);
   reg("rat.runAll", runAllCmd);
   reg("rat.runCellAt", (line: number) => runCellAtCmd(line));
@@ -171,18 +232,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
 export function deactivate(): void {
   treeProvider?.stopAutoRefresh();
   disposeDecorations();
+  disposeInlineOutput();
   disposeAll();
 }
 
 // ── Helpers ────────────────────────────────────────────────
-
-function isSupported(doc: vscode.TextDocument): boolean {
-  if (["markdown", "quarto", "rmarkdown"].includes(doc.languageId)) {
-    return true;
-  }
-  const ext = doc.fileName.split(".").pop()?.toLowerCase();
-  return ["qmd", "rmd", "md"].includes(ext ?? "");
-}
 
 function setStatus(state: QueueState, pending: number): void {
   switch (state) {
@@ -204,23 +258,30 @@ function setStatus(state: QueueState, pending: number): void {
 }
 
 function updateRuntimeBar(editor: vscode.TextEditor | undefined): void {
-  if (!editor || !isSupported(editor.document)) {
-    runtimeBar.hide();
-    return;
-  }
-  const cells = parseCells(editor.document);
-  if (cells.length === 0) {
+  if (!editor || !isRatFile(editor.document)) {
     runtimeBar.hide();
     return;
   }
 
-  // Show the runtime for the first cell's language
-  const lang = cells[0].ratLang;
+  const fl = detectFileLang(editor.document);
+  let lang: string;
+
+  if (fl.mode === "source" && fl.ratLang) {
+    lang = fl.ratLang;
+  } else {
+    // Notebook mode — use first cell's language
+    const cells = parseCells(editor.document);
+    if (cells.length === 0) {
+      runtimeBar.hide();
+      return;
+    }
+    lang = cells[0].ratLang;
+  }
+
   const docUri = editor.document.uri.toString();
   const override = getRuntimeOverride(docUri, lang);
   const { name } = resolveRuntime(lang, editor.document);
 
-  // Check if kernel is running
   const state = readState();
   const kernel = state.kernels.find((k) => k.name === name);
   const icon = kernel ? "$(circle-filled)" : "$(circle-outline)";
@@ -235,36 +296,201 @@ function updateRuntimeBar(editor: vscode.TextEditor | undefined): void {
   runtimeBar.show();
 }
 
-function enqueue(
+// ── Notebook-mode helpers ──────────────────────────────────
+
+function enqueueNotebook(
   editor: vscode.TextEditor,
   cell: ReturnType<typeof parseCells>[number],
 ): void {
   const { name, cwd, lang } = resolveRuntime(cell.ratLang, editor.document);
-  queue.enqueue({ cell, editor, runtimeName: name, cwd, lang });
+  queue.enqueue({ kind: "notebook", cell, editor, runtimeName: name, cwd, lang });
 }
 
-// ── Command implementations ───────────────────────────────
+// ── Source-mode helpers ────────────────────────────────────
 
-function runCellCmd(advance: boolean): void {
+function enqueueSource(
+  editor: vscode.TextEditor,
+  block: import("./blocks").SourceBlock,
+  ratLang: string,
+): void {
+  const { name, cwd, lang } = resolveRuntime(ratLang, editor.document);
+  queue.enqueue({
+    kind: "source",
+    block,
+    code: block.code,
+    editor,
+    runtimeName: name,
+    cwd,
+    lang,
+  });
+}
+
+/** Strip common leading whitespace (like Python's textwrap.dedent). */
+function dedent(text: string): string {
+  const lines = text.split("\n");
+  // Find minimum indentation of non-empty lines
+  let minIndent = Infinity;
+  for (const line of lines) {
+    if (line.trim().length === 0) continue;
+    const indent = line.match(/^(\s*)/)![1].length;
+    if (indent < minIndent) minIndent = indent;
+  }
+  if (minIndent === 0 || minIndent === Infinity) return text;
+  return lines.map((l) => l.slice(minIndent)).join("\n");
+}
+
+/**
+ * Block-opening pattern: lines that expect an indented body after them.
+ * Matches `for ...:`, `if ...:`, `while ...:`, `def ...:`, `class ...:`,
+ * `with ...:`, `try:`, `except ...:`, `elif ...:`, `else:`, `finally:`.
+ */
+const BLOCK_OPENER_RE = /^\s*(?:for|if|while|def|class|with|try|except|elif|else|finally)\b.*:\s*(?:#.*)?$/;
+
+/**
+ * Split dedented code into executable chunks.
+ *
+ * A line at column 0 that is a block opener (for/if/def/…) groups with
+ * all following indented lines (its body).  Otherwise each column-0 line
+ * is its own chunk, and orphan indented lines get dedented to column 0
+ * as independent statements.
+ */
+function splitTopLevel(code: string): string[] {
+  const lines = code.split("\n");
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let inBlock = false;
+
+  const flush = () => {
+    const text = current.join("\n").trimEnd();
+    if (text.trim().length > 0) chunks.push(text);
+    current = [];
+    inBlock = false;
+  };
+
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      current.push(line);
+      continue;
+    }
+    const indent = line.match(/^(\s*)/)![1].length;
+
+    if (indent === 0) {
+      // New top-level line
+      if (current.some((l) => l.trim().length > 0)) flush();
+      current.push(line);
+      inBlock = BLOCK_OPENER_RE.test(line);
+    } else if (inBlock) {
+      // Indented line belonging to a block opener — keep grouped
+      current.push(line);
+    } else {
+      // Orphan indented line (no block opener above) — dedent and
+      // emit as its own chunk
+      if (current.some((l) => l.trim().length > 0)) flush();
+      current.push(line.trimStart());
+    }
+  }
+  flush();
+  return chunks;
+}
+
+function enqueueSelection(
+  editor: vscode.TextEditor,
+  ratLang: string,
+): void {
+  const sel = editor.selection;
+  const raw = editor.document.getText(sel);
+  if (!raw.trim()) return;
+  const code = dedent(raw);
+  const { name, cwd, lang } = resolveRuntime(ratLang, editor.document);
+  const range = new vscode.Range(sel.start, sel.end);
+
+  // Split into independent top-level statements so e.g.
+  // selecting `i = 234` + `    print(i)` inside a loop works.
+  const chunks = splitTopLevel(code);
+  for (const chunk of chunks) {
+    queue.enqueue({
+      kind: "source",
+      block: { code: chunk, range },
+      code: chunk,
+      editor,
+      runtimeName: name,
+      cwd,
+      lang,
+    });
+  }
+}
+
+// ── Unified run command ────────────────────────────────────
+
+async function runCmd(advance: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || !isSupported(editor.document)) return;
+  if (!editor || !isRatFile(editor.document)) return;
 
-  const cells = parseCells(editor.document);
-  const cell = cellAtLine(cells, editor.selection.active.line);
-  if (!cell?.executable) {
-    vscode.window.showInformationMessage("No executable code cell at cursor");
+  const fl = detectFileLang(editor.document);
+
+  // ── Selection run (works in both modes) ─────────────────
+  if (!editor.selection.isEmpty) {
+    if (fl.mode === "notebook") {
+      // Determine language from the cell the selection is in
+      const cells = parseCells(editor.document);
+      const cell = cellAtLine(cells, editor.selection.active.line);
+      if (cell?.executable) {
+        enqueueSelection(editor, cell.ratLang);
+        return;
+      }
+    } else {
+      enqueueSelection(editor, fl.ratLang!);
+      return;
+    }
+  }
+
+  if (fl.mode === "notebook") {
+    // Notebook mode — run fenced code cell
+    const cells = parseCells(editor.document);
+    const cell = cellAtLine(cells, editor.selection.active.line);
+    if (!cell?.executable) {
+      vscode.window.showInformationMessage("No executable code cell at cursor");
+      return;
+    }
+    enqueueNotebook(editor, cell);
+
+    if (advance) {
+      const idx = cells.indexOf(cell);
+      if (idx < cells.length - 1) {
+        const next = cells[idx + 1];
+        const pos = new vscode.Position(next.openLine + 1, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos));
+      }
+    }
     return;
   }
 
-  enqueue(editor, cell);
+  // Source mode
+  const ratLang = fl.ratLang!;
+
+  // Find the logical block at cursor
+  const line = editor.selection.active.line;
+  const block = await blockAtCursor(editor.document, line, ratLang);
+  if (!block) {
+    vscode.window.showInformationMessage("No executable block at cursor");
+    return;
+  }
+
+  enqueueSource(editor, block, ratLang);
 
   if (advance) {
-    const idx = cells.indexOf(cell);
-    if (idx < cells.length - 1) {
-      const next = cells[idx + 1];
-      const pos = new vscode.Position(next.openLine + 1, 0);
+    // Move cursor to the next block
+    const nb = await nextBlock(editor.document, block.range.end.line, ratLang);
+    if (nb) {
+      const pos = new vscode.Position(nb.range.start.line, 0);
       editor.selection = new vscode.Selection(pos, pos);
       editor.revealRange(new vscode.Range(pos, pos));
+    } else {
+      // No next block — move past end of current block
+      const endLine = Math.min(block.range.end.line + 1, editor.document.lineCount - 1);
+      const pos = new vscode.Position(endLine, 0);
+      editor.selection = new vscode.Selection(pos, pos);
     }
   }
 }
@@ -272,64 +498,88 @@ function runCellCmd(advance: boolean): void {
 function runCellAtCmd(line: number): void {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  const cell = parseCells(editor.document).find((c) => c.openLine === line);
-  if (cell?.executable) enqueue(editor, cell);
+  const fl = detectFileLang(editor.document);
+  if (fl.mode === "notebook") {
+    const cell = parseCells(editor.document).find((c) => c.openLine === line);
+    if (cell?.executable) enqueueNotebook(editor, cell);
+  }
+  // CodeLens not shown for source files currently
 }
 
 function runAboveCmd(): void {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || !isSupported(editor.document)) return;
-  for (const c of cellsUpTo(
-    parseCells(editor.document),
-    editor.selection.active.line,
-  )) {
-    if (c.executable) enqueue(editor, c);
+  if (!editor || !isRatFile(editor.document)) return;
+
+  const fl = detectFileLang(editor.document);
+  if (fl.mode === "notebook") {
+    for (const c of cellsUpTo(
+      parseCells(editor.document),
+      editor.selection.active.line,
+    )) {
+      if (c.executable) enqueueNotebook(editor, c);
+    }
+    return;
   }
+
+  // Source mode — run all blocks up to and including cursor
+  const ratLang = fl.ratLang!;
+  const cursorLine = editor.selection.active.line;
+  allBlocks(editor.document, ratLang).then((blocks) => {
+    for (const b of blocks) {
+      if (b.range.start.line <= cursorLine) {
+        enqueueSource(editor, b, ratLang);
+      }
+    }
+  });
 }
 
 function runAboveAtCmd(line: number): void {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  for (const c of cellsUpTo(parseCells(editor.document), line)) {
-    if (c.executable) enqueue(editor, c);
+  const fl = detectFileLang(editor.document);
+  if (fl.mode === "notebook") {
+    for (const c of cellsUpTo(parseCells(editor.document), line)) {
+      if (c.executable) enqueueNotebook(editor, c);
+    }
   }
 }
 
-function runAllCmd(): void {
+async function runAllCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || !isSupported(editor.document)) return;
-  for (const c of parseCells(editor.document)) {
-    if (c.executable) enqueue(editor, c);
+  if (!editor || !isRatFile(editor.document)) return;
+
+  const fl = detectFileLang(editor.document);
+  if (fl.mode === "notebook") {
+    for (const c of parseCells(editor.document)) {
+      if (c.executable) enqueueNotebook(editor, c);
+    }
+    return;
+  }
+
+  const ratLang = fl.ratLang!;
+  const blocks = await allBlocks(editor.document, ratLang);
+  for (const b of blocks) {
+    enqueueSource(editor, b, ratLang);
   }
 }
 
 // ── Reverse map: ratLang → canonical fence name ───────────
 
-const RAT_TO_FENCE: Record<string, string> = {
-  py: "python",
-  r: "r",
-  sh: "bash",
-  jl: "julia",
-  js: "javascript",
-};
-
 async function insertCellCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  if (!editor || !isSupported(editor.document)) return;
+  if (!editor) return;
+  const fl = detectFileLang(editor.document);
+  if (fl.mode !== "notebook") return; // Only for notebook files
 
-  // Find the most common fence language in the document
   const cells = parseCells(editor.document);
   const fenceLang = dominantFenceLang(cells);
 
   const cursorLine = editor.selection.active.line;
   const lineText = editor.document.lineAt(cursorLine).text;
-
-  // Insert after the current line (or at start if on an empty first line)
   const insertLine = cursorLine;
   const insertAt = new vscode.Position(insertLine, lineText.length);
 
   const openFence = "```" + fenceLang;
-  // Build: newline, opening fence, newline, empty code line, newline, closing fence
   const prefix = lineText.length > 0 || cursorLine > 0 ? "\n\n" : "";
   const snippet = prefix + openFence + "\n" + "\n" + "```";
 
@@ -337,7 +587,6 @@ async function insertCellCmd(): Promise<void> {
     eb.insert(insertAt, snippet);
   });
 
-  // Place cursor on the empty line inside the cell (2 lines below opening fence)
   const openFenceLine = insertLine + (prefix.length > 0 ? 2 : 0);
   const bodyLine = openFenceLine + 1;
   const pos = new vscode.Position(bodyLine, 0);
@@ -345,15 +594,12 @@ async function insertCellCmd(): Promise<void> {
   editor.revealRange(new vscode.Range(pos, pos));
 }
 
-/** Return the fence language used most often, or "python" as fallback. */
 function dominantFenceLang(cells: ReturnType<typeof parseCells>): string {
   if (cells.length === 0) return "python";
-
   const counts = new Map<string, number>();
   for (const c of cells) {
     counts.set(c.lang, (counts.get(c.lang) ?? 0) + 1);
   }
-
   let best = cells[0].lang;
   let bestCount = 0;
   for (const [lang, count] of counts) {
@@ -367,16 +613,30 @@ function dominantFenceLang(cells: ReturnType<typeof parseCells>): string {
 
 async function clearOutputsCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  if (editor) await clearAllOutputs(editor);
+  if (!editor) return;
+  const fl = detectFileLang(editor.document);
+  if (fl.mode === "notebook") {
+    await clearAllOutputs(editor);
+  } else {
+    clearResults(editor);
+  }
 }
 
 async function showVariablesCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  const cells = parseCells(editor.document);
-  if (!cells.length) return;
 
-  const { name, cwd, lang } = resolveRuntime(cells[0].ratLang, editor.document);
+  const fl = detectFileLang(editor.document);
+  let lang: string;
+  if (fl.mode === "source" && fl.ratLang) {
+    lang = fl.ratLang;
+  } else {
+    const cells = parseCells(editor.document);
+    if (!cells.length) return;
+    lang = cells[0].ratLang;
+  }
+
+  const { name, cwd } = resolveRuntime(lang, editor.document);
   try {
     const client = await getClient(name, cwd, lang);
     const text = await client.look();
@@ -397,10 +657,18 @@ async function showVariablesCmd(): Promise<void> {
 async function stopKernelCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  const cells = parseCells(editor.document);
-  if (!cells.length) return;
 
-  const { name } = resolveRuntime(cells[0].ratLang, editor.document);
+  const fl = detectFileLang(editor.document);
+  let lang: string;
+  if (fl.mode === "source" && fl.ratLang) {
+    lang = fl.ratLang;
+  } else {
+    const cells = parseCells(editor.document);
+    if (!cells.length) return;
+    lang = cells[0].ratLang;
+  }
+
+  const { name } = resolveRuntime(lang, editor.document);
   try {
     await ratStop(name);
     disposeAll();
@@ -413,10 +681,18 @@ async function stopKernelCmd(): Promise<void> {
 async function restartKernelCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
-  const cells = parseCells(editor.document);
-  if (!cells.length) return;
 
-  const { name, cwd, lang: _lang } = resolveRuntime(cells[0].ratLang, editor.document);
+  const fl = detectFileLang(editor.document);
+  let lang: string;
+  if (fl.mode === "source" && fl.ratLang) {
+    lang = fl.ratLang;
+  } else {
+    const cells = parseCells(editor.document);
+    if (!cells.length) return;
+    lang = cells[0].ratLang;
+  }
+
+  const { name, cwd } = resolveRuntime(lang, editor.document);
   try {
     disposeAll();
     await ratRestart(name, cwd);

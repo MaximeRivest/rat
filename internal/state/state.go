@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/securefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -347,11 +348,8 @@ func (s *Store) readLocked() (*File, error) {
 
 func (s *Store) writeLocked(f *File) error {
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := securefs.EnsurePrivateDir(dir); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("chmod state dir: %w", err)
 	}
 
 	data, err := yaml.Marshal(f)
@@ -363,9 +361,16 @@ func (s *Store) writeLocked(f *File) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
+	if err := securefs.MakePrivateFile(tmp); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("secure temp state file: %w", err)
+	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename state: %w", err)
+	}
+	if err := securefs.MakePrivateFile(s.path); err != nil {
+		return fmt.Errorf("secure state file: %w", err)
 	}
 
 	return nil

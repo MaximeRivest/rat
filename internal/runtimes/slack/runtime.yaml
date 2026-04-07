@@ -7,7 +7,7 @@ detect:
 options:
   agent:
     env: RAT_SLACK_AGENT
-    description: MCP URL of agent kernel to handle inbound messages
+    description: Kernel name (e.g. pi@home) or MCP URL of agent for auto-replies
 
 kernel:
   type: json

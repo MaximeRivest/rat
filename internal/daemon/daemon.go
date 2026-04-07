@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maximerivest/rat/internal/securefs"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -95,11 +96,7 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 
 	// Detach: new session, no stdin, logs to file
 	logDir := filepath.Join(filepath.Dir(store.Path()), "logs")
-	os.MkdirAll(logDir, 0755)
-	logFile, err := os.OpenFile(
-		filepath.Join(logDir, opts.Name+".log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644,
-	)
+	logFile, err := openKernelLog(logDir, opts.Name)
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
 	}
@@ -304,6 +301,10 @@ func readBody(resp *http.Response) ([]byte, error) {
 	buf := make([]byte, 4096)
 	n, _ := resp.Body.Read(buf)
 	return buf[:n], nil
+}
+
+func openKernelLog(logDir, name string) (*os.File, error) {
+	return securefs.OpenPrivateAppend(filepath.Join(logDir, name+".log"))
 }
 
 func isAlive(pid int) bool {

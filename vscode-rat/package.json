@@ -1,7 +1,7 @@
 {
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
-  "description": "Run code cells in Markdown and Quarto files, powered by rat kernels",
+  "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
   "version": "0.1.0",
   "publisher": "maximerivest",
   "license": "MIT",
@@ -16,6 +16,11 @@
   ],
   "activationEvents": [
     "onLanguage:markdown",
+    "onLanguage:python",
+    "onLanguage:r",
+    "onLanguage:julia",
+    "onLanguage:javascript",
+    "onLanguage:shellscript",
     "workspaceContains:**/*.qmd",
     "workspaceContains:**/*.rmd"
   ],
@@ -39,25 +44,90 @@
       ]
     },
     "commands": [
-      { "command": "rat.runCell", "title": "Rat: Run Cell", "icon": "$(play)" },
-      { "command": "rat.runCellAndAdvance", "title": "Rat: Run Cell and Advance" },
-      { "command": "rat.runAbove", "title": "Rat: Run Above" },
-      { "command": "rat.runAll", "title": "Rat: Run All Cells" },
-      { "command": "rat.cancelExecution", "title": "Rat: Cancel Execution" },
-      { "command": "rat.clearQueue", "title": "Rat: Clear Queue" },
-      { "command": "rat.togglePause", "title": "Rat: Pause / Resume Queue" },
-      { "command": "rat.clearOutputs", "title": "Rat: Clear All Outputs" },
-      { "command": "rat.showVariables", "title": "Rat: Show Variables" },
-      { "command": "rat.stopKernel", "title": "Rat: Stop Kernel" },
-      { "command": "rat.restartKernel", "title": "Rat: Restart Kernel" },
-      { "command": "rat.selectRuntime", "title": "Rat: Select Runtime", "icon": "$(symbol-event)" },
-      { "command": "rat.addRuntime", "title": "Rat: Add Runtime", "icon": "$(add)" },
-      { "command": "rat.refreshRuntimes", "title": "Rat: Refresh Runtimes", "icon": "$(refresh)" },
-      { "command": "rat.startRuntime", "title": "Start", "icon": "$(play)" },
-      { "command": "rat.stopRuntime", "title": "Stop", "icon": "$(debug-stop)" },
-      { "command": "rat.restartRuntime", "title": "Restart", "icon": "$(debug-restart)" },
-      { "command": "rat.removeRuntime", "title": "Remove", "icon": "$(trash)" },
-      { "command": "rat.insertCell", "title": "Rat: Insert Cell" }
+      {
+        "command": "rat.runCell",
+        "title": "Rat: Run Block",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rat.runCellAndAdvance",
+        "title": "Rat: Run Block and Advance"
+      },
+      {
+        "command": "rat.runAbove",
+        "title": "Rat: Run Above"
+      },
+      {
+        "command": "rat.runAll",
+        "title": "Rat: Run All Cells"
+      },
+      {
+        "command": "rat.cancelExecution",
+        "title": "Rat: Cancel Execution"
+      },
+      {
+        "command": "rat.clearQueue",
+        "title": "Rat: Clear Queue"
+      },
+      {
+        "command": "rat.togglePause",
+        "title": "Rat: Pause / Resume Queue"
+      },
+      {
+        "command": "rat.clearOutputs",
+        "title": "Rat: Clear All Outputs"
+      },
+      {
+        "command": "rat.showVariables",
+        "title": "Rat: Show Variables"
+      },
+      {
+        "command": "rat.stopKernel",
+        "title": "Rat: Stop Kernel"
+      },
+      {
+        "command": "rat.restartKernel",
+        "title": "Rat: Restart Kernel"
+      },
+      {
+        "command": "rat.selectRuntime",
+        "title": "Rat: Select Runtime",
+        "icon": "$(symbol-event)"
+      },
+      {
+        "command": "rat.addRuntime",
+        "title": "Rat: Add Runtime",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rat.refreshRuntimes",
+        "title": "Rat: Refresh Runtimes",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rat.startRuntime",
+        "title": "Start",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rat.stopRuntime",
+        "title": "Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rat.restartRuntime",
+        "title": "Restart",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "rat.removeRuntime",
+        "title": "Remove",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "rat.insertCell",
+        "title": "Rat: Insert Cell"
+      }
     ],
     "viewsWelcome": [
       {
@@ -67,14 +137,38 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "rat.addRuntime", "when": "view == ratRuntimes", "group": "navigation" },
-        { "command": "rat.refreshRuntimes", "when": "view == ratRuntimes", "group": "navigation" }
+        {
+          "command": "rat.addRuntime",
+          "when": "view == ratRuntimes",
+          "group": "navigation"
+        },
+        {
+          "command": "rat.refreshRuntimes",
+          "when": "view == ratRuntimes",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "rat.startRuntime", "when": "view == ratRuntimes && viewItem == savedRuntime", "group": "inline" },
-        { "command": "rat.stopRuntime", "when": "view == ratRuntimes && viewItem == runningKernel", "group": "inline" },
-        { "command": "rat.restartRuntime", "when": "view == ratRuntimes && viewItem == runningKernel", "group": "inline" },
-        { "command": "rat.removeRuntime", "when": "view == ratRuntimes", "group": "2_modify" }
+        {
+          "command": "rat.startRuntime",
+          "when": "view == ratRuntimes && viewItem == savedRuntime",
+          "group": "inline"
+        },
+        {
+          "command": "rat.stopRuntime",
+          "when": "view == ratRuntimes && viewItem == runningKernel",
+          "group": "inline"
+        },
+        {
+          "command": "rat.restartRuntime",
+          "when": "view == ratRuntimes && viewItem == runningKernel",
+          "group": "inline"
+        },
+        {
+          "command": "rat.removeRuntime",
+          "when": "view == ratRuntimes",
+          "group": "2_modify"
+        }
       ]
     },
     "keybindings": [
@@ -82,7 +176,7 @@
         "command": "rat.runCell",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "editorTextFocus && rat.activeFile"
+        "when": "editorTextFocus && !editorReadonly && rat.activeFile && !notebookEditorFocused && !isCompositeNotebook && !findInputFocussed && !replaceInputFocussed && !inlineChatFocused"
       },
       {
         "command": "rat.runCellAndAdvance",
@@ -136,8 +230,12 @@
     "languages": [
       {
         "id": "quarto",
-        "aliases": ["Quarto"],
-        "extensions": [".qmd"]
+        "aliases": [
+          "Quarto"
+        ],
+        "extensions": [
+          ".qmd"
+        ]
       }
     ],
     "snippets": [
@@ -200,5 +298,8 @@
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "web-tree-sitter": "^0.26.8"
   }
 }
