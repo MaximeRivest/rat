@@ -36,16 +36,20 @@ URL="${BASE_URL}/${BINARY}"
 echo "Downloading rat from ${URL}..."
 mkdir -p "$INSTALL_DIR"
 
+TMP="${INSTALL_DIR}/rat.tmp.$$"
+trap 'rm -f "$TMP"' EXIT
+
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$URL" -o "${INSTALL_DIR}/rat"
+  curl -fsSL "$URL" -o "$TMP"
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO "${INSTALL_DIR}/rat" "$URL"
+  wget -qO "$TMP" "$URL"
 else
   echo "Error: curl or wget required" >&2
   exit 1
 fi
 
-chmod +x "${INSTALL_DIR}/rat"
+chmod +x "$TMP"
+mv -f "$TMP" "${INSTALL_DIR}/rat"
 
 # ── macOS: strip quarantine xattr ────────────────────────────
 
