@@ -464,6 +464,8 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 	activityPath := filepath.Join(kdir, "activity.jsonl")
 	_ = os.Remove(activityPath)
 
+	extraEnv["RAT_ACTIVITY_LOG"] = activityPath
+
 	k := &Kernel{
 		name:         name,
 		display:      cfg.Display,

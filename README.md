@@ -239,6 +239,13 @@ rat serve r --http --port 8718
 rat serve py                    # stdio mode (default)
 ```
 
+Attach to an existing Jupyter kernel:
+
+```bash
+rat add nb --lang jupyter --opt target=notebook.ipynb
+rat start nb
+```
+
 ### Connect from your app
 
 ```javascript

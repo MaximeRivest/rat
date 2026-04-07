@@ -1,0 +1,33 @@
+name: jupyter
+display: Jupyter
+
+detect:
+  commands: [python3, python]
+  env: RAT_JUPYTER_PYTHON
+
+options:
+  target:
+    env: RAT_JUPYTER_TARGET
+    description: Notebook path, kernel connection file, or kernel id to attach to
+  server:
+    env: RAT_JUPYTER_SERVER
+    description: Optional Jupyter server URL filter when resolving notebook paths
+  token:
+    env: RAT_JUPYTER_TOKEN
+    description: Optional Jupyter token for session discovery
+  cwd:
+    env: RAT_JUPYTER_CWD
+    description: Base directory for resolving relative notebook paths
+
+kernel:
+  type: json
+  script: kernel-jupyter.py
+
+frontend:
+  type: repl
+  prompt: "jupyter> "
+
+install:
+  runtime:
+    manager: pip
+    deps: [jupyter-client, requests, jupyter-server]

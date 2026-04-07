@@ -26,6 +26,9 @@ var Aliases = map[string]string{
 	"javascript": "js",
 	"pi":         "pi",
 	"slack":      "slack",
+	"jupyter":    "jupyter",
+	"notebook":   "jupyter",
+	"ipynb":      "jupyter",
 }
 
 // Resolve returns the canonical short name for a language,
@@ -34,7 +37,7 @@ func Resolve(name string) (string, error) {
 	if canon, ok := Aliases[name]; ok {
 		return canon, nil
 	}
-	return "", fmt.Errorf("unknown language %q (supported: py, r, jl, sh, js, pi, slack)", name)
+	return "", fmt.Errorf("unknown language %q (supported: py, r, jl, sh, js, pi, slack, jupyter)", name)
 }
 
 // IsAlias returns true if name is a known language name or alias.
@@ -65,8 +68,8 @@ func InferFromName(name string) (string, bool) {
 	// 3. Try known aliases as prefixes (longer first to avoid
 	//    "py" matching before "python").
 	prefixes := []string{
-		"python", "javascript", "julia", "bash", "node",
-		"py", "sh", "js", "jl", "ju",
+		"javascript", "jupyter", "notebook", "python", "julia", "bash", "node",
+		"ipynb", "py", "sh", "js", "jl", "ju",
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(name, p) && len(name) > len(p) {
