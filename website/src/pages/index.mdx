@@ -16,8 +16,8 @@ rat wraps language runtimes as MCP servers. Start a Python kernel in your termin
 
   <div>
     <div class="mb-3">
-      <div class="text-lg font-semibold text-slate-900">1. Install & set up a language</div>
-      <p class="mt-1 text-sm text-slate-500">One curl. One install command. Done.</p>
+      <div class="text-lg font-semibold text-slate-900 dark:text-slate-100">1. Install & set up a language</div>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">One curl. One install command. Done.</p>
     </div>
 
 ```bash frame="terminal" title="Terminal"
@@ -32,8 +32,8 @@ rat install py
 
   <div>
     <div class="mb-3">
-      <div class="text-lg font-semibold text-slate-900">2. Open a REPL</div>
-      <p class="mt-1 text-sm text-slate-500">Full IPython with syntax highlighting, tab completion, and magic commands.</p>
+      <div class="text-lg font-semibold text-slate-900 dark:text-slate-100">2. Open a REPL</div>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Full IPython with syntax highlighting, tab completion, and magic commands.</p>
     </div>
 
 ```bash frame="terminal" title="Terminal"
@@ -49,8 +49,8 @@ In [2]: df.head()
 
   <div>
     <div class="mb-3">
-      <div class="text-lg font-semibold text-slate-900">3. Connect an AI — same session</div>
-      <p class="mt-1 text-sm text-slate-500">Open Claude Desktop. "Analyze the dataframe I just loaded." It sees the same <code>df</code>.</p>
+      <div class="text-lg font-semibold text-slate-900 dark:text-slate-100">3. Connect an AI — same session</div>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Open Claude Desktop. "Analyze the dataframe I just loaded." It sees the same <code>df</code>.</p>
     </div>
 
 ```text
@@ -75,12 +75,12 @@ In [2]: df.head()
 
 <div class="not-prose mt-6">
 <table class="w-full text-sm">
-<thead><tr class="border-b border-slate-200"><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">Tool</th><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">What it does</th></tr></thead>
+<thead><tr class="border-b border-slate-200 dark:border-slate-700"><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">Tool</th><th class="px-4 py-2 text-left text-xs font-semibold tracking-wide uppercase text-slate-400">What it does</th></tr></thead>
 <tbody>
-<tr class="border-b border-slate-100"><td class="px-4 py-2"><code>run</code></td><td class="px-4 py-2 text-slate-600">Execute code or provide input</td></tr>
-<tr class="border-b border-slate-100"><td class="px-4 py-2"><code>look</code></td><td class="px-4 py-2 text-slate-600">Inspect variables, complete code, see state</td></tr>
-<tr class="border-b border-slate-100"><td class="px-4 py-2"><code>tail</code></td><td class="px-4 py-2 text-slate-600">Recent activity log</td></tr>
-<tr><td class="px-4 py-2"><code>ctl</code></td><td class="px-4 py-2 text-slate-600">Reset, cancel, restart</td></tr>
+<tr class="border-b border-slate-100 dark:border-slate-800"><td class="px-4 py-2"><code>run</code></td><td class="px-4 py-2 text-slate-600 dark:text-slate-400">Execute code or provide input</td></tr>
+<tr class="border-b border-slate-100 dark:border-slate-800"><td class="px-4 py-2"><code>look</code></td><td class="px-4 py-2 text-slate-600 dark:text-slate-400">Inspect variables, complete code, see state</td></tr>
+<tr class="border-b border-slate-100 dark:border-slate-800"><td class="px-4 py-2"><code>tail</code></td><td class="px-4 py-2 text-slate-600 dark:text-slate-400">Recent activity log</td></tr>
+<tr><td class="px-4 py-2"><code>ctl</code></td><td class="px-4 py-2 text-slate-600 dark:text-slate-400">Reset, cancel, restart</td></tr>
 </tbody>
 </table>
 </div>
@@ -92,21 +92,21 @@ Same four tools for every language. Same four tools whether you're a human in a 
 ## Why rat
 
 <div class="not-prose mt-6 grid gap-4 sm:grid-cols-2">
-  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div class="mb-2 text-lg font-semibold text-slate-900">Shared namespace</div>
-    <p class="text-sm leading-relaxed text-slate-500">Your terminal, Claude, VS Code, and Cursor all see the same variables. Load data once, use it everywhere.</p>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+    <div class="mb-2 text-lg font-semibold text-slate-900 dark:text-slate-100">Shared namespace</div>
+    <p class="text-sm leading-relaxed text-slate-500 dark:text-slate-400">Your terminal, Claude, VS Code, and Cursor all see the same variables. Load data once, use it everywhere.</p>
   </div>
-  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div class="mb-2 text-lg font-semibold text-slate-900">Project-scoped kernels</div>
-    <p class="text-sm leading-relaxed text-slate-500"><code>rat py</code> in <code>{"~/project-a"}</code> is separate from <code>{"~/project-b"}</code>. Automatic isolation, no configuration.</p>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+    <div class="mb-2 text-lg font-semibold text-slate-900 dark:text-slate-100">Project-scoped kernels</div>
+    <p class="text-sm leading-relaxed text-slate-500 dark:text-slate-400"><code>rat py</code> in <code>{"~/project-a"}</code> is separate from <code>{"~/project-b"}</code>. Automatic isolation, no configuration.</p>
   </div>
-  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div class="mb-2 text-lg font-semibold text-slate-900">Any language</div>
-    <p class="text-sm leading-relaxed text-slate-500">Python, R, bash, pi agent built in. Add any language with a YAML file and a kernel script — no Go code.</p>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+    <div class="mb-2 text-lg font-semibold text-slate-900 dark:text-slate-100">Any language</div>
+    <p class="text-sm leading-relaxed text-slate-500 dark:text-slate-400">Python, R, bash, pi agent built in. Add any language with a YAML file and a kernel script — no Go code.</p>
   </div>
-  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-    <div class="mb-2 text-lg font-semibold text-slate-900">Native MCP</div>
-    <p class="text-sm leading-relaxed text-slate-500">Every kernel is an MCP server. Works with Claude Desktop, Cursor, and any MCP client out of the box.</p>
+  <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900">
+    <div class="mb-2 text-lg font-semibold text-slate-900 dark:text-slate-100">Native MCP</div>
+    <p class="text-sm leading-relaxed text-slate-500 dark:text-slate-400">Every kernel is an MCP server. Works with Claude Desktop, Cursor, and any MCP client out of the box.</p>
   </div>
 </div>
 
@@ -115,20 +115,20 @@ Same four tools for every language. Same four tools whether you're a human in a 
 ## Get started
 
 <div class="not-prose mt-4 grid gap-3 sm:grid-cols-2">
-  <a href="/installation" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
-    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Installation →</div>
-    <div class="mt-1 text-sm text-slate-500">Install on macOS or Linux in one command</div>
+  <a href="/installation" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-900 dark:hover:border-sky-500">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600 dark:text-slate-100">Installation →</div>
+    <div class="mt-1 text-sm text-slate-500 dark:text-slate-400">Install on macOS or Linux in one command</div>
   </a>
-  <a href="/quick-start" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
-    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Quick Start →</div>
-    <div class="mt-1 text-sm text-slate-500">Set up Python and run your first shared session</div>
+  <a href="/quick-start" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-900 dark:hover:border-sky-500">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600 dark:text-slate-100">Quick Start →</div>
+    <div class="mt-1 text-sm text-slate-500 dark:text-slate-400">Set up Python and run your first shared session</div>
   </a>
-  <a href="/guides/repl" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
-    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">REPL Guide →</div>
-    <div class="mt-1 text-sm text-slate-500">Full-featured terminal sessions with shared state</div>
+  <a href="/guides/repl" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-900 dark:hover:border-sky-500">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600 dark:text-slate-100">REPL Guide →</div>
+    <div class="mt-1 text-sm text-slate-500 dark:text-slate-400">Full-featured terminal sessions with shared state</div>
   </a>
-  <a href="/reference/commands" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md">
-    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600">Command Reference →</div>
-    <div class="mt-1 text-sm text-slate-500">Every command, flag, and option</div>
+  <a href="/reference/commands" class="group block rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-sky-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-900 dark:hover:border-sky-500">
+    <div class="text-sm font-semibold text-slate-900 group-hover:text-sky-600 dark:text-slate-100">Command Reference →</div>
+    <div class="mt-1 text-sm text-slate-500 dark:text-slate-400">Every command, flag, and option</div>
   </a>
 </div>

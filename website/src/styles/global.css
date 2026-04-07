@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* ── Dark mode: class-based ────────────────────────────────────── */
+/* Toggle adds/removes .dark on <html>. Tailwind v4 doesn't need
+   a darkMode config — we use plain .dark selectors below. */
+
 :root {
   scroll-padding-top: 96px;
 }
@@ -9,6 +13,10 @@ body {
   @apply bg-slate-50 font-light text-slate-900;
   font-family: "Inter", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+.dark body {
+  @apply bg-slate-950 text-slate-200;
 }
 
 code, pre {
@@ -25,10 +33,22 @@ code, pre {
   }
 }
 
+.dark .site-header {
+  @apply border-slate-800 bg-slate-950/80;
+
+  &.is-scrolled {
+    @apply shadow-md shadow-black/30;
+  }
+}
+
 /* ── Prose overrides ───────────────────────────────────────────── */
 
 .prose {
   @apply font-light;
+}
+
+.dark .prose {
+  @apply text-slate-300;
 }
 
 .prose p {
@@ -54,13 +74,31 @@ code, pre {
   @apply text-slate-500;
 }
 
+.dark .prose :is(h1, h2, h3) {
+  @apply text-slate-100;
+}
+
+.dark .prose h4 {
+  @apply text-slate-400;
+}
+
 .prose strong {
   @apply font-semibold;
+}
+
+.dark .prose strong {
+  @apply text-slate-100;
 }
 
 .prose :is(h1, h2, h3) {
   scroll-margin-top: 120px;
   position: relative;
+}
+
+/* ── Links ─────────────────────────────────────────────────────── */
+
+.dark .prose a {
+  @apply text-sky-400;
 }
 
 /* ── Inline code ───────────────────────────────────────────────── */
@@ -70,6 +108,11 @@ code, .code {
   @apply rounded border border-slate-300 bg-slate-100 px-1 py-0.5 font-mono font-light text-sm;
   color: #64748b;
   white-space: nowrap;
+}
+
+.dark code, .dark .code {
+  @apply border-slate-700 bg-slate-800;
+  color: #94a3b8;
 }
 
 pre code {
@@ -143,14 +186,30 @@ pre code {
   border-radius: 10px !important;
 }
 
+.dark .expressive-code:not(.ec-output) figure:not(.is-terminal) {
+  --ec-codeBg: #1e293b !important;
+  --ec-codeFg: #94a3b8 !important;
+  --ec-brdCol: #334155 !important;
+  --ec-frm-edBg: #1e293b !important;
+}
+
 .expressive-code:not(.ec-output) figure:not(.is-terminal) pre {
   --ec-codeBg: #f1f5f9 !important;
   background: #f1f5f9 !important;
 }
 
+.dark .expressive-code:not(.ec-output) figure:not(.is-terminal) pre {
+  --ec-codeBg: #1e293b !important;
+  background: #1e293b !important;
+}
+
 .expressive-code:not(.ec-output) figure:not(.is-terminal) .ec-line span[style] {
   --0: #64748b !important;
   --0bg: transparent !important;
+}
+
+.dark .expressive-code:not(.ec-output) figure:not(.is-terminal) .ec-line span[style] {
+  --0: #94a3b8 !important;
 }
 
 .expressive-code:not(.ec-output) figure:not(.is-terminal) .copy button {
@@ -163,6 +222,12 @@ pre code {
   border-radius: 6px !important;
 }
 
+.dark .expressive-code:not(.ec-output) figure:not(.is-terminal) .copy button {
+  --ec-frm-inlBtnFg: #94a3b8 !important;
+  --ec-frm-inlBtnBrd: #475569 !important;
+  background: #1e293b !important;
+}
+
 .expressive-code:not(.ec-output) figure:not(.is-terminal) .header {
   display: none !important;
 }
@@ -171,6 +236,22 @@ pre code {
 
 .prose table {
   @apply overflow-hidden rounded-xl border border-slate-200;
+}
+
+.dark .prose table {
+  @apply border-slate-700;
+}
+
+.dark .prose thead {
+  @apply bg-slate-800;
+}
+
+.dark .prose th {
+  @apply text-slate-400;
+}
+
+.dark .prose td {
+  @apply border-slate-700 text-slate-300;
 }
 
 .prose th {
@@ -239,6 +320,10 @@ pre code {
   background: rgba(71, 85, 105, 0.7);
 }
 
+.dark .toc-rail-fill {
+  background: rgba(148, 163, 184, 0.5);
+}
+
 .toc-indicator {
   position: absolute;
   left: -0.5px;
@@ -266,10 +351,39 @@ pre code {
   }
 }
 
+.dark .toc-link {
+  @apply text-slate-500;
+
+  &.is-active {
+    @apply text-slate-200;
+    color: #e2e8f0;
+  }
+}
+
 /* ── Landing title ─────────────────────────────────────────────── */
 
 .landing-title {
   @apply text-6xl font-black tracking-tight text-slate-900 lg:text-7xl;
   letter-spacing: -0.04em;
   line-height: 1.05;
+}
+
+.dark .landing-title {
+  @apply text-white;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────── */
+
+.dark .sidebar-active {
+  @apply bg-slate-800 text-slate-100 outline-slate-600;
+}
+
+/* ── Cards (landing page) ──────────────────────────────────────── */
+
+.dark .card {
+  @apply border-slate-700 bg-slate-900;
+}
+
+.dark .card:hover {
+  @apply border-sky-500;
 }
