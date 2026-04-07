@@ -50,6 +50,15 @@ func ConfigureBackgroundProcess(cmd *exec.Cmd) {
 	}
 }
 
+// HideWindow prevents a child process from opening a visible console
+// window. Safe to use with piped stdin/stdout (unlike DETACHED_PROCESS).
+func HideWindow(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		HideWindow:    true,
+	}
+}
+
 func Interrupt(proc *os.Process) error {
 	if proc == nil {
 		return nil

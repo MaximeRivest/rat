@@ -185,17 +185,17 @@ try {
         `$v = Invoke-Expression '$escapedExpr'
     }
     if (`$null -eq `$v) {
-        '$expr: null'
+        "${expr}: null"
     } else {
         `$kind = `$v.GetType().FullName
         `$text = (`$v | Format-List * | Out-String -Width 160).Trim()
         if ([string]::IsNullOrWhiteSpace(`$text)) {
             `$text = (`$v | Out-String -Width 160).Trim()
         }
-        "$expr: `$kind`n`n`$text"
+        "${expr}: `$kind`n`n`$text"
     }
 } catch {
-    '$expr: not found'
+    "${expr}: not found"
 }
 "@
             $inv = Invoke-InRunspace $code

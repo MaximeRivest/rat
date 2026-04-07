@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -47,7 +48,8 @@ func Run(cfg Config) error {
 		exitCode := RunOnce(cfg)
 
 		// Exit code 2 = Ctrl-Z / explicit quit → straight to shell.
-		if exitCode == 2 {
+		// Any non-zero exit = error → stay in terminal so the user sees the message.
+		if exitCode != 0 {
 			return nil
 		}
 
@@ -167,7 +169,7 @@ func resolvePickerResult(result pickerResult) (*Config, error) {
 // runSharedFrontend tries to launch the shared prompt_toolkit frontend.
 // Returns an error if Python isn't available (caller should fall back).
 func runSharedFrontend(cfg Config) error {
-	python, err := findFrontendPython()
+	python, err := findFrontendPython(cfg.Venv)
 	if err != nil {
 		return err
 	}
@@ -196,10 +198,27 @@ func runSharedFrontend(cfg Config) error {
 	return proc.Run()
 }
 
-func findFrontendPython() (string, error) {
-	for _, candidate := range []string{"python3", "python", "py"} {
+func findFrontendPython(venv string) (string, error) {
+	if venv != "" {
+		path := filepath.Join(venv, "bin", "python")
+		if runtime.GOOS == "windows" {
+			path = filepath.Join(venv, "Scripts", "python.exe")
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	for _, candidate := range []string{"python3", "python"} {
 		path, err := exec.LookPath(candidate)
-		if err == nil {
+		if err == nil && !python.IsWindowsStoreAlias(path) {
+			return path, nil
+		}
+	}
+	if path, err := exec.LookPath("py"); err == nil {
+		return path, nil
+	}
+	if runtime.GOOS == "windows" {
+		if path := python.FindWindowsPython(); path != "" {
 			return path, nil
 		}
 	}

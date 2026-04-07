@@ -135,9 +135,13 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 
 	// Wait for the HTTP endpoint to become ready
+	logPath := filepath.Join(logDir, opts.Name+".log")
 	if err := waitReady(port, StartupMax); err != nil {
-		// Kernel started but isn't responding — leave it running,
-		// user can check logs. Don't remove from state.
+		// Surface the real error from the kernel log if available.
+		tail := readLogTail(logPath, 512)
+		if tail != "" {
+			return &k, fmt.Errorf("%s", strings.TrimSpace(tail))
+		}
 		return &k, fmt.Errorf("kernel started (PID %d) but not responding on :%d: %w", k.PID, port, err)
 	}
 
@@ -304,4 +308,28 @@ func readBody(resp *http.Response) ([]byte, error) {
 	buf := make([]byte, 4096)
 	n, _ := resp.Body.Read(buf)
 	return buf[:n], nil
+}
+
+// readLogTail reads the last n bytes of a log file.
+func readLogTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+	size := info.Size()
+	readN := int64(n)
+	if readN > size {
+		readN = size
+	}
+	buf := make([]byte, readN)
+	_, err = f.ReadAt(buf, size-readN)
+	if err != nil {
+		return ""
+	}
+	return string(buf)
 }

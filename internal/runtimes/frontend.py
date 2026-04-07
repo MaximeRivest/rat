@@ -89,7 +89,7 @@ def _mcp_notify(url, method, params=None):
 def _make_client_name(lang):
     try:
         tty = os.path.basename(os.ttyname(sys.stdin.fileno()))
-    except OSError:
+    except (OSError, AttributeError):
         tty = f"pid-{os.getpid()}"
     return f"rat-{lang}-repl@{tty}"
 
@@ -364,7 +364,8 @@ def main():
     def _sigtstp_handler(signum, frame):
         print(f"\nDetached. Kernel still running. Reconnect: rat {args.name}")
         sys.exit(2)
-    _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
+    if hasattr(_signal, 'SIGTSTP'):
+        _signal.signal(_signal.SIGTSTP, _sigtstp_handler)
 
     # Connect to kernel.
     client_name = _make_client_name(lang)

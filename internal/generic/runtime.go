@@ -29,6 +29,7 @@ import (
 
 	"github.com/maximerivest/rat/internal/cachedir"
 	"github.com/maximerivest/rat/internal/kernel"
+	"github.com/maximerivest/rat/internal/procutil"
 )
 
 // RuntimeConfig is the runtime.yaml schema.
@@ -675,6 +676,7 @@ func (k *Kernel) ensureStarted() error {
 	cmd := exec.Command(k.binaryPath, args...)
 	cmd.Dir = k.cwd
 	cmd.Env = append([]string{}, os.Environ()...)
+	procutil.HideWindow(cmd)
 	for key, value := range k.extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}

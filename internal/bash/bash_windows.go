@@ -294,6 +294,7 @@ func (b *Bash) ensureStartedLocked() error {
 	cmd := exec.Command(b.cmdPath, args...)
 	cmd.Dir = b.cwd
 	cmd.Env = os.Environ()
+	procutil.HideWindow(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -414,7 +415,9 @@ func detectPowerShellCommand() (string, []string, error) {
 
 func detectPowerShellVersion(cmdPath string, cmdArgs []string) string {
 	args := append(append([]string{}, cmdArgs[:len(cmdArgs)-1]...), "-Command", "$PSVersionTable.PSVersion.ToString()")
-	out, err := exec.Command(cmdPath, args...).Output()
+	cmd := exec.Command(cmdPath, args...)
+	procutil.HideWindow(cmd)
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

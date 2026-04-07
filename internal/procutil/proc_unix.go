@@ -34,6 +34,9 @@ func ConfigureBackgroundProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
+// HideWindow is a no-op on non-Windows platforms.
+func HideWindow(cmd *exec.Cmd) {}
+
 func Interrupt(proc *os.Process) error {
 	if proc == nil {
 		return nil

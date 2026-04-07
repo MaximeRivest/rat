@@ -608,12 +608,9 @@ func renderPicker(grid *pickerGrid, curRow, curCol int, projects []ProjectInfo, 
 	// Fixed column for right-aligned legend.
 	const legendCol = 50
 
-	totalLines := pickerTotalLines(grid)
-
-	if !first {
-		fmt.Fprintf(os.Stdout, "\033[%dA\r", totalLines)
-	}
-	fmt.Fprint(os.Stdout, "\033[J")
+	// Move to top-left and clear. Using absolute positioning is robust
+	// against line-wrapping on narrow terminals (especially Windows).
+	fmt.Fprint(os.Stdout, "\033[H\033[J")
 
 	// Header.
 	projName := ""
@@ -729,9 +726,7 @@ func renderPicker(grid *pickerGrid, curRow, curCol int, projects []ProjectInfo, 
 }
 
 func clearPickerArea(grid *pickerGrid) {
-	totalLines := pickerTotalLines(grid)
-	fmt.Fprintf(os.Stdout, "\033[%dA\r", totalLines)
-	fmt.Fprint(os.Stdout, "\033[J")
+	fmt.Fprint(os.Stdout, "\033[H\033[J")
 }
 
 // DiscoverPickerItems builds the picker grid from running and stopped kernels.

@@ -15,6 +15,7 @@ const (
 	reset  = "\033[0m"
 	bold   = "\033[1m"
 	dim    = "\033[2m"
+	red    = "\033[31m"
 	green  = "\033[32m"
 	yellow = "\033[33m"
 	cyan   = "\033[36m"
@@ -24,7 +25,11 @@ var enabled bool
 
 func init() {
 	_, noColor := os.LookupEnv("NO_COLOR")
-	enabled = !noColor && term.IsTerminal(int(os.Stdout.Fd()))
+	isTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	if isTTY {
+		enableVT() // Windows: enable ANSI escape processing
+	}
+	enabled = !noColor && isTTY
 }
 
 func style(code, s string) string {
@@ -48,6 +53,9 @@ func Green(s string) string { return style(green, s) }
 
 // Yellow for warnings (idle).
 func Yellow(s string) string { return style(yellow, s) }
+
+// Red for errors.
+func Red(s string) string { return style(red, s) }
 
 // Cyan for links/URLs.
 func Cyan(s string) string { return style(cyan, s) }
