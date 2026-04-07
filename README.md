@@ -1,5 +1,9 @@
 # rat
 
+[![Docs](https://img.shields.io/badge/docs-runanything.dev-blue)](https://runanything.dev)
+[![Release](https://img.shields.io/github/v/release/MaximeRivest/rat)](https://github.com/MaximeRivest/rat/releases/latest)
+[![License](https://img.shields.io/github/license/MaximeRivest/rat)](LICENSE)
+
 **Run AnyThing.** One binary. Every REPL language. Every client shares one namespace.
 
 ```bash
@@ -349,6 +353,7 @@ More via [custom runtimes](docs/custom-runtimes.md). Julia and Node.js are in pr
 
 ## Links
 
+- [**Documentation**](https://runanything.dev) — full guides and reference
 - [Kernel protocol](KERNEL-PROTOCOL.md)
 - [Custom runtimes](docs/custom-runtimes.md)
 - [VS Code extension](vscode-rat/)
