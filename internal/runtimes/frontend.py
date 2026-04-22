@@ -337,7 +337,16 @@ def _format_event(entry):
         return f"{_BAR}▍\033[2m[{event_type}] {text}\033[0m\n"
 
 
-def _format_activity(entries, own_client=""):
+def _cap_lines(lines, limit):
+    """Cap a list of lines to `limit`. 0 means unlimited.
+    Returns (capped_lines, dropped_count)."""
+    if limit <= 0 or len(lines) <= limit:
+        return lines, 0
+    return lines[:limit], len(lines) - limit
+
+
+def _format_activity(entries, own_client="", max_code=0, max_output=100):
+    """Format activity entries. max_code / max_output = 0 means unlimited."""
     lines = []
     for e in entries:
         # Kernel-pushed events (message, alert, etc.)
@@ -351,19 +360,29 @@ def _format_activity(entries, own_client=""):
         mark = "✓" if ok else "✗"
         mark_color = _LABEL if ok else _ERR_DIM
         label = _activity_label(e, own_client)
-        code_lines = [cl for cl in code.split("\n") if cl.strip()][:6]
-        out_lines = [ol for ol in output.split("\n") if ol.strip()][:6]
+        raw_code = [cl for cl in code.split("\n") if cl.strip()]
+        raw_out = [ol for ol in output.split("\n") if ol.strip()]
+        code_lines, code_dropped = _cap_lines(raw_code, max_code)
+        out_lines, out_dropped = _cap_lines(raw_out, max_output)
         lines.append(f"{_BAR}▍{mark_color} {label} {mark}{_R}")
         for cl in code_lines:
             lines.append(f"{_BAR}▍ {_CODE}{cl}{_R}")
+        if code_dropped:
+            lines.append(f"{_BAR}▍ {_CODE}… {code_dropped} more lines{_R}")
         if out_lines:
             for ol in out_lines:
                 lines.append(f"{_BAR}▍  {_OUTPUT}{ol}{_R}")
+            if out_dropped:
+                lines.append(f"{_BAR}▍  {_OUTPUT}… {out_dropped} more lines{_R}")
+        elif out_dropped:
+            lines.append(f"{_BAR}▍  {_OUTPUT}… {out_dropped} more lines{_R}")
         lines.append("")
     return "\n".join(lines)
 
 
-def _read_recent_activity(path, limit=10):
+def _read_activity_entries(path, limit=0):
+    """Return every entry in the activity log (most-recent last).
+    limit=0 means no cap."""
     if not path:
         return []
     try:
@@ -371,8 +390,10 @@ def _read_recent_activity(path, limit=10):
             lines = f.readlines()
     except (FileNotFoundError, OSError):
         return []
+    if limit > 0 and len(lines) > limit:
+        lines = lines[-limit:]
     entries = []
-    for line in lines[-limit:]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -383,6 +404,10 @@ def _read_recent_activity(path, limit=10):
     return entries
 
 
+def _read_recent_activity(path, limit=10):
+    return _read_activity_entries(path, limit=limit)
+
+
 # ── prompt_toolkit REPL ──────────────────────────────────────
 
 def main():
@@ -391,6 +416,14 @@ def main():
     parser.add_argument("--name", default="kernel", help="Kernel name")
     parser.add_argument("--lang", default="", help="Language (r, jl, js, ...)")
     parser.add_argument("--activity-log", default=None, help="Activity log path")
+    parser.add_argument("--activity-max-code-lines", type=int, default=0,
+                        help="Max code lines per activity entry (0 = unlimited)")
+    parser.add_argument("--activity-max-output-lines", type=int, default=100,
+                        help="Max output lines per activity entry (0 = unlimited)")
+    parser.add_argument("--history-seed-limit", type=int, default=0,
+                        help="Max entries to seed from activity.jsonl (0 = unlimited)")
+    parser.add_argument("--no-history-seed", action="store_true",
+                        help="Do not seed history from the runtime activity log")
     args = parser.parse_args()
 
     lang = args.lang
@@ -651,14 +684,37 @@ def main():
 
     # ── History ──────────────────────────────────────────────
 
-    hist_dir = os.path.join(
-        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
-        "rat", "kernels", args.name,
-    )
+    # Use $HOME/.cache explicitly to match the Go side's cachedir
+    # package — snap/flatpak set XDG_CACHE_HOME to a sandbox path
+    # the kernel daemon never sees, so XDG_CACHE_HOME here would
+    # split history from activity.jsonl into two different dirs.
+    cache_home = os.path.join(os.path.expanduser("~"), ".cache")
+    hist_dir = os.path.join(cache_home, "rat", "kernels", args.name)
     os.makedirs(hist_dir, exist_ok=True)
     hist_file = os.path.join(hist_dir, f"{lang}-history")
-    replay_recent_activity = os.path.exists(hist_file) and os.path.getsize(hist_file) > 0
     history = FileHistory(hist_file)
+
+    # Seed history from the kernel's full activity log so up-arrow
+    # cycles through every execution in this runtime (not only the
+    # ones typed locally). Dedupe consecutive duplicates.
+    history_seed_from_runtime = not args.no_history_seed
+    if history_seed_from_runtime and args.activity_log:
+        seed_entries = _read_activity_entries(args.activity_log,
+                                              limit=args.history_seed_limit)
+        try:
+            existing = list(history.get_strings())
+        except Exception:
+            existing = []
+        last = existing[-1] if existing else None
+        for e in seed_entries:
+            code = e.get("code", "").strip()
+            if not code or code == last:
+                continue
+            try:
+                history.store_string(code)
+                last = code
+            except Exception:
+                pass
 
     # ── Session ──────────────────────────────────────────────
 
@@ -712,19 +768,29 @@ def main():
 
     buffer = ""
     stop = threading.Event()
+    max_code = args.activity_max_code_lines
+    max_output = args.activity_max_output_lines
     try:
         with patch_stdout():
-            if replay_recent_activity:
-                recent_entries = _read_recent_activity(args.activity_log)
-                if recent_entries:
-                    ptk_print(ANSI(_format_activity(recent_entries, client_name)))
+            # Show a recap of the most recent activity on reconnect.
+            # Cap at 10 so we don't flood the screen even with
+            # unlimited per-entry display.
+            recent_entries = _read_recent_activity(args.activity_log, limit=10)
+            if recent_entries:
+                ptk_print(ANSI(_format_activity(
+                    recent_entries, client_name,
+                    max_code=max_code, max_output=max_output,
+                )))
             activity.seek_to_end()
 
             def watcher():
                 while not stop.wait(0.5):
                     entries = activity.check()
                     if entries:
-                        ptk_print(ANSI(_format_activity(entries, client_name)))
+                        ptk_print(ANSI(_format_activity(
+                            entries, client_name,
+                            max_code=max_code, max_output=max_output,
+                        )))
 
             thread = threading.Thread(target=watcher, daemon=True)
             thread.start()

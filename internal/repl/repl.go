@@ -14,12 +14,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/maximerivest/rat/internal/bash"
 	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/python"
 	"github.com/maximerivest/rat/internal/runtimes"
+	"github.com/maximerivest/rat/internal/userconfig"
 )
 
 // Config for the REPL session.
@@ -180,11 +182,18 @@ func runSharedFrontend(cfg Config) error {
 	}
 
 	mcpURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Port)
+	uc := userconfig.Resolve(cfg.Lang)
 	args := []string{
 		frontendPath,
 		"--server", mcpURL,
 		"--name", cfg.Name,
 		"--lang", cfg.Lang,
+		"--activity-max-code-lines", strconv.Itoa(uc.Activity.MaxCodeLines),
+		"--activity-max-output-lines", strconv.Itoa(uc.Activity.MaxOutputLines),
+		"--history-seed-limit", strconv.Itoa(uc.History.SeedLimit),
+	}
+	if !uc.History.SeedFromRuntime {
+		args = append(args, "--no-history-seed")
 	}
 	if cfg.ActivityLog != "" {
 		args = append(args, "--activity-log", cfg.ActivityLog)

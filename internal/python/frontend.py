@@ -248,8 +248,17 @@ def _activity_label(entry, own_client=""):
 
 
 
-def _format_activity(entries, own_client=""):
-    """Format activity entries for display in the REPL."""
+def _cap_lines(lines, limit):
+    """Cap a list of lines to `limit`. 0 means unlimited.
+    Returns (capped_lines, dropped_count)."""
+    if limit <= 0 or len(lines) <= limit:
+        return lines, 0
+    return lines[:limit], len(lines) - limit
+
+
+def _format_activity(entries, own_client="", max_code=0, max_output=100):
+    """Format activity entries for display in the REPL.
+    max_code=0 / max_output=0 mean unlimited."""
     lines = []
     for e in entries:
         code = e.get("code", "")
@@ -259,24 +268,34 @@ def _format_activity(entries, own_client=""):
         mark_color = _LABEL if ok else _ERR_DIM
         label = _activity_label(e, own_client)
 
-        # Filter blank code lines.
-        code_lines = [cl for cl in code.split("\n") if cl.strip()][:6]
-        out_lines = [ol for ol in output.split("\n") if ol.strip()][:6]
+        # Filter blank code/output lines then cap.
+        raw_code = [cl for cl in code.split("\n") if cl.strip()]
+        raw_out = [ol for ol in output.split("\n") if ol.strip()]
+        code_lines, code_dropped = _cap_lines(raw_code, max_code)
+        out_lines, out_dropped = _cap_lines(raw_out, max_output)
 
         # Header: thin bar + label.
         lines.append(f"{_BAR}\u258d{mark_color} {label} {mark}{_R}")
         for cl in code_lines:
             lines.append(f"{_BAR}\u258d {_CODE}{cl}{_R}")
+        if code_dropped:
+            lines.append(f"{_BAR}\u258d {_CODE}… {code_dropped} more lines{_R}")
         if out_lines:
             for ol in out_lines:
                 lines.append(f"{_BAR}\u258d  {_OUTPUT}{ol}{_R}")
+            if out_dropped:
+                lines.append(f"{_BAR}\u258d  {_OUTPUT}… {out_dropped} more lines{_R}")
+        elif out_dropped:
+            lines.append(f"{_BAR}\u258d  {_OUTPUT}… {out_dropped} more lines{_R}")
         lines.append("")  # blank line between entries
     return "\n".join(lines)
 
 
 # ── IPython shell with MCP backend ──────────────────────────
 
-def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv="", py_version="", client_name="", replay_recent_activity=False):
+def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv="", py_version="", client_name="",
+                activity_max_code_lines=0, activity_max_output_lines=100,
+                history_seed_from_runtime=True, history_seed_limit=0):
     """Create an IPython shell class that routes execution to MCP."""
     from IPython.terminal.interactiveshell import TerminalInteractiveShell
     from IPython.core.interactiveshell import ExecutionResult
@@ -294,7 +313,10 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             self._venv = _os.path.basename(venv) if venv else ''
             self._mcp_ok = False
             self._client_name = client_name
-            self._replay_recent_activity = replay_recent_activity
+            self._activity_max_code = activity_max_code_lines
+            self._activity_max_output = activity_max_output_lines
+            self._history_seed_from_runtime = history_seed_from_runtime
+            self._history_seed_limit = history_seed_limit
             self._activity = ActivityWatcher(activity_log)
             self._activity.seek_to_end()  # will be rewound in interact()
             self._rat_var_count = 0
@@ -316,17 +338,25 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             stop = threading.Event()
             try:
                 with patch_stdout():
-                    if self._replay_recent_activity:
-                        self._show_recent_activity(ptk_print, ANSI)
-                    else:
-                        self._activity.seek_to_end()
+                    # Always seed history from the runtime activity log
+                    # so up-arrow cycles through every execution in this
+                    # kernel, not just the ones typed here.
+                    if self._history_seed_from_runtime:
+                        self._seed_history_from_log()
+                    # Advance the watcher cursor to end-of-file so we
+                    # only print *new* activity from now on.
+                    self._activity.seek_to_end()
 
                     def watcher():
                         while not stop.wait(0.5):
                             try:
                                 entries = self._activity.check()
                                 if entries:
-                                    ptk_print(ANSI(_format_activity(entries, self._client_name)))
+                                    ptk_print(ANSI(_format_activity(
+                                        entries, self._client_name,
+                                        max_code=self._activity_max_code,
+                                        max_output=self._activity_max_output,
+                                    )))
                                     # Refresh var count after remote activity.
                                     self._refresh_var_count()
                                     # Seed remote code into prompt_toolkit's
@@ -343,19 +373,78 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             finally:
                 stop.set()
 
+        # Virtual SQLite session id for remote-seeded history.
+        #
+        # PtkHistoryAdapter.load_history_strings() pulls rows from
+        # (current session) + (other sessions ordered by session DESC).
+        # Real IPython sessions autoincrement from 1, so a large
+        # positive id is guaranteed not to collide AND sorts before
+        # every real session — which means seeded entries appear as
+        # the most-recent "other session", i.e. right at the top of
+        # up-arrow recall. That's what the user wants: remote
+        # activity from VS Code / Claude / scripts should be the
+        # first thing up-arrow hands back.
+        _RAT_SEED_SESSION = 2_000_000_000
+
         def _seed_history(self, entries):
-            """Add remote code to prompt_toolkit history for up-arrow."""
+            """Seed remote code into IPython's SQLite history.
+
+            ``PtkHistoryAdapter.store_string`` is a no-op in IPython
+            (the adapter reads exclusively from ``history_manager``'s
+            SQLite DB), so we write directly to the DB under a
+            virtual session id. After writing we invalidate the
+            adapter cache so the next up-arrow press reloads.
+            """
+            hm = getattr(self, "history_manager", None)
+            if hm is None or not getattr(hm, "db", None):
+                return
+            db = hm.db
+            # Find the last seeded line number (to continue appending)
+            # and load every code string already in this session so we
+            # can dedupe against the whole seed history, not just the
+            # tail. This makes reconnecting idempotent.
+            try:
+                cur = db.execute(
+                    "SELECT line, source_raw FROM history "
+                    "WHERE session = ? ORDER BY line",
+                    (self._RAT_SEED_SESSION,),
+                )
+                existing = cur.fetchall()
+            except Exception:
+                existing = []
+            seen = {row[1].rstrip() for row in existing}
+            next_line = (existing[-1][0] + 1) if existing else 1
+            last_stored = existing[-1][1].rstrip() if existing else None
+            rows = []
             for e in entries:
                 code = e.get("code", "").strip()
-                if code and self.pt_app:
-                    try:
-                        self.pt_app.history.store_string(code)
-                    except Exception:
-                        pass
+                if not code or code == last_stored or code in seen:
+                    continue
+                rows.append((self._RAT_SEED_SESSION, next_line, code, code))
+                seen.add(code)
+                last_stored = code
+                next_line += 1
+            if not rows:
+                return
+            try:
+                with db:
+                    db.executemany(
+                        "INSERT OR IGNORE INTO history "
+                        "(session, line, source, source_raw) VALUES (?, ?, ?, ?)",
+                        rows,
+                    )
+            except Exception:
+                return
+            if self.pt_app and hasattr(self.pt_app.history, "_loaded"):
+                try:
+                    self.pt_app.history._loaded = False
+                    self.pt_app.history._refresh()
+                except Exception:
+                    pass
 
-        def _show_recent_activity(self, ptk_print, ANSI):
-            """On connect, show the last few activity entries and
-            seed them into history so up-arrow has context."""
+        def _seed_history_from_log(self):
+            """Seed every code string from the activity log into history.
+            Respects history_seed_limit (0 = unlimited)."""
             path = self._activity.path
             if not path:
                 return
@@ -364,9 +453,8 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                     lines = f.readlines()
             except (FileNotFoundError, OSError):
                 return
-            # Parse last N entries.
             entries = []
-            for line in lines[-10:]:
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
@@ -374,11 +462,10 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                     entries.append(json.loads(line))
                 except (json.JSONDecodeError, ValueError):
                     continue
+            if self._history_seed_limit > 0 and len(entries) > self._history_seed_limit:
+                entries = entries[-self._history_seed_limit:]
             if entries:
-                ptk_print(ANSI(_format_activity(entries, self._client_name)))
                 self._seed_history(entries)
-            # Now seek to end so the watcher only sees new stuff.
-            self._activity.seek_to_end()
 
         def _refresh_var_count(self):
             """Quick look call to get current var count from kernel."""
@@ -468,6 +555,76 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                 r = _mcp_init(self._server, self._client_name)
                 self._mcp_ok = "_error" not in r
 
+        def _rat_debug_dump(self, cmd):
+            """Print frontend-local diagnostic info to stdout.
+
+            Used for debugging the history-seeding pipeline: you
+            type ``:ratdebug`` in the REPL and see exactly what the
+            frontend's IPython shell, SQLite DB, and pt_app.history
+            hold — none of which can be inspected by running code
+            through the kernel.
+            """
+            import sqlite3
+            parts = cmd.split()
+            out_lines = []
+            def p(msg=""):
+                out_lines.append(str(msg))
+            p("=== rat frontend debug ===")
+            p(f"frontend PID: {os.getpid()}")
+            p(f"shell class: {type(self).__name__}")
+            p(f"activity log: {self._activity.path}")
+            p(f"history_seed_from_runtime: {self._history_seed_from_runtime}")
+            p(f"history_seed_limit: {self._history_seed_limit}")
+            hm = getattr(self, "history_manager", None)
+            p(f"history_manager: {hm!r}")
+            if hm is not None:
+                p(f"hist_file: {hm.hist_file}")
+                p(f"session_number: {hm.session_number}")
+                try:
+                    rows = list(hm.db.execute(
+                        "SELECT session, line, substr(source_raw,1,80) "
+                        "FROM history ORDER BY session, line"))
+                    p(f"SQLite rows: {len(rows)}")
+                    for s, l, c in rows[:50]:
+                        p(f"  sess={s:>12} line={l}: {c!r}")
+                    if len(rows) > 50:
+                        p(f"  ... {len(rows) - 50} more")
+                except Exception as exc:
+                    p(f"SQLite error: {exc}")
+            pa = self.pt_app
+            p(f"pt_app: {pa!r}")
+            if pa is not None:
+                h = pa.history
+                p(f"pt_app.history type: {type(h).__name__}")
+                p(f"pt_app.history module: {type(h).__module__}")
+                p(f"pt_app.history id: {id(h)}")
+                p(f"pt_app.history._loaded: {getattr(h, '_loaded', '?')}")
+                try:
+                    if hasattr(h, '_refresh'):
+                        h._loaded = False
+                        h._refresh()
+                    strings = list(h.get_strings())
+                    p(f"pt_app.history strings: {len(strings)}")
+                    tail = strings[-15:] if len(strings) > 15 else strings
+                    for i, s in enumerate(tail):
+                        idx = len(strings) - len(tail) + i
+                        p(f"  [{idx}] {s[:80]!r}")
+                except Exception as exc:
+                    p(f"pt_app.history error: {exc}")
+            text = "\n".join(out_lines)
+            print(text)
+            # Also write to a file for async inspection.
+            if len(parts) > 1:
+                path = parts[1]
+            else:
+                path = "/tmp/rat-debug.txt"
+            try:
+                with open(path, "w") as f:
+                    f.write(text + "\n")
+                print(f"\n[debug written to {path}]")
+            except Exception as exc:
+                print(f"[could not write {path}: {exc}]")
+
         def _patch_completer(self):
             """Replace IPython's completer with one backed by the shared kernel."""
             from IPython.core.completer import Completion
@@ -528,6 +685,16 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             # Exit locally
             if raw_cell in ("exit", "exit()", "quit", "quit()"):
                 self.ask_exit()
+                return ExecutionResult(None)
+
+            # Local debug escape hatch — kept intentionally.
+            # ``:ratdebug [path]`` prints the frontend-side shell
+            # state, SQLite history, and prompt_toolkit history
+            # buffer. Runs inside the frontend process, never
+            # touches the kernel, never lands in user history.
+            # Documented in docs/config.md.
+            if raw_cell.startswith(":ratdebug"):
+                self._rat_debug_dump(raw_cell)
                 return ExecutionResult(None)
 
             # Shell escapes stay local (user's terminal)
@@ -620,6 +787,14 @@ def main():
                         help="Virtual environment path")
     parser.add_argument("--python-version", default="",
                         help="Python version string")
+    parser.add_argument("--activity-max-code-lines", type=int, default=0,
+                        help="Max code lines per activity entry (0 = unlimited)")
+    parser.add_argument("--activity-max-output-lines", type=int, default=100,
+                        help="Max output lines per activity entry (0 = unlimited)")
+    parser.add_argument("--history-seed-limit", type=int, default=0,
+                        help="Max entries to seed from activity.jsonl (0 = unlimited)")
+    parser.add_argument("--no-history-seed", action="store_true",
+                        help="Do not seed history from the runtime activity log")
     args = parser.parse_args()
 
     # Ctrl+Z detaches with exit code 2 → Go repl returns to shell.
@@ -661,17 +836,25 @@ def main():
 
     # Use a per-kernel IPython profile so history is isolated
     # from other kernels and normal IPython sessions.
+    #
+    # Use $HOME/.cache explicitly to match the Go side's cachedir
+    # package — snap/flatpak set XDG_CACHE_HOME to a sandbox path
+    # that the Go kernel daemon never sees, so deriving the path
+    # from XDG_CACHE_HOME here would split the IPython profile
+    # from activity.jsonl into two different directories.
+    cache_home = os.path.join(os.path.expanduser("~"), ".cache")
     profile_dir = os.path.join(
-        os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
-        "rat", "kernels", args.name, "ipython-profile",
+        cache_home, "rat", "kernels", args.name, "ipython-profile",
     )
     hist_file = os.path.join(profile_dir, 'history.sqlite')
-    replay_recent_activity = os.path.exists(hist_file) and os.path.getsize(hist_file) > 0
     Shell = _make_shell(args.server, kernel_name=args.name,
                         activity_log=args.activity_log, cwd=args.cwd,
                         venv=args.venv, py_version=py_version,
                         client_name=client_name,
-                        replay_recent_activity=replay_recent_activity)
+                        activity_max_code_lines=args.activity_max_code_lines,
+                        activity_max_output_lines=args.activity_max_output_lines,
+                        history_seed_from_runtime=not args.no_history_seed,
+                        history_seed_limit=args.history_seed_limit)
     os.makedirs(profile_dir, exist_ok=True)
 
     app = TerminalIPythonApp.instance()

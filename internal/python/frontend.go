@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"github.com/maximerivest/rat/internal/cachedir"
+	"github.com/maximerivest/rat/internal/userconfig"
 )
 
 //go:embed frontend.py
@@ -41,6 +43,7 @@ func RunFrontend(name string, port int, cwd string, venv string, pyVersion strin
 	activityPath := filepath.Join(kdir, "activity.jsonl")
 
 	serverURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
+	uc := userconfig.Resolve("py")
 	args := append(append([]string{}, cmdArgs...), scriptPath,
 		"--server", serverURL,
 		"--name", name,
@@ -48,7 +51,13 @@ func RunFrontend(name string, port int, cwd string, venv string, pyVersion strin
 		"--cwd", cwd,
 		"--venv", venv,
 		"--python-version", pyVersion,
+		"--activity-max-code-lines", strconv.Itoa(uc.Activity.MaxCodeLines),
+		"--activity-max-output-lines", strconv.Itoa(uc.Activity.MaxOutputLines),
+		"--history-seed-limit", strconv.Itoa(uc.History.SeedLimit),
 	)
+	if !uc.History.SeedFromRuntime {
+		args = append(args, "--no-history-seed")
+	}
 
 	ignoreSuspendSignal()
 

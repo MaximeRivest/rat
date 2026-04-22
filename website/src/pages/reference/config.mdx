@@ -1,0 +1,101 @@
+---
+layout: ../../layouts/DocsLayout.astro
+title: Config
+description: Hierarchical user preferences for every rat REPL.
+---
+
+# Config
+
+`rat` reads user preferences from a single optional YAML file. It
+controls REPL presentation and history behaviour for every
+language — Python, R, Julia, Bash, and generic runtimes all share
+the same schema.
+
+## Location
+
+The file lives in the OS-native config directory:
+
+| OS                | Path                                        |
+|-------------------|---------------------------------------------|
+| Linux / BSD       | `~/.config/rat/config.yaml`                 |
+| macOS             | `~/Library/Application Support/rat/config.yaml` |
+| Windows           | `%AppData%\rat\config.yaml`                 |
+
+The file is optional. If it's missing, every setting falls back to
+its built-in default. Rat re-reads it every time a REPL launches, so
+no restart is needed after an edit.
+
+## Shape
+
+Two levels of granularity:
+
+- The top-level `repl:` block sets defaults that apply to **every
+  language**.
+- Optional per-language sections (`py`, `r`, `jl`, `js`, `sh`, or
+  the long forms `python`, `julia`, `bash`, `shell`) override the
+  defaults for that language only. Canonical names win over long
+  forms when both are present.
+
+```yaml frame="code" title="~/.config/rat/config.yaml"
+# Defaults for every rat REPL.
+repl:
+  activity:
+    # How many code lines to show per "activity" entry when another
+    # client runs code. 0 = unlimited.
+    max_code_lines: 0
+    # How many output lines to show. 0 = unlimited.
+    max_output_lines: 100
+  history:
+    # When true, up-arrow cycles through every execution in the
+    # kernel (not just the ones typed in the current REPL). The REPL
+    # seeds its history from ~/.cache/rat/kernels/<name>/activity.jsonl
+    # at startup.
+    seed_from_runtime: true
+    # Max entries to seed from the activity log. 0 = unlimited.
+    seed_limit: 0
+
+# Per-language overrides — only the fields you list take effect, the
+# rest inherit from the `repl:` block above.
+py:
+  activity:
+    max_output_lines: 200   # show more output for Python specifically
+
+r:
+  history:
+    seed_from_runtime: false
+```
+
+## Defaults
+
+| Field                         | Default         | Meaning |
+|-------------------------------|-----------------|---------|
+| `activity.max_code_lines`     | `0` (unlimited) | Code-line cap for remote activity banners. |
+| `activity.max_output_lines`   | `100`           | Output-line cap for remote activity banners. |
+| `history.seed_from_runtime`   | `true`          | Up-arrow sees every execution in the kernel, not just locally typed lines. |
+| `history.seed_limit`          | `0` (unlimited) | Cap on how many activity entries are seeded at startup. |
+
+## Notes
+
+- **Missing / malformed file**: rat prints one warning to stderr and
+  continues with defaults. A broken config never prevents a REPL
+  from launching.
+- **Zero = unlimited** everywhere a count is involved. This is
+  intentional so you can set it and forget it.
+- **Per-language overrides are partial**: you only need to list the
+  fields you want to change. Everything else inherits from `repl:`.
+- **Language aliases**: `python`, `julia`, `bash`, `shell` are
+  accepted as shorthand for `py`, `jl`, `sh`, `sh`. If you write
+  both `py:` and `python:`, the canonical `py:` section takes
+  precedence.
+
+## Debug escape hatch
+
+Inside any `rat py` REPL, typing `:ratdebug` dumps the
+frontend-side state: which IPython shell is running, what's in the
+per-kernel SQLite history, and what prompt_toolkit's up-arrow
+buffer currently holds. The dump is also written to
+`/tmp/rat-debug.txt` (override with `:ratdebug /path/to/file`).
+
+Use it when history seeding, completions, or toolbar state look
+wrong. The command runs locally in the frontend process, never
+touches the kernel, and is not saved to user history.
