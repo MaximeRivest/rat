@@ -408,6 +408,151 @@ class ActivityWatcher:
                 pass
 
 
+# ── Event subscriber (live fanout from the MCP server) ──────
+
+class EventSubscriber:
+    """Opens a persistent GET /mcp SSE subscription and dispatches
+    ``rat/event`` notifications to a callback.
+
+    Events are emitted by the Go event bus for every run on the
+    kernel, regardless of which client triggered it. This is how the
+    REPL sees VS Code / Claude / other terminals' code streaming in
+    real time.
+
+    Implementation notes:
+      - A socket read timeout of _IDLE_SOCK_TIMEOUT keeps ``readline``
+        from blocking forever, so ``stop()`` can be observed within a
+        bounded window.
+      - ``stop()`` shuts down the underlying socket so a pending
+        ``readline`` returns immediately. On platforms where that
+        isn't enough, the socket timeout eventually fires.
+      - The thread is daemon, so Python exits cleanly even if a
+        subscriber is still running.
+    """
+
+    _IDLE_SOCK_TIMEOUT = 15.0  # seconds
+
+    def __init__(self, url, session_id, on_event, on_stop=None):
+        self._url = url
+        self._session_id = session_id
+        self._on_event = on_event
+        self._on_stop = on_stop
+        self._stop = threading.Event()
+        self._thread = None
+        self._conn = None
+        self._conn_lock = threading.Lock()
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self, join_timeout=2.0):
+        self._stop.set()
+        # Close the live socket so a pending readline returns ASAP.
+        with self._conn_lock:
+            conn = self._conn
+            self._conn = None
+        if conn is not None:
+            try:
+                sock = getattr(conn, "sock", None)
+                if sock is not None:
+                    import socket as _sock
+                    try:
+                        sock.shutdown(_sock.SHUT_RDWR)
+                    except OSError:
+                        pass
+                conn.close()
+            except Exception:
+                pass
+        if self._thread is not None and join_timeout is not None:
+            self._thread.join(timeout=join_timeout)
+
+    def _run(self):
+        # Dropped subscription? Retry with exponential backoff so
+        # live events resume after a server hiccup.
+        backoff = 0.5
+        while not self._stop.is_set():
+            try:
+                self._listen_once()
+                backoff = 0.5
+            except Exception:
+                if self._stop.is_set():
+                    return
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
+        if callable(self._on_stop):
+            try:
+                self._on_stop()
+            except Exception:
+                pass
+
+    def _listen_once(self):
+        parsed = urllib.parse.urlparse(self._url)
+        conn = http.client.HTTPConnection(
+            parsed.hostname, parsed.port,
+            timeout=self._IDLE_SOCK_TIMEOUT,
+        )
+        with self._conn_lock:
+            if self._stop.is_set():
+                try: conn.close()
+                except Exception: pass
+                return
+            self._conn = conn
+        try:
+            headers = {
+                "Accept": "text/event-stream",
+                "Mcp-Session-Id": self._session_id,
+            }
+            conn.request("GET", parsed.path, None, headers)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                try: resp.read()
+                except Exception: pass
+                return
+            buf = []
+            while not self._stop.is_set():
+                try:
+                    line = resp.fp.readline()
+                except (TimeoutError, OSError):
+                    # Either the socket timeout fired or stop()
+                    # shut the socket down. Loop to re-check _stop.
+                    if self._stop.is_set():
+                        return
+                    continue
+                if not line:
+                    return  # server closed the stream; _run will retry
+                line = line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line == "":
+                    data = "\n".join(s[6:] for s in buf if s.startswith("data: "))
+                    buf = []
+                    if not data:
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("method") == "rat/event":
+                        try:
+                            self._on_event(obj.get("params") or {})
+                        except Exception:
+                            pass
+                else:
+                    buf.append(line)
+        finally:
+            with self._conn_lock:
+                if self._conn is conn:
+                    self._conn = None
+            try: conn.close()
+            except Exception: pass
+
+
+# ── Missing stdlib shim (http stream needs time) ────────────
+
+import time  # noqa: E402 (intentionally late, only for the subscriber)
+
+
 # Activity colors — use ANSI 16 colors so terminal themes control readability.
 _BAR     = "\033[2;35m"   # dim magenta for the border
 _LABEL   = "\033[2;37m"   # dim white for the label
@@ -418,7 +563,7 @@ _R       = "\033[0m"
 
 
 def _activity_label(entry, own_client=""):
-    client = (entry.get("client") or "").strip()
+    client = (entry.get("client") or entry.get("caller") or "").strip()
     if not client:
         return "activity"
     if own_client and client == own_client:
@@ -428,6 +573,51 @@ def _activity_label(entry, own_client=""):
     if client.startswith("rat-r-repl@"):
         return f"R repl {client.split('@', 1)[1]}"
     return client
+
+
+def _format_live_event(kind, caller, own_client="",
+                      code="", output="", error="",
+                      max_code=0, max_output=100):
+    """Render one live-event banner.
+
+    kind:    run_started | run_output | run_waiting | run_ended
+    output:  accumulated stdout so far (for run_output/run_ended)
+    code:    code being executed (for run_started)
+    error:   error text (for run_ended with ok=False)
+    """
+    label = _activity_label({"caller": caller}, own_client)
+    if kind == "run_started":
+        mark_color = _LABEL
+        mark = "▸"  # running marker
+        raw_code = [cl for cl in code.split("\n") if cl.strip()]
+        code_lines, code_dropped = _cap_lines(raw_code, max_code)
+        lines = [f"{_BAR}▍{mark_color} {label} {mark}{_R}"]
+        for cl in code_lines:
+            lines.append(f"{_BAR}▍ {_CODE}{cl}{_R}")
+        if code_dropped:
+            lines.append(f"{_BAR}▍ {_CODE}… {code_dropped} more lines{_R}")
+        return "\n".join(lines)
+    if kind == "run_output":
+        raw_out = [ol for ol in output.split("\n") if ol.strip()]
+        if not raw_out:
+            return ""
+        # Only render new chunk lines, not the whole accumulated output.
+        return "\n".join(f"{_BAR}▍  {_OUTPUT}{ol}{_R}" for ol in raw_out)
+    if kind == "run_waiting":
+        return f"{_BAR}▍  {_OUTPUT}✋ waiting for input…{_R}"
+    if kind == "run_ended":
+        ok = error == ""
+        mark = "✓" if ok else "✗"
+        mark_color = _LABEL if ok else _ERR_DIM
+        footer = f"{_BAR}▍{mark_color} {label} {mark}{_R}"
+        if not ok and error:
+            err_lines = [el for el in error.split("\n") if el.strip()][:4]
+            parts = [footer]
+            for el in err_lines:
+                parts.append(f"{_BAR}▍  {_ERR_DIM}{el}{_R}")
+            return "\n".join(parts)
+        return footer
+    return ""
 
 
 
@@ -505,20 +695,100 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
             self._rat_var_count = 0
             self._rat_last_ms = 0
             self._rat_busy = False
+            self._live_runs = {}  # run_id -> {caller, rendered_started, output}
             self._patch_completer()
             self._patch_toolbar()
             self._refresh_var_count()
 
-        def interact(self):
-            """Main REPL loop — wrapped with patch_stdout so the
-            background activity watcher can print live updates
-            without corrupting the prompt."""
-            from prompt_toolkit.patch_stdout import patch_stdout
+        def _own_caller_id(self):
+            # Equal to the MCP session id captured during _mcp_init.
+            return _SESSION_ID or ""
 
+        def interact(self):
+            """Main REPL loop — wrapped with patch_stdout so live
+            activity banners can be printed above the prompt without
+            corrupting it."""
+            from prompt_toolkit.patch_stdout import patch_stdout
             from prompt_toolkit.formatted_text import ANSI
             from prompt_toolkit import print_formatted_text as ptk_print
 
             stop = threading.Event()
+
+            def render(text):
+                if text:
+                    ptk_print(ANSI(text))
+
+            def on_event(evt):
+                kind = evt.get("kind")
+                run_id = evt.get("run_id")
+                caller = evt.get("caller") or ""
+                # Skip our own runs — they're already rendered inline
+                # by run_cell. Match on MCP session id.
+                if evt.get("caller_id") == self._own_caller_id():
+                    if kind == "run_ended" and run_id in self._live_runs:
+                        self._live_runs.pop(run_id, None)
+                    return
+                if kind == "run_started":
+                    self._live_runs[run_id] = {
+                        "caller": caller, "output": "", "started": True,
+                    }
+                    render(_format_live_event(
+                        "run_started", caller, self._client_name,
+                        code=evt.get("code", ""),
+                        max_code=self._activity_max_code,
+                        max_output=self._activity_max_output,
+                    ))
+                elif kind == "run_output":
+                    live = self._live_runs.setdefault(
+                        run_id,
+                        {"caller": caller, "output": "", "started": False},
+                    )
+                    # If we missed run_started (e.g. joined mid-run),
+                    # render a synthetic header first so the output
+                    # chunks have context.
+                    if not live["started"]:
+                        render(_format_live_event(
+                            "run_started", caller, self._client_name,
+                            code="",  # we don't have it
+                            max_code=self._activity_max_code,
+                            max_output=self._activity_max_output,
+                        ))
+                        live["started"] = True
+                    live["output"] += evt.get("text", "")
+                    render(_format_live_event(
+                        "run_output", caller, self._client_name,
+                        output=evt.get("text", ""),
+                        max_output=self._activity_max_output,
+                    ))
+                elif kind == "run_waiting":
+                    render(_format_live_event(
+                        "run_waiting", caller, self._client_name,
+                    ))
+                elif kind == "run_ended":
+                    err = "" if evt.get("ok") else (evt.get("error") or "")
+                    render(_format_live_event(
+                        "run_ended", caller, self._client_name,
+                        error=err,
+                    ))
+                    render("")  # blank line between runs
+                    self._live_runs.pop(run_id, None)
+                    # Refresh var count opportunistically.
+                    try:
+                        self._refresh_var_count()
+                    except Exception:
+                        pass
+                    # Seed code into history for up-arrow recall.
+                    if kind == "run_ended" and evt.get("ok"):
+                        # We don't have the code here — ignore;
+                        # history is also seeded from activity.jsonl.
+                        pass
+
+            # Start event subscriber. Requires an initialised session.
+            subscriber = None
+            if _SESSION_ID:
+                subscriber = EventSubscriber(self._server, _SESSION_ID, on_event)
+                subscriber.start()
+
             try:
                 with patch_stdout():
                     # Always seed history from the runtime activity log
@@ -526,35 +796,46 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                     # kernel, not just the ones typed here.
                     if self._history_seed_from_runtime:
                         self._seed_history_from_log()
-                    # Advance the watcher cursor to end-of-file so we
-                    # only print *new* activity from now on.
+                    # Show a recap of the most-recent activity so you
+                    # see what happened while you were disconnected.
+                    self._show_recent_activity(ptk_print, ANSI)
+                    # Advance the file watcher cursor to end-of-file so
+                    # we don't re-render runs we already saw via events.
                     self._activity.seek_to_end()
 
-                    def watcher():
-                        while not stop.wait(0.5):
-                            try:
-                                entries = self._activity.check()
-                                if entries:
-                                    ptk_print(ANSI(_format_activity(
-                                        entries, self._client_name,
-                                        max_code=self._activity_max_code,
-                                        max_output=self._activity_max_output,
-                                    )))
-                                    # Refresh var count after remote activity.
-                                    self._refresh_var_count()
-                                    # Seed remote code into prompt_toolkit's
-                                    # in-memory history for up-arrow recall.
-                                    self._seed_history(entries)
-                            except Exception:
-                                import traceback
-                                traceback.print_exc()
-                                pass
-
-                    thread = threading.Thread(target=watcher, daemon=True)
-                    thread.start()
                     super().interact()
             finally:
                 stop.set()
+                if subscriber is not None:
+                    subscriber.stop()
+
+        def _show_recent_activity(self, ptk_print, ANSI):
+            """On connect, replay the last few activity.jsonl entries
+            so the REPL shows what happened while the user was away.
+            Capped at 10 entries so the screen isn't flooded."""
+            path = self._activity.path
+            if not path:
+                return
+            try:
+                with open(path, "r") as f:
+                    lines = f.readlines()
+            except (FileNotFoundError, OSError):
+                return
+            entries = []
+            for line in lines[-10:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if entries:
+                ptk_print(ANSI(_format_activity(
+                    entries, self._client_name,
+                    max_code=self._activity_max_code,
+                    max_output=self._activity_max_output,
+                )))
 
         # Virtual SQLite session id for remote-seeded history.
         #

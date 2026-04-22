@@ -50,6 +50,8 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		tracker.RemoveClient(session.SessionID())
 	})
 
+	var bus *EventBus // closed over by handlers, initialised below
+
 	s := server.NewMCPServer(name, "0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithHooks(hooks),
@@ -85,20 +87,46 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 			return mcp.NewToolResultError("provide code or input"), nil
 		}
 
+		caller := callerName(ctx)
+		callerID := callerSessionID(ctx)
+
 		if input != "" {
-			tracker.TouchFrom(callerName(ctx))
+			tracker.TouchFrom(caller)
 			if err := k.SendInput(input); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("send input: %v", err)), nil
 			}
 			return mcp.NewToolResultText("input sent"), nil
 		}
 
-		tracker.TouchFrom(callerName(ctx))
+		tracker.TouchFrom(caller)
+
+		runID := newRunID()
+		bus.Publish(map[string]any{
+			"kind":      "run_started",
+			"caller":    caller,
+			"caller_id": callerID,
+			"run_id":    runID,
+			"code":      code,
+		})
+
 		stop := make(chan struct{})
 		defer close(stop)
-		go relayRunNotifications(ctx, s, k, stop)
+		go relayRunNotifications(ctx, s, k, stop, bus, caller, callerID, runID)
 		result := k.Run(code)
-		annotateActivity(k, result.ExecCount, callerName(ctx))
+		annotateActivity(k, result.ExecCount, caller)
+
+		bus.Publish(map[string]any{
+			"kind":        "run_ended",
+			"caller":      caller,
+			"caller_id":   callerID,
+			"run_id":      runID,
+			"ok":          result.Success,
+			"exec_count":  result.ExecCount,
+			"duration_ms": result.Duration,
+			"vars":        result.Vars,
+			"error":       result.Error,
+		})
+
 		return formatRunResult(result), nil
 	})
 
@@ -131,12 +159,25 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 			cursor = v
 		}
 
-		tracker.TouchFrom(callerName(ctx))
+		caller := callerName(ctx)
+		callerID := callerSessionID(ctx)
+		tracker.TouchFrom(caller)
 		result := k.Look(kernel.LookRequest{
 			At:     at,
 			Code:   code,
 			Cursor: cursor,
 		})
+
+		// Don't broadcast completion queries — they fire on every
+		// keystroke and would drown the event stream.
+		if code == "" {
+			bus.Publish(map[string]any{
+				"kind":      "look_called",
+				"caller":    caller,
+				"caller_id": callerID,
+				"at":        at,
+			})
+		}
 
 		return mcp.NewToolResultText(result.Text), nil
 	})
@@ -193,17 +234,43 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 
 	s.AddTool(ctlTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		op, _ := req.GetArguments()["op"].(string)
+		caller := callerName(ctx)
+		callerID := callerSessionID(ctx)
 		if op != "status" {
-			tracker.TouchFrom(callerName(ctx))
+			tracker.TouchFrom(caller)
 		}
 		result := k.Ctl(op)
 		if op == "status" {
 			result.Text = enrichStatusText(result.Text, tracker)
 		}
+		// Status and output are pure reads that happen on every poll
+		// tick — skip them to keep the event stream meaningful.
+		if op != "status" && op != "output" {
+			bus.Publish(map[string]any{
+				"kind":      "ctl_called",
+				"caller":    caller,
+				"caller_id": callerID,
+				"op":        op,
+			})
+		}
 		return mcp.NewToolResultText(result.Text), nil
 	})
 
+	bus = NewEventBus(s)
 	return s
+}
+
+// callerSessionID returns the MCP session ID of the caller, or "".
+func callerSessionID(ctx context.Context) string {
+	if sess := server.ClientSessionFromContext(ctx); sess != nil {
+		return sess.SessionID()
+	}
+	return ""
+}
+
+// newRunID generates a short opaque identifier for one run.
+func newRunID() string {
+	return fmt.Sprintf("run-%d", time.Now().UnixNano())
 }
 
 // formatRunResult converts a kernel.RunResult to an MCP tool result.
@@ -481,10 +548,22 @@ func annotateActivity(k kernel.Kernel, execCount int, client string) {
 	_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
 
-// relayRunNotifications polls the kernel for output chunks and input requests
-// during a run, and relays them to the connected client via MCP notifications
-// and elicitation.
-func relayRunNotifications(ctx context.Context, s *server.MCPServer, k kernel.Kernel, stop <-chan struct{}) {
+// relayRunNotifications polls the kernel for output chunks and input
+// requests during a run. It:
+//   1. Feeds the caller's own SSE response channel with rat/output
+//      notifications (legacy path used by the streaming Python client
+//      and the VS Code extension during a single tool/call).
+//   2. Publishes the same chunks to the event bus so every other
+//      connected client sees the run streaming live too.
+//   3. Triggers MCP elicitation when the kernel blocks on input().
+func relayRunNotifications(
+	ctx context.Context,
+	s *server.MCPServer,
+	k kernel.Kernel,
+	stop <-chan struct{},
+	bus *EventBus,
+	caller, callerID, runID string,
+) {
 	session := server.ClientSessionFromContext(ctx)
 	if session == nil {
 		return
@@ -507,13 +586,32 @@ func relayRunNotifications(ctx context.Context, s *server.MCPServer, k kernel.Ke
 			if !strings.HasPrefix(output, "ERROR: unknown op") {
 				if text := strings.TrimPrefix(output, lastOutput); text != "" {
 					lastOutput += text
+					// (1) caller's inline SSE response
 					sendNotification(ch, "rat/output", map[string]any{"text": text})
+					// (2) broadcast to every other listening client
+					if bus != nil {
+						bus.Publish(map[string]any{
+							"kind":      "run_output",
+							"caller":    caller,
+							"caller_id": callerID,
+							"run_id":    runID,
+							"text":      text,
+						})
+					}
 				}
 			}
 
 			// Handle input requests via MCP elicitation.
 			nowWaiting := k.IsWaitingForInput()
 			if nowWaiting && !waiting {
+				if bus != nil {
+					bus.Publish(map[string]any{
+						"kind":      "run_waiting",
+						"caller":    caller,
+						"caller_id": callerID,
+						"run_id":    runID,
+					})
+				}
 				go requestInputViaElicitation(ctx, s, k)
 			}
 			waiting = nowWaiting
