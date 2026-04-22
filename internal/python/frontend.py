@@ -430,7 +430,14 @@ class EventSubscriber:
         subscriber is still running.
     """
 
-    _IDLE_SOCK_TIMEOUT = 15.0  # seconds
+    # No socket timeout — the Python SocketIO layer sets a poison
+    # bit (``_timeout_occurred``) on the first socket.timeout, after
+    # which ALL subsequent reads on that socket raise "cannot read
+    # from timed out object". A live subscription idles forever by
+    # design, so any short timeout would permanently break the
+    # connection. stop() interrupts a pending read by calling
+    # ``socket.shutdown(SHUT_RDWR)`` on the underlying socket.
+    _IDLE_SOCK_TIMEOUT = None
 
     def __init__(self, url, session_id, on_event, on_stop=None):
         self._url = url
@@ -515,12 +522,9 @@ class EventSubscriber:
             while not self._stop.is_set():
                 try:
                     line = resp.fp.readline()
-                except (TimeoutError, OSError):
-                    # Either the socket timeout fired or stop()
-                    # shut the socket down. Loop to re-check _stop.
-                    if self._stop.is_set():
-                        return
-                    continue
+                except OSError:
+                    # stop() shut the socket down — exit.
+                    return
                 if not line:
                     return  # server closed the stream; _run will retry
                 line = line.decode("utf-8", errors="replace").rstrip("\r\n")
