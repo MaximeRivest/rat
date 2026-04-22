@@ -243,13 +243,27 @@ export class ExecutionQueue {
       client.cancel();
     };
 
-    // Poll for input prompts
+    // Poll for input prompts AND stream partial stdout live so the
+    // gutter indicator shows progress (e.g. tqdm, for-loops with
+    // flush=True) instead of just a static ⏳ until completion.
     let inputPromptOpen = false;
     let tickRunning = false;
+    let lastPartialLen = 0;
     const poll = setInterval(async () => {
       if (cancelled || tickRunning) return;
       tickRunning = true;
       try {
+        try {
+          const partial = await client.partialOutput();
+          if (partial && partial.length > lastPartialLen) {
+            lastPartialLen = partial.length;
+            showRunning(editor, lastLine, cleanOutput(partial), inputPromptOpen);
+          } else if (inputPromptOpen) {
+            showRunning(editor, lastLine, undefined, true);
+          }
+        } catch {
+          /* best-effort */
+        }
         if (!inputPromptOpen && !cancelled) {
           inputPromptOpen = await this.pollInput(client);
         }
@@ -288,7 +302,10 @@ export class ExecutionQueue {
   private async pollInput(client: McpClient): Promise<boolean> {
     try {
       const st = await client.status();
-      if (st !== "waiting_for_input") return false;
+      // Status is multi-line ("waiting_for_input\nruntime_version:
+      // ...\nmemory_mb: ..."). The state is the first line.
+      const state = st.split("\n", 1)[0].trim();
+      if (state !== "waiting_for_input") return false;
 
       const input = await vscode.window.showInputBox({
         prompt: "Program is waiting for input",

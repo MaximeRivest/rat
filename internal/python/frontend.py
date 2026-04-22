@@ -26,7 +26,13 @@ _SESSION_ID = None
 
 
 def _mcp_call(url, method, params=None, timeout=300):
-    """JSON-RPC call to the MCP server. Returns the result dict."""
+    """JSON-RPC call to the MCP server. Returns the result dict.
+
+    Non-streaming: waits for the whole response body, then scans for
+    the data frame with our id. Use _mcp_call_streaming for run()
+    where you want notifications (rat/output, elicitation/create)
+    delivered as they arrive.
+    """
     global _MSG_ID, _SESSION_ID
     _MSG_ID += 1
     mid = _MSG_ID
@@ -83,6 +89,169 @@ def _mcp_call(url, method, params=None, timeout=300):
         return {"_error": str(e)}
 
 
+def _mcp_call_streaming(url, method, params=None, timeout=600,
+                       on_output=None, on_elicit=None, on_input_request=None):
+    """Like _mcp_call but reads SSE line-by-line and delivers
+    intermediate frames to callbacks as they arrive.
+
+    Callbacks:
+      on_output(text)            — rat/output notification
+      on_elicit(req) -> str|None — elicitation/create request; return
+                                    text to accept, or None to cancel.
+      on_input_request()         — legacy rat/input_request (when
+                                    elicitation isn't supported)
+
+    Returns the final result dict for the original request id.
+    """
+    global _MSG_ID, _SESSION_ID
+    _MSG_ID += 1
+    mid = _MSG_ID
+
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": mid,
+        "method": method,
+        "params": params or {},
+    }).encode()
+
+    parsed = urllib.parse.urlparse(url)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if _SESSION_ID:
+        headers["Mcp-Session-Id"] = _SESSION_ID
+
+    result_holder = {"result": None, "error": None}
+    conn = None
+    try:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
+        conn.request("POST", parsed.path, body, headers)
+        resp = conn.getresponse()
+        sid = resp.getheader("Mcp-Session-Id")
+        if sid:
+            _SESSION_ID = sid
+
+        ct = resp.getheader("Content-Type", "")
+        if "text/event-stream" not in ct:
+            # Plain JSON — no streaming possible, just parse body.
+            raw = resp.read().decode()
+            obj = json.loads(raw)
+            if "error" in obj:
+                return {"_error": obj["error"]}
+            return obj.get("result", {})
+
+        # Read SSE frames line-by-line. Each frame is a "data: ..."
+        # line terminated by a blank line.
+        fp = resp.fp  # underlying file-like, supports readline()
+        buf = []
+        while True:
+            line = fp.readline()
+            if not line:
+                break
+            line = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line == "":
+                # Frame terminator.
+                if not buf:
+                    continue
+                data = "\n".join(s[6:] for s in buf if s.startswith("data: "))
+                buf = []
+                if not data:
+                    continue
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                _handle_sse_frame(obj, url, mid,
+                                  on_output, on_elicit, on_input_request,
+                                  result_holder)
+                if result_holder["result"] is not None or result_holder["error"] is not None:
+                    break
+                continue
+            buf.append(line)
+    except Exception as e:
+        return {"_error": str(e)}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    if result_holder["error"] is not None:
+        return {"_error": result_holder["error"]}
+    return result_holder["result"] or {}
+
+
+def _handle_sse_frame(obj, url, mid, on_output, on_elicit, on_input_request, holder):
+    """Dispatch a single parsed JSON-RPC frame."""
+    method = obj.get("method")
+    if obj.get("id") == mid:
+        # Our final response.
+        if "error" in obj:
+            holder["error"] = obj["error"]
+        else:
+            holder["result"] = obj.get("result", {})
+        return
+    if method == "rat/output":
+        text = (obj.get("params") or {}).get("text", "")
+        if text and on_output is not None:
+            try:
+                on_output(text)
+            except Exception:
+                pass
+        return
+    if method == "rat/input_request":
+        if on_input_request is not None:
+            try:
+                on_input_request()
+            except Exception:
+                pass
+        return
+    # Server-initiated request (elicitation/create) — has both id and
+    # method. Must respond with the same id.
+    if method == "elicitation/create" and "id" in obj:
+        req_id = obj["id"]
+        content = None
+        action = "cancel"
+        if on_elicit is not None:
+            try:
+                text = on_elicit(obj.get("params") or {})
+            except Exception:
+                text = None
+            if text is not None:
+                action = "accept"
+                content = {"text": text}
+        # Post the reply back on a new HTTP call.
+        reply = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"action": action, "content": content},
+        }
+        _mcp_post_raw(url, reply)
+        return
+
+
+def _mcp_post_raw(url, payload):
+    """Fire-and-forget POST used to reply to server-initiated requests."""
+    global _SESSION_ID
+    body = json.dumps(payload).encode()
+    parsed = urllib.parse.urlparse(url)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if _SESSION_ID:
+        headers["Mcp-Session-Id"] = _SESSION_ID
+    try:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+        conn.request("POST", parsed.path, body, headers)
+        conn.getresponse().read()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _mcp_notify(url, method, params=None):
     """JSON-RPC notification (no response expected)."""
     global _SESSION_ID
@@ -121,10 +290,12 @@ def _make_client_name(prefix):
 
 
 def _mcp_init(url, client_name):
-    """Initialize the MCP session."""
+    """Initialize the MCP session. Declares elicitation support so
+    the server will route input() prompts back to us via
+    elicitation/create instead of silently hanging."""
     r = _mcp_call(url, "initialize", {
         "protocolVersion": "2025-03-26",
-        "capabilities": {},
+        "capabilities": {"elicitation": {}},
         "clientInfo": {"name": client_name, "version": "0.1.0"},
     })
     if "_error" not in r:
@@ -135,6 +306,18 @@ def _mcp_init(url, client_name):
 def _tool(url, name, args, timeout=300):
     """Call an MCP tool."""
     return _mcp_call(url, "tools/call", {"name": name, "arguments": args}, timeout=timeout)
+
+
+def _tool_streaming(url, name, args, timeout=3600,
+                    on_output=None, on_elicit=None, on_input_request=None):
+    """Call an MCP tool and stream rat/output notifications +
+    respond to elicitation requests live. Used for `run` so code
+    output appears in the REPL as it's produced."""
+    return _mcp_call_streaming(
+        url, "tools/call", {"name": name, "arguments": args},
+        timeout=timeout, on_output=on_output, on_elicit=on_elicit,
+        on_input_request=on_input_request,
+    )
 
 
 def _text(result):
@@ -719,14 +902,38 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                         print(f"[rat] error: {e}")
                     return ExecutionResult(None)
 
-            # Execute on the shared kernel
+            # Execute on the shared kernel with live streaming.
             self._ensure_mcp()
             self._activity.mark_own(raw_cell)
             self._rat_busy = True
             er = ExecutionResult(None)
             t0 = __import__('time').monotonic()
+
+            streamed_buf = []
+            def _on_output(text):
+                # Stream stdout/stderr to the user's terminal as it
+                # arrives. Keep a copy so we can dedupe against the
+                # final result text.
+                streamed_buf.append(text)
+                try:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
+            def _on_elicit(params):
+                # Server is asking us for input() text.
+                msg = (params or {}).get("message", "")
+                try:
+                    return input()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+
             try:
-                r = _tool(self._server, "run", {"code": raw_cell})
+                r = _tool_streaming(
+                    self._server, "run", {"code": raw_cell},
+                    on_output=_on_output, on_elicit=_on_elicit,
+                )
                 elapsed = __import__('time').monotonic() - t0
                 self._rat_last_ms = int(elapsed * 1000)
                 self._rat_busy = False
@@ -739,7 +946,14 @@ def _make_shell(server_url, kernel_name="py", activity_log=None, cwd="", venv=""
                     if var_match:
                         self._rat_var_count = int(var_match.group(1))
 
+                # Strip both the hint and anything we already streamed
+                # live, so output isn't printed twice.
                 out = _strip_hint(raw_text)
+                streamed = "".join(streamed_buf)
+                if streamed and out.startswith(streamed):
+                    out = out[len(streamed):]
+                elif streamed and streamed.rstrip() and out.startswith(streamed.rstrip()):
+                    out = out[len(streamed.rstrip()):].lstrip("\n")
                 if out:
                     print(out)
                 if _is_err(r):

@@ -82,17 +82,33 @@ const MAX_INLINE_LENGTH = 80;
 
 /**
  * Show a "running…" indicator on the last line of a block.
+ * Optionally include a short snippet of the most recent stdout so
+ * long-running code feels alive.
  */
 export function showRunning(
   editor: vscode.TextEditor,
   lastLine: number,
+  latest?: string,
+  waitingForInput = false,
 ): void {
   const range = new vscode.Range(lastLine, 0, lastLine, 0);
+  let label: string;
+  if (waitingForInput) {
+    label = " ✋ waiting for input…";
+  } else if (latest && latest.trim()) {
+    // Show only the last non-empty line, truncated.
+    const lines = latest.split("\n").filter((l) => l.trim().length > 0);
+    const tail = lines.length > 0 ? lines[lines.length - 1] : "";
+    const trimmed = tail.length > 80 ? tail.slice(0, 79) + "…" : tail;
+    label = trimmed ? ` ⏳ ${trimmed}` : " ⏳ running…";
+  } else {
+    label = " ⏳ running…";
+  }
   editor.setDecorations(runningDecoration, [
     {
       range,
       renderOptions: {
-        after: { contentText: " ⏳ running…" },
+        after: { contentText: label },
       },
     },
   ]);
