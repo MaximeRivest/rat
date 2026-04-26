@@ -200,8 +200,11 @@ function findEnclosingBlock(root: SyntaxNode, line: number): SyntaxNode | null {
   let node = root.descendantForPosition({ row: line, column: 0 });
   if (!node) return topLevelNodeAtLine(root, line);
 
-  // Walk up to find the top-level node
-  while (node.parent && node.parent !== root) {
+  // Walk up to find the top-level node.
+  // NOTE: tree-sitter creates new JS wrapper objects on each .parent
+  // access, so `node.parent !== root` always returns true.  Compare
+  // by node id instead.
+  while (node.parent && node.parent.id !== root.id) {
     node = node.parent;
   }
 

@@ -20,11 +20,21 @@ Works **on top of** whatever Markdown / Quarto extension you already use — it 
 
 ## Prerequisites
 
+The extension can install the `rat` CLI for you on first use on supported macOS, Linux, and Windows platforms. When you run a cell and `rat` is not found, choose **Install Rat** and the extension downloads the CLI into VS Code's extension storage.
+
+Manual install is still supported:
+
 ```bash
-# Install rat
+# macOS / Linux
 curl -fsSL https://runanything.dev/install.sh | sh
+
+# Windows PowerShell
+irm https://runanything.dev/install.ps1 | iex
+
 rat install py    # or sh, r, ju, js
 ```
+
+If you already have a custom binary, set `rat.path` or run **Rat: Install CLI** / **Set rat.path** from the prompt.
 
 ## Install the extension
 
@@ -109,7 +119,8 @@ a Markdown image after the output block:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `rat.path` | `"rat"` | Path to the rat binary |
+| `rat.path` | `"rat"` | Path to the rat binary. Leave as `"rat"` to use an extension-managed install when present, otherwise PATH. |
+| `rat.autoInstall` | `"prompt"` | Offer to install the rat CLI into VS Code extension storage when missing (`"prompt"`, `"never"`) |
 | `rat.runtimes` | `{}` | Map fence language → named runtime |
 | `rat.maxOutputLines` | `100` | Max lines in output cells (0 = unlimited) |
 | `rat.assetsDir` | `"_assets"` | Plot image directory (relative to workspace) |
@@ -119,6 +130,7 @@ a Markdown image after the output block:
 All available via the Command Palette (`Ctrl+Shift+P`):
 
 - **Rat: Run Cell** / **Run Cell and Advance** / **Run Above** / **Run All Cells**
+- **Rat: Install CLI** — download the rat binary into VS Code extension storage
 - **Rat: Cancel Execution** / **Clear Queue** / **Pause / Resume Queue**
 - **Rat: Clear All Outputs** — remove all ` ```output ``` ` blocks
 - **Rat: Show Variables** — open variable overview in a side panel

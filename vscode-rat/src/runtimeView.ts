@@ -1,26 +1,17 @@
 /**
  * runtimeView.ts — TreeView sidebar showing running kernels + saved runtimes.
- *
- *   RAT RUNTIMES
- *   ├── 🟢 py@autoprogramming  (py · ~/Projects/auto · .venv)
- *   ├── 🟢 sh                   (sh · ~/Projects/scratch)
- *   ├── ⚪ py-ml                 (py · ~/ml · .venv)  [saved]
  */
 
-import * as vscode from "vscode";
 import * as path from "path";
+import * as vscode from "vscode";
 import {
-  readState,
+  log,
+  ratRemove,
+  ratRestart,
   ratStart,
   ratStop,
-  ratRestart,
-  ratRemove,
-  log,
-  type KernelInfo,
-  type SavedRuntime,
+  readState,
 } from "./rat";
-
-// ── TreeView provider ──────────────────────────────────────
 
 export class RuntimeTreeProvider
   implements vscode.TreeDataProvider<RuntimeNode>
@@ -33,7 +24,6 @@ export class RuntimeTreeProvider
     this._onChange.fire();
   }
 
-  /** Auto-refresh every N seconds while the view is visible. */
   startAutoRefresh(intervalMs = 3000): void {
     this.stopAutoRefresh();
     this.refreshTimer = setInterval(() => this.refresh(), intervalMs);
@@ -56,36 +46,28 @@ export class RuntimeTreeProvider
     const workspaceDirs = (vscode.workspace.workspaceFolders ?? []).map(
       (f) => path.resolve(f.uri.fsPath),
     );
+
     log(`tree: workspaceDirs=${JSON.stringify(workspaceDirs)}`);
     log(`tree: kernels=${JSON.stringify(state.kernels.map(k => ({ name: k.name, cwd: k.cwd, port: k.port, status: k.status })))}`);
     log(`tree: runtimes=${JSON.stringify(state.runtimes.map(r => ({ name: r.name, cwd: r.cwd })))}`);
+
     const nodes: RuntimeNode[] = [];
 
-    // Running kernels — show workspace-local first, then others
-    const local: RuntimeNode[] = [];
-    const other: RuntimeNode[] = [];
     for (const k of state.kernels) {
-      const node = new RuntimeNode(k.name, k.lang, k.cwd, k.venv, true, k.port);
-      if (workspaceDirs.length === 0 || workspaceDirs.some((d) => path.resolve(k.cwd) === d)) {
-        local.push(node);
-      } else {
-        other.push(node);
-      }
+      if (!isVisibleRuntime(k.name, k.cwd, workspaceDirs)) continue;
+      nodes.push(new RuntimeNode(k.name, k.lang, k.cwd, k.venv, true, k.port));
     }
 
-    // Saved runtimes (not running) — same filtering
     for (const r of state.runtimes) {
       if (runningNames.has(r.name)) continue;
-      if (workspaceDirs.length === 0 || workspaceDirs.some((d) => path.resolve(r.cwd) === d)) {
-        local.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
-      } else {
-        other.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
-      }
+      if (!isVisibleRuntime(r.name, r.cwd, workspaceDirs)) continue;
+      nodes.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
     }
 
-    // Only show workspace-local runtimes.
-    // Other-project kernels are irrelevant and confusing.
-    return local;
+    return nodes.sort((a, b) => {
+      if (a.running !== b.running) return a.running ? -1 : 1;
+      return a.runtimeName.localeCompare(b.runtimeName);
+    });
   }
 }
 
@@ -109,6 +91,7 @@ export class RuntimeNode extends vscode.TreeItem {
     const parts = [lang];
     if (cwd) parts.push(shortPath(cwd));
     if (venv) parts.push(".venv");
+    if (runtimeName.endsWith("-global")) parts.push("global");
     if (!running) parts.push("saved");
     this.description = parts.join(" · ");
 
@@ -125,8 +108,6 @@ export class RuntimeNode extends vscode.TreeItem {
     this.contextValue = running ? "runningKernel" : "savedRuntime";
   }
 }
-
-// ── Commands wired to tree items ───────────────────────────
 
 export async function startRuntimeCmd(node?: RuntimeNode): Promise<void> {
   const name = node?.runtimeName ?? (await pickName("Start which runtime?"));
@@ -180,8 +161,6 @@ export async function removeRuntimeCmd(node?: RuntimeNode): Promise<void> {
   }
 }
 
-// ── helpers ────────────────────────────────────────────────
-
 async function pickName(prompt: string): Promise<string | undefined> {
   const state = readState();
   const names = [
@@ -194,6 +173,12 @@ async function pickName(prompt: string): Promise<string | undefined> {
     return undefined;
   }
   return vscode.window.showQuickPick(unique, { placeHolder: prompt });
+}
+
+function isVisibleRuntime(name: string, cwd: string, workspaceDirs: string[]): boolean {
+  if (name.endsWith("-global")) return true;
+  if (workspaceDirs.length === 0) return true;
+  return workspaceDirs.some((d) => path.resolve(cwd) === d);
 }
 
 function shortPath(p: string): string {

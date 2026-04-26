@@ -43,6 +43,7 @@ type request struct {
 	Cursor     int    `json:"cursor,omitempty"`
 	Text       string `json:"text,omitempty"`
 	AllowStdin bool   `json:"allow_stdin,omitempty"`
+	Full       bool   `json:"full,omitempty"`
 }
 
 type response struct {
@@ -264,7 +265,7 @@ func (p *Python) Look(req kernel.LookRequest) kernel.LookResult {
 	case req.Code != "":
 		err = p.sendLocked(request{Op: "complete", Code: req.Code, Cursor: req.Cursor})
 	case req.At != "":
-		err = p.sendLocked(request{Op: "look_at", At: req.At})
+		err = p.sendLocked(request{Op: "look_at", At: req.At, Full: req.Full})
 	default:
 		err = p.sendLocked(request{Op: "look_overview"})
 	}

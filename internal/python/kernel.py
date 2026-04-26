@@ -255,14 +255,14 @@ def resolve_expr(expr):
 
 # ── Rich inspection ──────────────────────────────────────────
 
-def look_at(expr):
+def look_at(expr, full=False):
     value, err = resolve_expr(expr)
     if err is not None:
         return f"{expr}: not found"
-    return _inspect(expr, value)
+    return _inspect(expr, value, full=full)
 
 
-def _inspect(name, value):
+def _inspect(name, value, full=False):
     kind = type(value).__name__
     lines = []
 
@@ -299,7 +299,7 @@ def _inspect(name, value):
         lines.append(doc)
 
     # ── children / drill-down ──
-    children = _children(name, value, kind)
+    children = _children(name, value, kind, full=full)
     if children:
         lines.append("")
         lines.extend(children)
@@ -308,9 +308,10 @@ def _inspect(name, value):
     methods = _public_methods(value, kind)
     if methods:
         lines.append("")
-        m = ", ".join(methods[:20])
+        shown = methods if full else methods[:20]
+        m = ", ".join(shown)
         lines.append(f"  Methods: {m}")
-        if len(methods) > 20:
+        if not full and len(methods) > 20:
             lines.append(f"  ... {len(methods) - 20} more")
 
     return "\n".join(lines)
@@ -361,16 +362,16 @@ def _safe_doc(value):
         doc = inspect.getdoc(value)
         if not doc:
             return None
-        # Truncate to first paragraph or ~500 chars.
-        first = doc.split("\n\n", 1)[0].strip()
-        if len(first) > 500:
-            first = first[:497] + "..."
-        return first
+        doc = doc.strip()
+        max_chars = int(os.environ.get("RAT_DOCSTRING_MAX_CHARS", "20000"))
+        if max_chars > 0 and len(doc) > max_chars:
+            return doc[:max_chars - 3] + "..."
+        return doc
     except Exception:
         return None
 
 
-def _children(name, value, kind):
+def _children(name, value, kind, full=False):
     """Return drill-down lines for containers and special types."""
     try:
         # ── DataFrame ──
@@ -384,19 +385,19 @@ def _children(name, value, kind):
             return _ndarray_children(value)
         # ── dict ──
         if isinstance(value, dict):
-            return _dict_children(value)
+            return _dict_children(value, full=full)
         # ── list / tuple ──
         if isinstance(value, (list, tuple)):
-            return _seq_children(value)
+            return _seq_children(value, full=full)
         # ── module ──
         if inspect.ismodule(value):
-            return _module_children(value)
+            return _module_children(value, full=full)
         # ── generic object with attributes ──
         if not isinstance(value, (int, float, str, bool, bytes,
                                   type(None), set, frozenset)):
             if inspect.isclass(value):
                 return None  # methods list is enough
-            return _object_children(value)
+            return _object_children(value, full=full)
     except Exception:
         pass
     return None
@@ -463,9 +464,10 @@ def _ndarray_children(arr):
     return lines
 
 
-def _dict_children(d):
+def _dict_children(d, full=False):
     lines = []
-    items = list(d.items())[:15]
+    all_items = list(d.items())
+    items = all_items if full else all_items[:15]
     if not items:
         return lines
     kw = max(4, max(len(truncate(repr(k), 20)) for k, _ in items))
@@ -473,27 +475,27 @@ def _dict_children(d):
     for k, v in items:
         kr = truncate(repr(k), 20)
         lines.append(_fmt_child("▸", kr, type(v).__name__, safe_repr(v, 50), kw, tw))
-    if len(d) > 15:
+    if not full and len(d) > 15:
         lines.append(f"  ... {len(d) - 15} more")
     return lines
 
 
-def _seq_children(seq):
+def _seq_children(seq, full=False):
     lines = []
-    items = list(seq[:15])
+    items = list(seq) if full else list(seq[:15])
     if not items:
         return lines
-    iw = len(str(min(len(items) - 1, 14))) + 2  # [0] width
+    iw = len(str(max(0, len(items) - 1))) + 2  # [0] width
     tw = max(4, max(len(type(v).__name__) for v in items))
     for i, v in enumerate(items):
         idx = f"[{i}]"
         lines.append(_fmt_child(" ", idx, type(v).__name__, safe_repr(v, 50), iw, tw))
-    if len(seq) > 15:
+    if not full and len(seq) > 15:
         lines.append(f"  ... {len(seq) - 15} more")
     return lines
 
 
-def _module_children(mod):
+def _module_children(mod, full=False):
     lines = []
     try:
         names = [n for n in dir(mod) if not n.startswith("_")]
@@ -501,7 +503,8 @@ def _module_children(mod):
             return lines
         classes = []
         constants = []
-        for n in names[:60]:
+        scan_names = names if full else names[:60]
+        for n in scan_names:
             try:
                 v = getattr(mod, n)
                 if inspect.isclass(v):
@@ -511,27 +514,29 @@ def _module_children(mod):
             except Exception:
                 pass
         if classes:
-            lines.append(f"  Classes: {', '.join(classes[:15])}")
+            shown = classes if full else classes[:15]
+            lines.append(f"  Classes: {', '.join(shown)}")
         if constants:
-            lines.append(f"  Constants: {', '.join(constants[:15])}")
+            shown = constants if full else constants[:15]
+            lines.append(f"  Constants: {', '.join(shown)}")
     except Exception:
         pass
     return lines
 
 
-def _object_children(value):
+def _object_children(value, full=False):
     lines = []
     try:
-        attrs = [(k, v) for k, v in vars(value).items() if not k.startswith("_")]
-        if not attrs:
+        all_attrs = [(k, v) for k, v in vars(value).items() if not k.startswith("_")]
+        if not all_attrs:
             return lines
-        attrs = attrs[:15]
+        attrs = all_attrs if full else all_attrs[:15]
         nw = max(4, max(len(k) for k, _ in attrs))
         tw = max(4, max(len(type(v).__name__) for _, v in attrs))
         for k, v in attrs:
             lines.append(_fmt_child("▸", k, type(v).__name__, safe_repr(v, 50), nw, tw))
-        total = len([k for k in vars(value) if not k.startswith("_")])
-        if total > 15:
+        total = len(all_attrs)
+        if not full and total > 15:
             lines.append(f"  ... {total - 15} more")
     except Exception:
         pass
@@ -869,7 +874,7 @@ def main():
             elif op == "look_overview":
                 send({"text": look_overview()})
             elif op == "look_at":
-                send({"text": look_at(req.get("at", ""))})
+                send({"text": look_at(req.get("at", ""), bool(req.get("full", False)))})
             elif op == "complete":
                 send({"text": complete(req.get("code", ""), int(req.get("cursor", -1)))})
             elif op == "status":

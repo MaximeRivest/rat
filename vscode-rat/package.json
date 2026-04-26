@@ -5,6 +5,15 @@
   "version": "0.1.0",
   "publisher": "maximerivest",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maximerivest/rat.git",
+    "directory": "vscode-rat"
+  },
+  "homepage": "https://github.com/maximerivest/rat/tree/main/vscode-rat#readme",
+  "bugs": {
+    "url": "https://github.com/maximerivest/rat/issues"
+  },
   "icon": "logo.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -14,6 +23,18 @@
     "Notebooks",
     "Other"
   ],
+  "keywords": [
+    "rat",
+    "run anything",
+    "notebook",
+    "markdown",
+    "quarto",
+    "python",
+    "r",
+    "julia",
+    "repl",
+    "mcp"
+  ],
   "activationEvents": [
     "onLanguage:markdown",
     "onLanguage:python",
@@ -22,7 +43,8 @@
     "onLanguage:javascript",
     "onLanguage:shellscript",
     "workspaceContains:**/*.qmd",
-    "workspaceContains:**/*.rmd"
+    "workspaceContains:**/*.rmd",
+    "onCommand:rat.installCli"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -40,6 +62,16 @@
         {
           "id": "ratRuntimes",
           "name": "Runtimes"
+        },
+        {
+          "id": "ratVariables",
+          "name": "Variables",
+          "type": "webview"
+        },
+        {
+          "id": "ratInspector",
+          "name": "Inspector",
+          "type": "webview"
         }
       ]
     },
@@ -78,6 +110,10 @@
         "title": "Rat: Clear All Outputs"
       },
       {
+        "command": "rat.installCli",
+        "title": "Rat: Install CLI"
+      },
+      {
         "command": "rat.showVariables",
         "title": "Rat: Show Variables"
       },
@@ -93,6 +129,23 @@
         "command": "rat.selectRuntime",
         "title": "Rat: Select Runtime",
         "icon": "$(symbol-event)"
+      },
+      {
+        "command": "rat.openRepl",
+        "title": "Rat: Open REPL for Current File",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "rat.useNotebookScope",
+        "title": "Rat: Use Notebook Scope"
+      },
+      {
+        "command": "rat.useProjectScope",
+        "title": "Rat: Use Project Scope"
+      },
+      {
+        "command": "rat.useGlobalScope",
+        "title": "Rat: Use Global Scope"
       },
       {
         "command": "rat.addRuntime",
@@ -133,6 +186,14 @@
       {
         "view": "ratRuntimes",
         "contents": "No runtimes for this workspace.\nRun a code cell or [add a runtime](command:rat.addRuntime) to get started."
+      },
+      {
+        "view": "ratVariables",
+        "contents": "Run a cell to see variables from the active rat runtime."
+      },
+      {
+        "view": "ratInspector",
+        "contents": "Put the cursor on a symbol in a rat file to inspect its full docstring here."
       }
     ],
     "menus": {
@@ -146,6 +207,18 @@
           "command": "rat.refreshRuntimes",
           "when": "view == ratRuntimes",
           "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "rat.openRepl",
+          "when": "rat.activeFile",
+          "group": "navigation@10"
+        },
+        {
+          "command": "rat.selectRuntime",
+          "when": "rat.activeFile",
+          "group": "navigation@11"
         }
       ],
       "view/item/context": [
@@ -200,6 +273,12 @@
         "key": "ctrl+shift+i",
         "mac": "cmd+shift+i",
         "when": "editorTextFocus && rat.activeFile"
+      },
+      {
+        "command": "rat.openRepl",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && rat.activeFile"
       }
     ],
     "configuration": {
@@ -208,7 +287,16 @@
         "rat.path": {
           "type": "string",
           "default": "rat",
-          "description": "Path to the rat binary"
+          "description": "Path to the rat binary. Leave as \"rat\" to use the extension-managed CLI when installed, otherwise PATH."
+        },
+        "rat.autoInstall": {
+          "type": "string",
+          "enum": [
+            "prompt",
+            "never"
+          ],
+          "default": "prompt",
+          "description": "When to offer installing the rat CLI into VS Code extension storage if it is not found."
         },
         "rat.runtimes": {
           "type": "object",
@@ -288,6 +376,7 @@
     ]
   },
   "scripts": {
+    "vscode:prepublish": "npm run build",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "package": "npx @vscode/vsce package --no-dependencies",

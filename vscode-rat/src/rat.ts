@@ -15,6 +15,18 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { ensureRatInstalled, resolveRatExecutable } from "./installRat";
+
+function detectVenv(cwd: string): string | undefined {
+  for (const dir of [".venv", "venv"]) {
+    const candidate = path.join(cwd, dir);
+    const py = process.platform === "win32"
+      ? path.join(candidate, "Scripts", "python.exe")
+      : path.join(candidate, "bin", "python");
+    if (fs.existsSync(py)) return candidate;
+  }
+  return undefined;
+}
 
 // ── Debug output ───────────────────────────────────────────
 
@@ -26,41 +38,56 @@ export function log(msg: string): void {
 
 // ── CLI helpers ────────────────────────────────────────────
 
-function ratBin(): string {
-  return vscode.workspace.getConfiguration("rat").get("path", "rat");
-}
-
-function exec(
+function execFileRat(
+  bin: string,
   args: string[],
-  cwd?: string,
-  timeout = 30_000,
-  rejectOnError = false,
+  cwd: string | undefined,
+  timeout: number,
+  rejectOnError: boolean,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     cp.execFile(
-      ratBin(),
+      bin,
       args,
       { cwd, timeout, env: { ...process.env } },
       (err, stdout, stderr) => {
-        if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-          reject(
-            new Error(
-              "rat not found.  Install: curl -fsSL https://runanything.dev/install.sh | sh",
-            ),
-          );
-          return;
-        }
-        if (err && rejectOnError) {
-          reject(
-            new Error(stderr?.trim() || stdout?.trim() || (err as Error).message),
-          );
-          return;
+        if (err) {
+          if (isMissingExecutable(err)) {
+            reject(err);
+            return;
+          }
+          if (rejectOnError) {
+            reject(
+              new Error(stderr?.trim() || stdout?.trim() || (err as Error).message),
+            );
+            return;
+          }
         }
         // rat start exits 0 whether new or already running
         resolve({ stdout: stdout ?? "", stderr: stderr ?? "" });
       },
     );
   });
+}
+
+function isMissingExecutable(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "EACCES" || code === "ENOEXEC";
+}
+
+async function exec(
+  args: string[],
+  cwd?: string,
+  timeout = 30_000,
+  rejectOnError = false,
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await execFileRat(resolveRatExecutable(), args, cwd, timeout, rejectOnError);
+  } catch (err) {
+    if (!isMissingExecutable(err)) throw err;
+    const installed = await ensureRatInstalled();
+    return execFileRat(installed, args, cwd, timeout, rejectOnError);
+  }
 }
 
 /** Start a kernel, returning the resolved name and port. */
@@ -275,6 +302,10 @@ export class McpClient {
     return this.parseToolResult(await this.callTool("look", args)).text;
   }
 
+  async lookFull(at: string): Promise<string> {
+    return this.parseToolResult(await this.callTool("look", { at, full: true })).text;
+  }
+
   async tail(n = 10, format = "json"): Promise<string> {
     return this.parseToolResult(
       await this.callTool("tail", { n, format }),
@@ -284,7 +315,12 @@ export class McpClient {
   async complete(code: string, cursor: number): Promise<string[]> {
     const r = await this.callTool("look", { code, cursor });
     const text = this.parseToolResult(r).text;
-    return text ? text.split("\n").filter(Boolean) : [];
+    return text
+      ? text
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter((line) => line && line.trim() !== "No completions.")
+      : [];
   }
 
   async status(): Promise<string> {
@@ -484,9 +520,20 @@ export async function getClient(
     }
   }
 
+  const state = readState();
+  const known = state.kernels.some((k) => k.name === name) || state.runtimes.some((r) => r.name === name);
+
+  if (!known && lang && name !== lang) {
+    try {
+      log(`getClient: creating named runtime ${name} (lang=${lang}, cwd=${cwd})`);
+      await ratAdd(name, lang, cwd, lang === "py" ? detectVenv(cwd) : undefined);
+    } catch (err) {
+      log(`getClient: ratAdd skipped/failed for ${name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   log(`getClient: no pool hit for "${name}", calling ratStart`);
   // 2. Let the CLI resolve the name and start the kernel.
-  //    `rat start py` in cwd resolves to e.g. `py@myproject` automatically.
   const started = await ratStart(name, cwd);
   if (started) {
     try {
@@ -535,6 +582,38 @@ export async function getClient(
 /** Return the pool entry without starting anything. */
 export function existingClient(name: string): McpClient | undefined {
   return pool.get(name);
+}
+
+/**
+ * Return an already-running client without starting a kernel.
+ *
+ * This is for latency-sensitive editor features like completions and hover:
+ * they should reconnect to a running kernel after a VS Code reload, but they
+ * should not create/install/start kernels merely because the user typed a dot.
+ */
+export async function existingOrRunningClient(name: string): Promise<McpClient | undefined> {
+  const existing = pool.get(name);
+  if (existing) {
+    try {
+      await existing.status();
+      return existing;
+    } catch {
+      existing.dispose();
+      pool.delete(name);
+    }
+  }
+
+  const kernel = readState().kernels.find((k) => k.name === name);
+  if (!kernel) return undefined;
+
+  try {
+    const client = new McpClient(kernel.port);
+    await client.initialize();
+    pool.set(name, client);
+    return client;
+  } catch {
+    return undefined;
+  }
 }
 
 export function disposeAll(): void {

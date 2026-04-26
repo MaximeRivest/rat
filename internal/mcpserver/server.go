@@ -142,12 +142,14 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		mcp.WithString("at", mcp.Description("Symbol to inspect.")),
 		mcp.WithString("code", mcp.Description("Code buffer for completions.")),
 		mcp.WithNumber("cursor", mcp.Description("Cursor position in code.")),
+		mcp.WithBoolean("full", mcp.Description("Return untruncated inspection output when supported.")),
 	)
 
 	s.AddTool(lookTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		at, _ := args["at"].(string)
 		code, _ := args["code"].(string)
+		full, _ := args["full"].(bool)
 
 		// JSON numbers come as float64 in Go.
 		// Go concept: type switch — like isinstance() in Python.
@@ -166,6 +168,7 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 			At:     at,
 			Code:   code,
 			Cursor: cursor,
+			Full:   full,
 		})
 
 		// Don't broadcast completion queries — they fire on every
@@ -550,12 +553,12 @@ func annotateActivity(k kernel.Kernel, execCount int, client string) {
 
 // relayRunNotifications polls the kernel for output chunks and input
 // requests during a run. It:
-//   1. Feeds the caller's own SSE response channel with rat/output
-//      notifications (legacy path used by the streaming Python client
-//      and the VS Code extension during a single tool/call).
-//   2. Publishes the same chunks to the event bus so every other
-//      connected client sees the run streaming live too.
-//   3. Triggers MCP elicitation when the kernel blocks on input().
+//  1. Feeds the caller's own SSE response channel with rat/output
+//     notifications (legacy path used by the streaming Python client
+//     and the VS Code extension during a single tool/call).
+//  2. Publishes the same chunks to the event bus so every other
+//     connected client sees the run streaming live too.
+//  3. Triggers MCP elicitation when the kernel blocks on input().
 func relayRunNotifications(
 	ctx context.Context,
 	s *server.MCPServer,

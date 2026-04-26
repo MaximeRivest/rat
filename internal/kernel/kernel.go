@@ -53,6 +53,7 @@ type LookRequest struct {
 	At     string // symbol to inspect ("x", "df.columns", "math.sqrt")
 	Code   string // code buffer for completions
 	Cursor int    // cursor position in Code
+	Full   bool   // request untruncated inspection output when supported
 }
 
 // LookResult is what comes back from Look.
