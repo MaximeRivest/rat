@@ -1,7 +1,7 @@
 ---
 layout: ../layouts/DocsLayout.astro
 title: Installation
-description: Install rat on macOS or Linux.
+description: Install rat on macOS, Linux, or Windows.
 ---
 
 # Installation
@@ -10,6 +10,12 @@ description: Install rat on macOS or Linux.
 
 ```bash frame="terminal" title="Terminal"
 curl -fsSL https://runanything.dev/install.sh | sh
+```
+
+## Windows PowerShell
+
+```powershell frame="terminal" title="PowerShell"
+irm https://runanything.dev/install.ps1 | iex
 ```
 
 This downloads the latest release binary and places it on your `PATH`.

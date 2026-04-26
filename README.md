@@ -7,7 +7,12 @@
 **Run AnyThing.** One binary. Every REPL language. Every client shares one namespace.
 
 ```bash
+# macOS / Linux
 curl -fsSL https://runanything.dev/install.sh | sh
+
+# Windows PowerShell
+irm https://runanything.dev/install.ps1 | iex
+
 rat install py
 rat py
 ```
@@ -60,6 +65,12 @@ Same four tools for every language. Same four tools whether you're a human in a 
 
 ```bash
 curl -fsSL https://runanything.dev/install.sh | sh
+```
+
+### Windows PowerShell
+
+```powershell
+irm https://runanything.dev/install.ps1 | iex
 ```
 
 ### Set up a language
