@@ -20,7 +20,7 @@ const codeCellBody = vscode.window.createTextEditorDecorationType({
 /** Left accent bar on code lines */
 const codeCellLeftBar = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
-  borderWidth: "0 0 0 3px",
+  borderWidth: "0 0 0 2px",
   borderStyle: "solid",
   borderColor: new vscode.ThemeColor("rat.cellAccent"),
 });
@@ -29,20 +29,21 @@ const codeCellLeftBar = vscode.window.createTextEditorDecorationType({
 const fenceLine = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
   color: new vscode.ThemeColor("rat.fenceColor"),
-  textDecoration: "none; font-size: 0.8em; opacity: 0.6",
+  textDecoration: "none; font-size: 0.8em",
 });
 
 /** Output block body */
 const outputBody = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
   backgroundColor: new vscode.ThemeColor("rat.outputBackground"),
+  color: new vscode.ThemeColor("editor.foreground"),
 });
 
 /** Output fence markers */
 const outputFence = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
   color: new vscode.ThemeColor("rat.fenceColor"),
-  textDecoration: "none; font-size: 0.8em; opacity: 0.5",
+  textDecoration: "none; font-size: 0.8em",
 });
 
 // ── Apply decorations ──────────────────────────────────────

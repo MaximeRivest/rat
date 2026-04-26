@@ -2,7 +2,7 @@
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
   "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "maximerivest",
   "license": "MIT",
   "repository": {
@@ -404,36 +404,40 @@
         "id": "rat.cellBackground",
         "description": "Background color for code cell body (use transparent values)",
         "defaults": {
-          "dark": "#ffffff08",
-          "light": "#00000008",
-          "highContrast": "#ffffff0a"
+          "dark": "#ffffff05",
+          "light": "#00000004",
+          "highContrast": "#ffffff0a",
+          "highContrastLight": "#0000000a"
         }
       },
       {
         "id": "rat.cellAccent",
         "description": "Left accent bar color for code cells",
         "defaults": {
-          "dark": "#569cd650",
-          "light": "#005cc540",
-          "highContrast": "#569cd680"
+          "dark": "#ffffff24",
+          "light": "#0000001f",
+          "highContrast": "#ffffff80",
+          "highContrastLight": "#00000080"
         }
       },
       {
         "id": "rat.fenceColor",
         "description": "Text color for fence markers (triple backticks)",
         "defaults": {
-          "dark": "#808080",
-          "light": "#8b949e",
-          "highContrast": "#aaaaaa"
+          "dark": "#ffffff66",
+          "light": "#00000066",
+          "highContrast": "#ffffffaa",
+          "highContrastLight": "#000000aa"
         }
       },
       {
         "id": "rat.outputBackground",
         "description": "Background color for output blocks",
         "defaults": {
-          "dark": "#ffffff06",
-          "light": "#f6f8fa",
-          "highContrast": "#ffffff0a"
+          "dark": "#ffffff04",
+          "light": "#00000004",
+          "highContrast": "#ffffff0a",
+          "highContrastLight": "#0000000a"
         }
       }
     ]
