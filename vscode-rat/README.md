@@ -17,6 +17,7 @@ Works **on top of** whatever Markdown / Quarto extension you already use — it 
 | **Hover** | Rich inspection on hover (type, shape, docs, methods) |
 | **stdin prompts** | `input()` pops a VS Code input box |
 | **Run Above / Run All** | Execute cells from top, or the whole file |
+| **Rendered Markdown editor** | Optional mrmd-powered editable Markdown view with rat-backed code cells |
 
 ## Prerequisites
 
@@ -75,6 +76,14 @@ Click **▶ Run** above the cell. Output appears below:
 ```
 ````
 
+### Rendered Markdown editor
+
+For a more rendered, notebook-like editing surface, run **Rat: Open Rat Markdown Editor** or **Markdown: Open Preview (Rat Markdown)** from the Command Palette, or use **Open With… → Rat Markdown** on a Markdown/Quarto/R Markdown file.
+
+This opens an editable mrmd-powered view (not VS Code's Markdown preview). Markdown renders inline, focused sections remain editable, and code cells execute through the same rat runtime resolution as the normal text editor.
+
+If you want `Ctrl+Shift+V` / `Cmd+Shift+V` to open Rat Markdown instead of VS Code's built-in Markdown preview, run **Rat: Use Rat Markdown for Ctrl+Shift+V Preview** or set `rat.replaceMarkdownPreviewShortcut` to `true`. To make Rat Markdown the default editor for `.md` / `.qmd` / `.rmd` files in the current workspace, run **Rat: Use Rat Markdown as Default Markdown Editor**.
+
 ### Keybindings
 
 | Key | Action |
@@ -124,6 +133,7 @@ a Markdown image after the output block:
 | `rat.runtimes` | `{}` | Map fence language → named runtime |
 | `rat.maxOutputLines` | `100` | Max lines in output cells (0 = unlimited) |
 | `rat.assetsDir` | `"_assets"` | Plot image directory (relative to workspace) |
+| `rat.replaceMarkdownPreviewShortcut` | `false` | Use Rat Markdown for `Ctrl+Shift+V` / `Cmd+Shift+V` in Markdown-like files |
 
 ## Commands
 

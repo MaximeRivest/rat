@@ -45,7 +45,7 @@ export interface OutputBlock {
 
 const LANG_MAP: Record<string, string> = {
   python: "py", py: "py", python3: "py",
-  r: "r",       R: "r",
+  r: "r",       R: "r", rlang: "r",
   bash: "sh",   sh: "sh", shell: "sh", zsh: "sh",
   julia: "jl",  jl: "jl", ju: "jl",
   javascript: "js", js: "js", node: "js",
@@ -53,9 +53,13 @@ const LANG_MAP: Record<string, string> = {
   slack: "slack",
 };
 
+export function ratLangForFence(lang: string): string | null {
+  return LANG_MAP[lang] ?? LANG_MAP[lang.toLowerCase()] ?? null;
+}
+
 // ── Parsers ────────────────────────────────────────────────
 
-const FENCE_OPEN = /^(\s{0,3})(`{3,})\s*\{?(\w+)\}?(?:\s+[✓✗].*?)?\s*$/;
+const FENCE_OPEN = /^(\s{0,3})(`{3,})\s*(?:\{(\w+)(?:[,\s][^}]*)?\}|(\w+))(?:\s+[✓✗].*?)?\s*$/;
 const FENCE_CLOSE = /^(\s{0,3})`{3,}\s*$/;
 
 /**
@@ -74,8 +78,8 @@ export function parseCells(document: vscode.TextDocument): CodeCell[] {
 
     if (openMatch) {
       const backtickLen = openMatch[2].length;
-      const lang = openMatch[3];
-      const ratLang = LANG_MAP[lang] ?? LANG_MAP[lang.toLowerCase()];
+      const lang = openMatch[3] ?? openMatch[4];
+      const ratLang = ratLangForFence(lang);
 
       if (ratLang) {
         const openLine = i;
@@ -138,7 +142,7 @@ export function findOutputBlock(
   }
 
   if (i >= lineCount) return null;
-  if (!/^```output(\s*$|\s*\|)/.test(document.lineAt(i).text)) return null;
+  if (!/^```output(?::\S+)?(\s*$|\s*\|)/.test(document.lineAt(i).text)) return null;
 
   const startLine = i;
   i++;

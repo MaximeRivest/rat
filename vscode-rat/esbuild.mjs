@@ -26,18 +26,40 @@ function copyGrammars() {
   const dest = path.resolve("grammars"); // stays in place; __dirname = dist/
   // grammars/ is already at the right level (sibling of dist/)
   // Just verify they exist
+  void dest;
   if (!fs.existsSync(src)) {
     console.warn("⚠ grammars/ directory not found — tree-sitter block detection will fail");
   }
+}
+
+function copyMrmdBundle() {
+  const candidates = [
+    path.resolve("node_modules/mrmd-editor/dist/mrmd.iife.min.js"),
+    "/home/maxime/Projects/mrmd-packages/mrmd-editor/dist/mrmd.iife.min.js",
+  ];
+  const src = candidates.find((candidate) => fs.existsSync(candidate));
+  const destDir = path.resolve("media");
+  const dest = path.join(destDir, "mrmd.iife.min.js");
+  if (!src) {
+    if (!fs.existsSync(dest)) {
+      console.warn("⚠ mrmd-editor bundle not found — Rat Markdown custom editor will not load");
+    }
+    return;
+  }
+
+  fs.mkdirSync(destDir, { recursive: true });
+  fs.copyFileSync(src, dest);
 }
 
 if (watch) {
   const ctx = await esbuild.context(opts);
   await ctx.watch();
   copyGrammars();
+  copyMrmdBundle();
   console.log("watching...");
 } else {
   await esbuild.build(opts);
   copyGrammars();
+  copyMrmdBundle();
   console.log("built dist/extension.js");
 }

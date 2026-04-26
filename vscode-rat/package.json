@@ -2,7 +2,7 @@
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
   "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "maximerivest",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,13 @@
     "onLanguage:shellscript",
     "workspaceContains:**/*.qmd",
     "workspaceContains:**/*.rmd",
+    "onCustomEditor:rat.mrmdEditor",
+    "onCommand:rat.openRenderedMarkdown",
+    "onCommand:rat.openMarkdownPreview",
+    "onCommand:rat.enableMarkdownPreviewReplacement",
+    "onCommand:rat.disableMarkdownPreviewReplacement",
+    "onCommand:rat.useMrmdAsDefaultMarkdownEditor",
+    "onCommand:rat.restoreDefaultMarkdownEditor",
     "onCommand:rat.installCli"
   ],
   "main": "./dist/extension.js",
@@ -75,6 +82,27 @@
         }
       ]
     },
+    "customEditors": [
+      {
+        "viewType": "rat.mrmdEditor",
+        "displayName": "Rat Markdown",
+        "selector": [
+          {
+            "filenamePattern": "*.md"
+          },
+          {
+            "filenamePattern": "*.qmd"
+          },
+          {
+            "filenamePattern": "*.rmd"
+          },
+          {
+            "filenamePattern": "*.Rmd"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
     "commands": [
       {
         "command": "rat.runCell",
@@ -108,6 +136,30 @@
       {
         "command": "rat.clearOutputs",
         "title": "Rat: Clear All Outputs"
+      },
+      {
+        "command": "rat.openRenderedMarkdown",
+        "title": "Rat: Open Rat Markdown Editor"
+      },
+      {
+        "command": "rat.openMarkdownPreview",
+        "title": "Markdown: Open Preview (Rat Markdown)"
+      },
+      {
+        "command": "rat.enableMarkdownPreviewReplacement",
+        "title": "Rat: Use Rat Markdown for Ctrl+Shift+V Preview"
+      },
+      {
+        "command": "rat.disableMarkdownPreviewReplacement",
+        "title": "Rat: Restore VS Code Markdown Preview Shortcut"
+      },
+      {
+        "command": "rat.useMrmdAsDefaultMarkdownEditor",
+        "title": "Rat: Use Rat Markdown as Default Markdown Editor"
+      },
+      {
+        "command": "rat.restoreDefaultMarkdownEditor",
+        "title": "Rat: Restore Default Markdown Editor"
       },
       {
         "command": "rat.installCli",
@@ -279,6 +331,12 @@
         "key": "ctrl+alt+enter",
         "mac": "cmd+alt+enter",
         "when": "editorTextFocus && rat.activeFile"
+      },
+      {
+        "command": "rat.openMarkdownPreview",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorTextFocus && config.rat.replaceMarkdownPreviewShortcut && (editorLangId == markdown || editorLangId == quarto || resourceExtname == .rmd || resourceExtname == .Rmd)"
       }
     ],
     "configuration": {
@@ -312,6 +370,11 @@
           "type": "string",
           "default": "_assets",
           "description": "Directory for plot images, relative to workspace root"
+        },
+        "rat.replaceMarkdownPreviewShortcut": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, Ctrl+Shift+V / Cmd+Shift+V in Markdown-like files opens Rat Markdown instead of VS Code's built-in Markdown preview. You can also run 'Rat: Use Rat Markdown for Ctrl+Shift+V Preview'."
         }
       }
     },

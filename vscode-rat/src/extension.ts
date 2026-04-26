@@ -55,6 +55,13 @@ import {
   renderResults,
   disposeInlineOutput,
 } from "./inlineOutput";
+import {
+  openRenderedMarkdownEditor,
+  restoreDefaultMarkdownEditor,
+  RatMrmdEditorProvider,
+  setMarkdownPreviewShortcutReplacement,
+  useRatMarkdownAsDefaultEditor,
+} from "./mrmdEditor";
 
 // ── Globals ────────────────────────────────────────────────
 
@@ -70,6 +77,8 @@ let variablesProvider: RatVariablesViewProvider;
 export function activate(ctx: vscode.ExtensionContext): void {
   initRuntimeState(ctx);
   initRatInstaller(ctx);
+
+  ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx));
 
   // Status bar — queue state
   statusBar = vscode.window.createStatusBarItem(
@@ -280,6 +289,12 @@ export function activate(ctx: vscode.ExtensionContext): void {
   reg("rat.insertCell", insertCellCmd);
   reg("rat.clearOutputs", clearOutputsCmd);
   reg("rat.installCli", installRatCliCommand);
+  reg("rat.openRenderedMarkdown", openRenderedMarkdownEditor);
+  reg("rat.openMarkdownPreview", openRenderedMarkdownEditor);
+  reg("rat.enableMarkdownPreviewReplacement", () => setMarkdownPreviewShortcutReplacement(true));
+  reg("rat.disableMarkdownPreviewReplacement", () => setMarkdownPreviewShortcutReplacement(false));
+  reg("rat.useMrmdAsDefaultMarkdownEditor", useRatMarkdownAsDefaultEditor);
+  reg("rat.restoreDefaultMarkdownEditor", restoreDefaultMarkdownEditor);
   reg("rat.showVariables", showVariablesCmd);
   reg("rat.stopKernel", stopKernelCmd);
   reg("rat.restartKernel", restartKernelCmd);
