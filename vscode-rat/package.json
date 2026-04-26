@@ -380,6 +380,9 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "package": "npx @vscode/vsce package --no-dependencies",
+    "publish:marketplace": "npm run package && npx @vscode/vsce publish --packagePath rat-${npm_package_version}.vsix --skip-duplicate",
+    "publish:openvsx": "npm run package && npx ovsx publish --skip-duplicate rat-${npm_package_version}.vsix",
+    "publish:all": "npm run publish:marketplace && npm run publish:openvsx",
     "lint": "npx tsc --noEmit"
   },
   "devDependencies": {
