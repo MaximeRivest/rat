@@ -21,7 +21,7 @@ func requirePython(t *testing.T) {
 func newPlainTestKernel(t *testing.T, cwd string) *Python {
 	t.Helper()
 	requirePython(t)
-	p, err := New(t.Name(), cwd, "", "")
+	p, err := New(safeTestName(t), cwd, "", "")
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
@@ -34,6 +34,12 @@ func newPlainTestKernel(t *testing.T, cwd string) *Python {
 // Top-level await requires IPython's AST transformer. The kernel uses
 // plain ast.parse, so top-level await is a syntax error at the kernel
 // level. This test verifies the kernel rejects it cleanly.
+func safeTestName(t *testing.T) string {
+	t.Helper()
+	name := strings.NewReplacer("/", "_", " ", "_", "(", "_", ")", "_").Replace(t.Name())
+	return strings.Trim(name, ".-_")
+}
+
 func TestPythonKernelTopLevelAwaitIsSyntaxError(t *testing.T) {
 	p := newPlainTestKernel(t, t.TempDir())
 
@@ -377,7 +383,7 @@ func TestPythonActivityLogClearedOnReset(t *testing.T) {
 
 func TestPythonShutdownCleansUp(t *testing.T) {
 	requirePython(t)
-	p, err := New(t.Name(), t.TempDir(), "", "")
+	p, err := New(safeTestName(t), t.TempDir(), "", "")
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}

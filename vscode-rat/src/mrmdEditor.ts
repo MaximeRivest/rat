@@ -21,6 +21,7 @@ interface WebviewMessage {
   text?: string;
   code?: string;
   language?: string;
+  expression?: string | null;
   at?: string | null;
   cursor?: number;
   url?: string;
@@ -28,17 +29,61 @@ interface WebviewMessage {
   assetType?: string;
 }
 
+export interface RatMrmdEditorCallbacks {
+  onActiveDocument?: (document: vscode.TextDocument) => void;
+  onSelection?: (
+    document: vscode.TextDocument,
+    language: string | null,
+    expression: string | null,
+  ) => void;
+}
+
+const livePanels = new Set<vscode.WebviewPanel>();
+
+export function syncRatMarkdownThemes(): void {
+  for (const panel of livePanels) {
+    void panel.webview.postMessage({ type: "themeChanged" });
+  }
+}
+
+interface RatMarkdownAppearance {
+  pageMode: string;
+  themeAssociations: Record<string, string>;
+  canvasBackground: string;
+  fontScale: number;
+}
+
+export function syncRatMarkdownPageMode(): void {
+  const appearance = ratMarkdownAppearance();
+  for (const panel of livePanels) {
+    void panel.webview.postMessage({ type: "pageModeChanged", pageMode: appearance.pageMode });
+  }
+}
+
+export function syncRatMarkdownAppearance(): void {
+  const appearance = ratMarkdownAppearance();
+  for (const panel of livePanels) {
+    void panel.webview.postMessage({ type: "appearanceChanged", ...appearance });
+  }
+}
+
 export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
   static readonly viewType = "rat.mrmdEditor";
 
   private readonly running = new Map<number, McpClient>();
 
-  constructor(private readonly ctx: vscode.ExtensionContext) {}
+  constructor(
+    private readonly ctx: vscode.ExtensionContext,
+    private readonly callbacks: RatMrmdEditorCallbacks = {},
+  ) {}
 
-  static register(ctx: vscode.ExtensionContext): vscode.Disposable {
+  static register(
+    ctx: vscode.ExtensionContext,
+    callbacks: RatMrmdEditorCallbacks = {},
+  ): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       RatMrmdEditorProvider.viewType,
-      new RatMrmdEditorProvider(ctx),
+      new RatMrmdEditorProvider(ctx, callbacks),
       {
         supportsMultipleEditorsPerDocument: false,
         webviewOptions: {
@@ -58,6 +103,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
       localResourceRoots: this.localResourceRoots(document),
     };
     webviewPanel.webview.html = this.html(webviewPanel.webview, document);
+    livePanels.add(webviewPanel);
 
     const disposables: vscode.Disposable[] = [];
     let ignoredDocumentText: string | undefined;
@@ -89,7 +135,12 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
         try {
           switch (message.type) {
             case "ready":
+              this.noteActiveDocument(document);
               await this.initializeWebview(webviewPanel, document);
+              break;
+
+            case "selection":
+              this.handleSelection(document, message);
               break;
 
             case "edit":
@@ -141,7 +192,16 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
       }),
     );
 
+    disposables.push(
+      webviewPanel.onDidChangeViewState((event) => {
+        if (event.webviewPanel.active || event.webviewPanel.visible) {
+          this.noteActiveDocument(document);
+        }
+      }),
+    );
+
     webviewPanel.onDidDispose(() => {
+      livePanels.delete(webviewPanel);
       for (const d of disposables) d.dispose();
     });
   }
@@ -161,6 +221,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
       version: document.version,
       theme: currentMrmdTheme(),
       docDirWebviewUri: webviewPanel.webview.asWebviewUri(docDir).toString(),
+      ...ratMarkdownAppearance(),
       projectRoot: folder?.uri.fsPath ?? path.dirname(document.uri.fsPath),
       documentPath: document.uri.scheme === "file" ? document.uri.fsPath : document.uri.toString(),
     });
@@ -173,6 +234,21 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
     const edit = new vscode.WorkspaceEdit();
     edit.replace(document.uri, fullDocumentRange(document), text);
     await vscode.workspace.applyEdit(edit);
+  }
+
+  private noteActiveDocument(document: vscode.TextDocument): void {
+    this.callbacks.onActiveDocument?.(document);
+  }
+
+  private handleSelection(document: vscode.TextDocument, message: WebviewMessage): void {
+    this.noteActiveDocument(document);
+    const language = typeof message.language === "string" && message.language.length > 0
+      ? message.language
+      : null;
+    const expression = typeof message.expression === "string" && message.expression.length > 0
+      ? message.expression
+      : null;
+    this.callbacks.onSelection?.(document, language, expression);
   }
 
   private async handleRatRun(
@@ -274,6 +350,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
     } finally {
       clearInterval(poll);
       this.running.delete(id);
+      this.noteActiveDocument(document);
     }
   }
 
@@ -601,6 +678,25 @@ function configurationTarget(): vscode.ConfigurationTarget {
   return vscode.workspace.workspaceFolders?.length
     ? vscode.ConfigurationTarget.Workspace
     : vscode.ConfigurationTarget.Global;
+}
+
+function ratMarkdownAppearance(): RatMarkdownAppearance {
+  const cfg = vscode.workspace.getConfiguration("rat");
+  return {
+    pageMode: cfg.get<string>("markdownPageMode", "auto"),
+    themeAssociations: cfg.get<Record<string, string>>("markdownThemeAssociations", {
+      light: "vscode-host-light",
+      dark: "vscode-host-dark",
+      highContrast: "vscode-host-dark",
+      highContrastLight: "vscode-host-light",
+    }),
+    canvasBackground: cfg.get<string>("markdownPageCanvasBackground", "auto"),
+    fontScale: cfg.get<number>("markdownFontScale", 1),
+  };
+}
+
+export async function configureRatMarkdownAppearance(): Promise<void> {
+  await vscode.commands.executeCommand("workbench.action.openSettings", "rat markdown");
 }
 
 function currentMrmdTheme(): string {

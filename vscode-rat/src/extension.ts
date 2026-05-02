@@ -13,6 +13,7 @@ import {
   parseCells,
   cellAtLine,
   cellsUpTo,
+  ratLangForFence,
 } from "./cells";
 import { RatCodeLensProvider } from "./codeLens";
 import { RatInspectorViewProvider } from "./inspectorView";
@@ -56,10 +57,13 @@ import {
   disposeInlineOutput,
 } from "./inlineOutput";
 import {
+  configureRatMarkdownAppearance,
   openRenderedMarkdownEditor,
   restoreDefaultMarkdownEditor,
   RatMrmdEditorProvider,
   setMarkdownPreviewShortcutReplacement,
+  syncRatMarkdownAppearance,
+  syncRatMarkdownThemes,
   useRatMarkdownAsDefaultEditor,
 } from "./mrmdEditor";
 
@@ -78,7 +82,33 @@ export function activate(ctx: vscode.ExtensionContext): void {
   initRuntimeState(ctx);
   initRatInstaller(ctx);
 
-  ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx));
+  ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx, {
+    onActiveDocument: (document) => {
+      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
+      if (runtimeBar) updateRuntimeBarForDocument(document);
+      variablesProvider?.updateDocument(document);
+    },
+    onSelection: (document, language, expression) => {
+      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
+      const ratLang = language ? ratLangForFence(language) : null;
+      if (runtimeBar) updateRuntimeBarForDocument(document, language ?? undefined);
+      variablesProvider?.updateDocument(document, ratLang);
+      inspectorProvider?.updateRatMarkdownSelection(document, language, expression);
+    },
+  }));
+  ctx.subscriptions.push(
+    vscode.window.onDidChangeActiveColorTheme(() => syncRatMarkdownThemes()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration("rat.markdownPageMode") ||
+        event.affectsConfiguration("rat.markdownThemeAssociations") ||
+        event.affectsConfiguration("rat.markdownPageCanvasBackground") ||
+        event.affectsConfiguration("rat.markdownFontScale")
+      ) {
+        syncRatMarkdownAppearance();
+      }
+    }),
+  );
 
   // Status bar — queue state
   statusBar = vscode.window.createStatusBarItem(
@@ -293,6 +323,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   reg("rat.openMarkdownPreview", openRenderedMarkdownEditor);
   reg("rat.enableMarkdownPreviewReplacement", () => setMarkdownPreviewShortcutReplacement(true));
   reg("rat.disableMarkdownPreviewReplacement", () => setMarkdownPreviewShortcutReplacement(false));
+  reg("rat.configureMarkdownAppearance", configureRatMarkdownAppearance);
   reg("rat.useMrmdAsDefaultMarkdownEditor", useRatMarkdownAsDefaultEditor);
   reg("rat.restoreDefaultMarkdownEditor", restoreDefaultMarkdownEditor);
   reg("rat.showVariables", showVariablesCmd);
@@ -368,19 +399,33 @@ function shouldTriggerMemberSuggest(
 }
 
 function updateRuntimeBar(editor: vscode.TextEditor | undefined): void {
-  if (!editor || !isRatFile(editor.document)) {
+  if (!editor) {
+    runtimeBar.hide();
+    return;
+  }
+  updateRuntimeBarForDocument(editor.document);
+}
+
+function updateRuntimeBarForDocument(
+  document: vscode.TextDocument,
+  preferredFenceLang?: string,
+): void {
+  if (!isRatFile(document)) {
     runtimeBar.hide();
     return;
   }
 
-  const fl = detectFileLang(editor.document);
+  const fl = detectFileLang(document);
   let lang: string;
+  const preferredRatLang = preferredFenceLang ? ratLangForFence(preferredFenceLang) : null;
 
-  if (fl.mode === "source" && fl.ratLang) {
+  if (preferredRatLang) {
+    lang = preferredRatLang;
+  } else if (fl.mode === "source" && fl.ratLang) {
     lang = fl.ratLang;
   } else {
     // Notebook mode — use first cell's language
-    const cells = parseCells(editor.document);
+    const cells = parseCells(document);
     if (cells.length === 0) {
       runtimeBar.hide();
       return;
@@ -388,9 +433,9 @@ function updateRuntimeBar(editor: vscode.TextEditor | undefined): void {
     lang = cells[0].ratLang;
   }
 
-  const docUri = editor.document.uri.toString();
+  const docUri = document.uri.toString();
   const override = getRuntimeOverride(docUri, lang);
-  const { name, scope } = resolveRuntime(lang, editor.document);
+  const { name, scope } = resolveRuntime(lang, document);
 
   const state = readState();
   const kernel = state.kernels.find((k) => k.name === name);
@@ -813,7 +858,7 @@ async function clearOutputsCmd(): Promise<void> {
   const fl = detectFileLang(editor.document);
   if (fl.mode === "notebook") {
     await clearAllOutputs(editor);
-  } else {
+  } else if (fl.mode === "source") {
     clearResults(editor);
   }
 }
@@ -826,10 +871,12 @@ async function showVariablesCmd(): Promise<void> {
   let lang: string;
   if (fl.mode === "source" && fl.ratLang) {
     lang = fl.ratLang;
-  } else {
+  } else if (fl.mode === "notebook") {
     const cells = parseCells(editor.document);
     if (!cells.length) return;
     lang = cells[0].ratLang;
+  } else {
+    return;
   }
 
   const { name, cwd } = resolveRuntime(lang, editor.document);
@@ -858,10 +905,12 @@ async function stopKernelCmd(): Promise<void> {
   let lang: string;
   if (fl.mode === "source" && fl.ratLang) {
     lang = fl.ratLang;
-  } else {
+  } else if (fl.mode === "notebook") {
     const cells = parseCells(editor.document);
     if (!cells.length) return;
     lang = cells[0].ratLang;
+  } else {
+    return;
   }
 
   const { name } = resolveRuntime(lang, editor.document);
@@ -932,10 +981,12 @@ async function restartKernelCmd(): Promise<void> {
   let lang: string;
   if (fl.mode === "source" && fl.ratLang) {
     lang = fl.ratLang;
-  } else {
+  } else if (fl.mode === "notebook") {
     const cells = parseCells(editor.document);
     if (!cells.length) return;
     lang = cells[0].ratLang;
+  } else {
+    return;
   }
 
   const { name, cwd } = resolveRuntime(lang, editor.document);

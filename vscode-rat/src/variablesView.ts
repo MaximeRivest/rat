@@ -52,9 +52,13 @@ export class RatVariablesViewProvider implements vscode.WebviewViewProvider, vsc
   }
 
   update(editor: vscode.TextEditor | undefined): void {
+    this.updateDocument(editor?.document);
+  }
+
+  updateDocument(document: vscode.TextDocument | undefined, ratLang?: string | null): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
-      void this.updateNow(editor);
+      void this.updateNow(document, ratLang);
     }, 200);
   }
 
@@ -63,10 +67,13 @@ export class RatVariablesViewProvider implements vscode.WebviewViewProvider, vsc
     for (const disposable of this.disposables) disposable.dispose();
   }
 
-  private async updateNow(editor: vscode.TextEditor | undefined): Promise<void> {
+  private async updateNow(
+    document: vscode.TextDocument | undefined,
+    ratLang?: string | null,
+  ): Promise<void> {
     if (!this.view) return;
     const seq = ++this.seq;
-    this.target = editor ? runtimeTarget(editor.document) : null;
+    this.target = document ? runtimeTarget(document, ratLang) : null;
     this.selectedName = null;
     this.selectedInfo = null;
 
@@ -252,13 +259,18 @@ export class RatVariablesViewProvider implements vscode.WebviewViewProvider, vsc
   }
 }
 
-function runtimeTarget(document: vscode.TextDocument): RuntimeTarget | null {
+function runtimeTarget(
+  document: vscode.TextDocument,
+  preferredRatLang?: string | null,
+): RuntimeTarget | null {
   if (!isRatFile(document)) return null;
 
   const fl = detectFileLang(document);
   if (fl.mode === "source") {
     return fl.ratLang ? { ratLang: fl.ratLang, document } : null;
   }
+
+  if (preferredRatLang) return { ratLang: preferredRatLang, document };
 
   const cells = parseCells(document);
   const first = cells.find((cell) => cell.executable);

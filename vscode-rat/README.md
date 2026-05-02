@@ -84,6 +84,8 @@ This opens an editable mrmd-powered view (not VS Code's Markdown preview). Markd
 
 If you want `Ctrl+Shift+V` / `Cmd+Shift+V` to open Rat Markdown instead of VS Code's built-in Markdown preview, run **Rat: Use Rat Markdown for Ctrl+Shift+V Preview** or set `rat.replaceMarkdownPreviewShortcut` to `true`. To make Rat Markdown the default editor for `.md` / `.qmd` / `.rmd` files in the current workspace, run **Rat: Use Rat Markdown as Default Markdown Editor**.
 
+By default, Rat Markdown uses a paper-like page view when there is enough horizontal space, similar to Google Docs or Word. Set `rat.markdownPageMode` to `"always"`, `"auto"`, or `"never"` to control that behavior. Run **Rat: Configure Rat Markdown Appearance** to quickly find the related settings, including theme associations and the page canvas background.
+
 ### Keybindings
 
 | Key | Action |
@@ -134,12 +136,17 @@ a Markdown image after the output block:
 | `rat.maxOutputLines` | `100` | Max lines in output cells (0 = unlimited) |
 | `rat.assetsDir` | `"_assets"` | Plot image directory (relative to workspace) |
 | `rat.replaceMarkdownPreviewShortcut` | `false` | Use Rat Markdown for `Ctrl+Shift+V` / `Cmd+Shift+V` in Markdown-like files |
+| `rat.markdownPageMode` | `"auto"` | Page-style Rat Markdown layout: `"auto"`, `"always"`, or `"never"` |
+| `rat.markdownThemeAssociations` | VS Code host themes | Map VS Code light/dark/high-contrast kinds to mrmd theme names |
+| `rat.markdownPageCanvasBackground` | `"auto"` | Background around the page (`"auto"`, `"editor"`, `"sideBar"`, `"panel"`, `"transparent"`, or CSS color) |
+| `rat.markdownFontScale` | `1` | Relative font scale for Rat Markdown compared with VS Code's editor font size |
 
 ## Commands
 
 All available via the Command Palette (`Ctrl+Shift+P`):
 
 - **Rat: Run Cell** / **Run Cell and Advance** / **Run Above** / **Run All Cells**
+- **Rat: Configure Rat Markdown Appearance** — open Rat Markdown theme/page settings
 - **Rat: Install CLI** — download the rat binary into VS Code extension storage
 - **Rat: Cancel Execution** / **Clear Queue** / **Pause / Resume Queue**
 - **Rat: Clear All Outputs** — remove all ` ```output ``` ` blocks

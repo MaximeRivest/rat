@@ -10,6 +10,11 @@
 
   let editor = null;
   let unwatchTheme = null;
+  let unwatchPageMode = null;
+  let pageModePreference = "auto";
+  let themeAssociations = defaultThemeAssociations();
+  let pageCanvasBackground = "auto";
+  let markdownFontScale = 1;
   let applyingHostUpdate = false;
   let editTimer = 0;
   let lastSentText = "";
@@ -29,11 +34,13 @@
 
   const supportedSet = new Set(supportedLanguages);
 
+  const PAGE_VIEW_MIN_WIDTH = 980;
+
   const HOST_THEME_OVERRIDES = {
     "--widget-font-mono": "var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace)",
     "--widget-font-sans": "var(--vscode-font-family, system-ui, sans-serif)",
     "--editor-font-family": "var(--vscode-editor-font-family, var(--vscode-font-family, system-ui, sans-serif))",
-    "--editor-font-size": "var(--vscode-editor-font-size, 14px)",
+    "--editor-font-size": "var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px))",
     "--editor-background": "var(--vscode-editor-background)",
     "--editor-foreground": "var(--vscode-editor-foreground)",
     "--editor-line-number": "var(--vscode-editorLineNumber-foreground, var(--vscode-descriptionForeground))",
@@ -45,6 +52,7 @@
     "--editor-gutter": "var(--vscode-editorGutter-background, var(--vscode-editor-background))",
     "--editor-matching-bracket": "var(--vscode-editorBracketMatch-background, transparent)",
 
+    "--widget-font-size": "var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px))",
     "--widget-text": "var(--vscode-editor-foreground)",
     "--widget-text-muted": "var(--vscode-descriptionForeground)",
     "--widget-text-accent": "var(--vscode-textLink-foreground)",
@@ -109,14 +117,43 @@
     if (status) status.textContent = text || "";
   }
 
-  function isDarkTheme() {
+  function defaultThemeAssociations() {
+    return {
+      light: "vscode-host-light",
+      dark: "vscode-host-dark",
+      highContrast: "vscode-host-dark",
+      highContrastLight: "vscode-host-light",
+    };
+  }
+
+  function normalizeThemeAssociations(value) {
+    const defaults = defaultThemeAssociations();
+    const input = value && typeof value === "object" ? value : {};
+    return {
+      light: typeof input.light === "string" && input.light ? input.light : defaults.light,
+      dark: typeof input.dark === "string" && input.dark ? input.dark : defaults.dark,
+      highContrast: typeof input.highContrast === "string" && input.highContrast ? input.highContrast : defaults.highContrast,
+      highContrastLight: typeof input.highContrastLight === "string" && input.highContrastLight ? input.highContrastLight : defaults.highContrastLight,
+    };
+  }
+
+  function hostThemeKind() {
     const cls = document.body.classList;
-    return cls.contains("vscode-dark") ||
-      (cls.contains("vscode-high-contrast") && !cls.contains("vscode-high-contrast-light"));
+    if (cls.contains("vscode-high-contrast-light")) return "highContrastLight";
+    if (cls.contains("vscode-high-contrast")) return "highContrast";
+    if (cls.contains("vscode-dark")) return "dark";
+    return "light";
+  }
+
+  function isDarkTheme() {
+    const kind = hostThemeKind();
+    return kind === "dark" || kind === "highContrast";
   }
 
   function hostThemeName() {
-    return isDarkTheme() ? "vscode-host-dark" : "vscode-host-light";
+    const defaults = defaultThemeAssociations();
+    const kind = hostThemeKind();
+    return themeAssociations[kind] || defaults[kind] || (isDarkTheme() ? defaults.dark : defaults.light);
   }
 
   function registerHostThemes() {
@@ -139,6 +176,87 @@
     }));
   }
 
+  function normalizePageMode(value) {
+    return value === "always" || value === "never" || value === "auto" ? value : "auto";
+  }
+
+  function normalizeCanvasBackground(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : "auto";
+  }
+
+  function normalizeFontScale(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 1;
+    return Math.max(0.5, Math.min(2.5, n));
+  }
+
+  function fontSizeExpression(scale = markdownFontScale) {
+    const normalized = normalizeFontScale(scale);
+    return `calc(var(--vscode-editor-font-size, 14px) * ${normalized})`;
+  }
+
+  function codeFontSizeExpression(scale = markdownFontScale) {
+    const normalized = normalizeFontScale(scale);
+    return `calc(var(--vscode-editor-font-size, 14px) * ${normalized} * 0.92)`;
+  }
+
+  function resolveCanvasBackground(value) {
+    const normalized = normalizeCanvasBackground(value);
+    switch (normalized) {
+      case "auto":
+        return "color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-editor-foreground) 12%)";
+      case "editor":
+        return "var(--vscode-editor-background)";
+      case "sideBar":
+        return "var(--vscode-sideBar-background, var(--vscode-editor-background))";
+      case "panel":
+        return "var(--vscode-panel-background, var(--vscode-sideBar-background, var(--vscode-editor-background)))";
+      case "transparent":
+        return "transparent";
+      default:
+        return normalized;
+    }
+  }
+
+  function applyHostCssVariables() {
+    if (!root) return;
+    root.style.setProperty("--rat-page-canvas-background", resolveCanvasBackground(pageCanvasBackground));
+    root.style.setProperty("--rat-markdown-font-size", fontSizeExpression());
+    root.style.setProperty("--rat-markdown-code-font-size", codeFontSizeExpression());
+    root.style.setProperty(
+      "--rat-page-shadow",
+      isDarkTheme()
+        ? "0 18px 60px rgba(0, 0, 0, 0.34)"
+        : "0 18px 60px rgba(15, 23, 42, 0.14)",
+    );
+  }
+
+  function shouldUsePagePresentation() {
+    if (pageModePreference === "always") return true;
+    if (pageModePreference === "never") return false;
+    const width = root ? root.getBoundingClientRect().width : window.innerWidth;
+    return width >= PAGE_VIEW_MIN_WIDTH;
+  }
+
+  function applyResponsivePresentation() {
+    applyHostCssVariables();
+    if (!editor || typeof editor.setDocumentPresentationMode !== "function") return;
+    const next = shouldUsePagePresentation() ? "page" : "flow";
+    if (!editor.getDocumentPresentationMode || editor.getDocumentPresentationMode() !== next) {
+      editor.setDocumentPresentationMode(next);
+    }
+  }
+
+  function watchPageMode() {
+    if (!root || typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", applyResponsivePresentation);
+      return () => window.removeEventListener("resize", applyResponsivePresentation);
+    }
+    const observer = new ResizeObserver(() => applyResponsivePresentation());
+    observer.observe(root);
+    return () => observer.disconnect();
+  }
+
   function createHostDocumentTemplate() {
     return {
       name: "VS Code",
@@ -147,11 +265,16 @@
       page: {
         background: "var(--vscode-editor-background)",
         maxWidth: "",
+        paperSize: "letter",
+        marginTop: "0.8in",
+        marginBottom: "0.8in",
+        marginLeft: "0.9in",
+        marginRight: "0.9in",
       },
       body: {
         color: "var(--vscode-editor-foreground)",
         fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family, system-ui, sans-serif))",
-        fontSize: "var(--vscode-editor-font-size, 14px)",
+        fontSize: "var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px))",
         lineHeight: "1.6",
       },
       heading: {
@@ -176,6 +299,7 @@
           fontFamily: "var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace)",
           background: "var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent))",
           color: "var(--vscode-editor-foreground)",
+          fontSize: "var(--rat-markdown-code-font-size, var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px)))",
           borderColor: "var(--vscode-editorWidget-border, var(--vscode-panel-border))",
           borderRadius: "4px",
         },
@@ -208,6 +332,10 @@
     style.id = "rat-vscode-theme-style";
     style.textContent = `
 #editor, .mrmd-root {
+  --rat-page-canvas-background: color-mix(in srgb, var(--vscode-editor-background) 88%, var(--vscode-editor-foreground) 12%);
+  --rat-page-shadow: 0 18px 60px rgba(15, 23, 42, 0.14);
+  --rat-markdown-font-size: var(--vscode-editor-font-size, 14px);
+  --rat-markdown-code-font-size: calc(var(--rat-markdown-font-size) * 0.92);
   --editor-background: var(--vscode-editor-background);
   --editor-foreground: var(--vscode-editor-foreground);
   --editor-cursor: var(--vscode-editorCursor-foreground);
@@ -251,9 +379,35 @@
   color: var(--vscode-editor-foreground) !important;
 }
 
+#editor.mrmd-presentation-page {
+  background: var(--rat-page-canvas-background) !important;
+}
+
+#editor.mrmd-presentation-page > .cm-editor {
+  background: var(--vscode-editor-background) !important;
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, transparent));
+  box-shadow: var(--rat-page-shadow) !important;
+}
+
+#editor.mrmd-presentation-page .cm-scroller {
+  background: var(--vscode-editor-background) !important;
+}
+
 #editor .cm-content,
 #editor .cm-line {
   color: var(--vscode-editor-foreground);
+}
+
+#editor .cm-content {
+  font-size: var(--rat-markdown-font-size);
+}
+
+#editor .cm-codeblock,
+#editor .cm-output,
+#editor .cm-output-widget,
+#editor .cm-cell-output,
+#editor .mrmd-output {
+  font-size: var(--rat-markdown-code-font-size);
 }
 
 #editor .cm-cursor,
@@ -295,19 +449,29 @@
 
   function syncHostTheme() {
     registerHostThemes();
+    applyHostCssVariables();
     if (!editor) return;
     const nextTheme = hostThemeName();
-    if (editor.getTheme && editor.getTheme() !== nextTheme) {
-      editor.setTheme(nextTheme);
-    }
+    if (editor.setTheme) editor.setTheme(nextTheme);
     if (editor.setDocumentTemplate) {
       editor.setDocumentTemplate(createHostDocumentTemplate());
     }
+    if (editor.view) {
+      editor.view.dispatch({ effects: [] });
+    }
+    applyResponsivePresentation();
+  }
+
+  function scheduleHostThemeSync() {
+    syncHostTheme();
+    requestAnimationFrame(syncHostTheme);
+    setTimeout(syncHostTheme, 50);
+    setTimeout(syncHostTheme, 250);
   }
 
   function watchHostTheme() {
-    const observer = new MutationObserver(syncHostTheme);
-    observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    const observer = new MutationObserver(scheduleHostThemeSync);
+    observer.observe(document.body, { attributes: true, attributeFilter: ["class", "style"] });
     return () => observer.disconnect();
   }
 
@@ -423,6 +587,57 @@
     while (start > 0 && /[\w.]/.test(text[start - 1])) start -= 1;
     while (end < text.length && /[\w.]/.test(text[end])) end += 1;
     return text.slice(start, end).replace(/^\.+|\.+$/g, "") || null;
+  }
+
+  function isExpression(value, language) {
+    const text = String(value || "").trim();
+    if (!text || text.length > 200 || /^\d/.test(text) || text.includes("..")) return false;
+    const lang = String(language || "").toLowerCase();
+    if (lang === "javascript" || lang === "js" || lang === "node") {
+      return /^[$A-Za-z_][\w$]*(?:\.[$A-Za-z_][\w$]*)*$/.test(text);
+    }
+    return /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(text);
+  }
+
+  function currentInspectionTarget() {
+    if (!editor || !editor.view || !editor.getCells) return { language: null, expression: null };
+
+    const state = editor.view.state;
+    const selection = state.selection.main;
+    const pos = selection.head;
+    const cell = editor.getCells().find((candidate) =>
+      candidate.executable && pos >= candidate.codeStart && pos <= candidate.codeEnd
+    );
+
+    if (!cell) return { language: null, expression: null };
+
+    let expression = null;
+    if (!selection.empty) {
+      const selected = state.sliceDoc(selection.from, selection.to).trim();
+      if (isExpression(selected, cell.language)) expression = selected;
+    }
+
+    if (!expression) {
+      const offset = Math.max(0, Math.min(pos - cell.codeStart, cell.code.length));
+      expression = wordAt(cell.code, offset);
+      if (!isExpression(expression, cell.language)) expression = null;
+    }
+
+    return { language: cell.baseLanguage || cell.language, expression };
+  }
+
+  let selectionTimer = 0;
+  function postSelection() {
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(() => {
+      selectionTimer = 0;
+      const target = currentInspectionTarget();
+      vscode.postMessage({
+        type: "selection",
+        language: target.language,
+        expression: target.expression,
+      });
+    }, 80);
   }
 
   function splitRatAssets(text) {
@@ -676,6 +891,11 @@
       return;
     }
 
+    pageModePreference = normalizePageMode(message.pageMode);
+    themeAssociations = normalizeThemeAssociations(message.themeAssociations);
+    pageCanvasBackground = normalizeCanvasBackground(message.canvasBackground);
+    markdownFontScale = normalizeFontScale(message.fontScale);
+
     const ratRuntime = createRatRuntime();
     installHostThemeStyle();
     registerHostThemes();
@@ -688,6 +908,7 @@
       theme: hostThemeName(),
       documentTemplate: createHostDocumentTemplate(),
       documentStylePreview: true,
+      documentPresentationMode: "flow",
       themingMode: "hosted",
       projectRoot: message.projectRoot || null,
       documentPath: message.documentPath || null,
@@ -710,8 +931,11 @@
 
     installHostThemeStyle();
     if (unwatchTheme) unwatchTheme();
+    if (unwatchPageMode) unwatchPageMode();
     unwatchTheme = watchHostTheme();
+    unwatchPageMode = watchPageMode();
     syncHostTheme();
+    applyResponsivePresentation();
 
     if (editor.execution) {
       wireCancellationBridge();
@@ -734,9 +958,12 @@
       vscode.postMessage({ type: "save" });
     });
 
+    editor.onSelectionChange(postSelection);
+
     lastSentText = message.text || "";
     setStatus("Ready");
     editor.focus();
+    postSelection();
   }
 
   window.addEventListener("message", (event) => {
@@ -754,6 +981,25 @@
         editor.setContent(message.text || "");
         lastSentText = message.text || "";
         setTimeout(() => { applyingHostUpdate = false; }, 0);
+        postSelection();
+        break;
+
+      case "themeChanged":
+        scheduleHostThemeSync();
+        break;
+
+      case "pageModeChanged":
+        pageModePreference = normalizePageMode(message.pageMode);
+        applyResponsivePresentation();
+        break;
+
+      case "appearanceChanged":
+        pageModePreference = normalizePageMode(message.pageMode);
+        themeAssociations = normalizeThemeAssociations(message.themeAssociations);
+        pageCanvasBackground = normalizeCanvasBackground(message.canvasBackground);
+        markdownFontScale = normalizeFontScale(message.fontScale);
+        scheduleHostThemeSync();
+        applyResponsivePresentation();
         break;
 
       case "ratOutput": {

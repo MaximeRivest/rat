@@ -43,5 +43,14 @@
       "```"
     ],
     "description": "Insert a JavaScript code cell"
+  },
+  "Pi cell": {
+    "prefix": "pi",
+    "body": [
+      "```pi",
+      "$0",
+      "```"
+    ],
+    "description": "Insert a Pi code cell"
   }
 }

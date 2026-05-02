@@ -22,6 +22,7 @@ import (
 
 	"github.com/maximerivest/rat/internal/lang"
 	"github.com/maximerivest/rat/internal/project"
+	"github.com/maximerivest/rat/internal/runtimeid"
 	"github.com/maximerivest/rat/internal/state"
 )
 
@@ -207,7 +208,7 @@ func resolveLanguage(
 	runtimes []state.Runtime,
 ) (*Result, error) {
 	root, _ := project.FindRoot(cwd)
-	projName := project.Name(root)
+	projName := runtimeid.SlugPart(project.Name(root))
 
 	// Build the canonical kernel name: lang@project
 	canonicalName := computeCanonicalName(canonical, projName, root, kernels, runtimes)
@@ -304,8 +305,8 @@ func parseInstance(input string) (string, int, bool) {
 // parentQualifiedName returns "parent-basename" for collision tiebreaking.
 // e.g. ~/Work/sidehustle/backend → "sidehustle-backend"
 func parentQualifiedName(root string) string {
-	base := project.Name(root)
-	parent := project.Name(filepath.Dir(root))
+	base := runtimeid.SlugPart(project.Name(root))
+	parent := runtimeid.SlugPart(project.Name(filepath.Dir(root)))
 	if parent == base || parent == "." || parent == string(filepath.Separator) {
 		return base
 	}

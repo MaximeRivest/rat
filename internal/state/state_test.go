@@ -398,3 +398,19 @@ func TestStoppedKernelSurvivesListKnown(t *testing.T) {
 		t.Fatalf("expected stopped, got %s", kernels[0].Status)
 	}
 }
+
+func TestPutRejectsInvalidName(t *testing.T) {
+	s := tempStore(t)
+	err := s.Put(Kernel{Name: "../evil", Lang: "py", Port: 8717, PID: os.Getpid(), Cwd: "/tmp", Started: time.Now()})
+	if err == nil {
+		t.Fatal("expected invalid runtime name error")
+	}
+}
+
+func TestPutRuntimeRejectsInvalidName(t *testing.T) {
+	s := tempStore(t)
+	err := s.PutRuntime(Runtime{Name: "py/evil", Lang: "py", Cwd: "/tmp"})
+	if err == nil {
+		t.Fatal("expected invalid runtime name error")
+	}
+}

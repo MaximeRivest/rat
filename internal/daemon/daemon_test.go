@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,4 +90,65 @@ func TestOpenKernelLogPermissions(t *testing.T) {
 	if got := fileInfo.Mode().Perm(); got != 0o600 {
 		t.Fatalf("log file mode = %#o, want 0o600", got)
 	}
+}
+
+func TestOpenKernelLogRejectsInvalidName(t *testing.T) {
+	logDir := filepath.Join(t.TempDir(), "logs")
+	if _, err := openKernelLog(logDir, "../evil"); err == nil {
+		t.Fatal("expected invalid runtime name error")
+	}
+}
+
+func TestBuildServeArgsDoNotIncludeEnvOrOptions(t *testing.T) {
+	opts := StartOpts{
+		Name:    "slack@proj",
+		Lang:    "slack",
+		Cwd:     "/tmp/proj",
+		Env:     map[string]string{"SLACK_BOT_TOKEN": "xoxb-secret"},
+		Options: map[string]string{"token": "secret-token", "model": "claude-sonnet"},
+	}
+
+	args := buildServeArgs(opts, 8717)
+	joined := strings.Join(args, "\x00")
+	for _, forbidden := range []string{"xoxb-secret", "secret-token", "SLACK_BOT_TOKEN", "--env", "--opt"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("serve args leak %q: %#v", forbidden, args)
+		}
+	}
+	if !strings.Contains(joined, "serve\x00slack@proj") || !strings.Contains(joined, "--port\x008717") {
+		t.Fatalf("serve args missing expected fields: %#v", args)
+	}
+}
+
+func TestBuildServeEnvCarriesEnvAndOptions(t *testing.T) {
+	opts := StartOpts{
+		Env:     map[string]string{"SLACK_BOT_TOKEN": "xoxb-new"},
+		Options: map[string]string{"token": "secret-token", "model": "claude-sonnet"},
+	}
+	env := buildServeEnv([]string{"PATH=/bin", "SLACK_BOT_TOKEN=old", ServeOptionsEnv + "=stale"}, opts)
+
+	if got := envValue(env, "SLACK_BOT_TOKEN"); got != "xoxb-new" {
+		t.Fatalf("SLACK_BOT_TOKEN = %q, want xoxb-new", got)
+	}
+	rawOptions := envValue(env, ServeOptionsEnv)
+	if rawOptions == "" || rawOptions == "stale" {
+		t.Fatalf("%s = %q, want fresh JSON", ServeOptionsEnv, rawOptions)
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal([]byte(rawOptions), &decoded); err != nil {
+		t.Fatalf("decode %s: %v", ServeOptionsEnv, err)
+	}
+	if decoded["token"] != "secret-token" || decoded["model"] != "claude-sonnet" {
+		t.Fatalf("decoded options = %#v", decoded)
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
 }

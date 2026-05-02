@@ -9,16 +9,19 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/maximerivest/rat/internal/procutil"
+	"github.com/maximerivest/rat/internal/runtimeid"
 	"github.com/maximerivest/rat/internal/securefs"
 	"github.com/maximerivest/rat/internal/state"
 )
@@ -27,6 +30,10 @@ const (
 	BasePort     = 8717
 	StartupMax   = 5 * time.Second
 	PollInterval = 100 * time.Millisecond
+
+	// ServeOptionsEnv carries structured runtime options to the background
+	// `rat serve` process without exposing option values in process arguments.
+	ServeOptionsEnv = "RAT_SERVE_OPTIONS_JSON"
 )
 
 // StartOpts configures a kernel start.
@@ -40,9 +47,87 @@ type StartOpts struct {
 	Env         map[string]string // extra env vars / secrets
 }
 
+func buildServeArgs(opts StartOpts, port int) []string {
+	args := []string{"serve", opts.Name, "--lang", opts.Lang, "--kernel-name", opts.Name, "--http", "--port", strconv.Itoa(port)}
+	if opts.Cwd != "" {
+		args = append(args, "--cwd", opts.Cwd)
+	}
+	if opts.Venv != "" {
+		args = append(args, "--venv", opts.Venv)
+	}
+	if opts.RuntimePath != "" {
+		args = append(args, "--runtime", opts.RuntimePath)
+	}
+	return args
+}
+
+func buildServeEnv(base []string, opts StartOpts) []string {
+	env := removeEnv(base, ServeOptionsEnv)
+	env = mergeEnv(env, opts.Env)
+	if len(opts.Options) > 0 {
+		data, _ := json.Marshal(opts.Options)
+		env = mergeEnv(env, map[string]string{ServeOptionsEnv: string(data)})
+	}
+	return env
+}
+
+func mergeEnv(base []string, values map[string]string) []string {
+	out := append([]string{}, base...)
+	if len(values) == 0 {
+		return out
+	}
+
+	index := make(map[string]int, len(out))
+	for i, item := range out {
+		key, _, ok := strings.Cut(item, "=")
+		if ok {
+			index[key] = i
+		}
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		entry := key + "=" + values[key]
+		if i, ok := index[key]; ok {
+			out[i] = entry
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
+}
+
+func removeEnv(base []string, keys ...string) []string {
+	if len(keys) == 0 {
+		return append([]string{}, base...)
+	}
+	remove := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		remove[key] = true
+	}
+	out := make([]string, 0, len(base))
+	for _, item := range base {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && remove[key] {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 // Start launches a kernel in the background and records it in state.
 // Returns the state entry on success.
 func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
+	if err := runtimeid.ValidateName(opts.Name); err != nil {
+		return nil, err
+	}
+
 	// Check if already running and actually responding.
 	existing, err := store.GetKnown(opts.Name)
 	if err != nil {
@@ -74,25 +159,13 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	self, _ = filepath.EvalSymlinks(self)
 
 	// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd> [--venv <venv>]
-	args := []string{"serve", opts.Name, "--lang", opts.Lang, "--kernel-name", opts.Name, "--http", "--port", strconv.Itoa(port)}
-	if opts.Cwd != "" {
-		args = append(args, "--cwd", opts.Cwd)
-	}
-	if opts.Venv != "" {
-		args = append(args, "--venv", opts.Venv)
-	}
-	if opts.RuntimePath != "" {
-		args = append(args, "--runtime", opts.RuntimePath)
-	}
-	for k, v := range opts.Options {
-		args = append(args, "--opt", k+"="+v)
-	}
-	for k, v := range opts.Env {
-		args = append(args, "--env", k+"="+v)
-	}
+	// Runtime env/options are delivered through the child environment, not argv,
+	// so secrets don't show up in process listings.
+	args := buildServeArgs(opts, port)
 
 	cmd := exec.Command(self, args...)
 	cmd.Dir = opts.Cwd
+	cmd.Env = buildServeEnv(os.Environ(), opts)
 
 	// Detach: new session, no stdin, logs to file
 	logDir := filepath.Join(filepath.Dir(store.Path()), "logs")
@@ -308,6 +381,9 @@ func readBody(resp *http.Response) ([]byte, error) {
 }
 
 func openKernelLog(logDir, name string) (*os.File, error) {
+	if err := runtimeid.ValidateName(name); err != nil {
+		return nil, err
+	}
 	return securefs.OpenPrivateAppend(filepath.Join(logDir, name+".log"))
 }
 

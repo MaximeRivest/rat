@@ -321,7 +321,7 @@ func discoverSiblings(baseName string, current int) []int {
 func activityLogPath(name string) string {
 	kdir, err := cachedir.Kernels(name)
 	if err != nil {
-		return filepath.Join(os.Getenv("HOME"), ".cache", "rat", "kernels", name, "activity.jsonl")
+		return ""
 	}
 	return filepath.Join(kdir, "activity.jsonl")
 }

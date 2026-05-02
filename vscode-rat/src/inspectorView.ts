@@ -6,7 +6,7 @@
  */
 
 import * as vscode from "vscode";
-import { cellAtLine, parseCells } from "./cells";
+import { cellAtLine, parseCells, ratLangForFence } from "./cells";
 import { detectFileLang, isRatFile } from "./langDetect";
 import { existingOrRunningClient } from "./rat";
 import { resolveRuntime } from "./resolve";
@@ -48,9 +48,22 @@ export class RatInspectorViewProvider implements vscode.WebviewViewProvider, vsc
   }
 
   update(editor: vscode.TextEditor | undefined): void {
+    this.updateTarget(editor ? inspectTarget(editor) : null);
+  }
+
+  updateRatMarkdownSelection(
+    document: vscode.TextDocument,
+    language: string | null,
+    expression: string | null,
+  ): void {
+    const ratLang = language ? ratLangForFence(language) : null;
+    this.updateTarget(ratLang && expression ? { expr: expression, ratLang, document } : null);
+  }
+
+  updateTarget(target: InspectTarget | null): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
-      void this.updateNow(editor);
+      void this.updateNow(target);
     }, 150);
   }
 
@@ -59,11 +72,10 @@ export class RatInspectorViewProvider implements vscode.WebviewViewProvider, vsc
     for (const disposable of this.disposables) disposable.dispose();
   }
 
-  private async updateNow(editor: vscode.TextEditor | undefined): Promise<void> {
+  private async updateNow(target: InspectTarget | null): Promise<void> {
     if (!this.view) return;
     const seq = ++this.seq;
 
-    const target = editor ? inspectTarget(editor) : null;
     if (!target) {
       this.renderEmpty("Place the cursor on a symbol in a rat file.");
       return;

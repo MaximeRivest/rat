@@ -87,6 +87,22 @@ func TestLanguageAliasNewKernel(t *testing.T) {
 	}
 }
 
+func TestLanguageAliasSlugsProjectName(t *testing.T) {
+	s := tempStore(t)
+
+	parent := t.TempDir()
+	projDir := filepath.Join(parent, "my project!")
+	os.MkdirAll(filepath.Join(projDir, ".git"), 0755)
+
+	r, err := Resolve(s, "py", projDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Name != "py@my-project" {
+		t.Fatalf("expected safe project slug, got %q", r.Name)
+	}
+}
+
 func TestLanguageAliasExistingKernel(t *testing.T) {
 	s := tempStore(t)
 

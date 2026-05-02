@@ -49,6 +49,7 @@
     "onCommand:rat.openMarkdownPreview",
     "onCommand:rat.enableMarkdownPreviewReplacement",
     "onCommand:rat.disableMarkdownPreviewReplacement",
+    "onCommand:rat.configureMarkdownAppearance",
     "onCommand:rat.useMrmdAsDefaultMarkdownEditor",
     "onCommand:rat.restoreDefaultMarkdownEditor",
     "onCommand:rat.installCli"
@@ -152,6 +153,10 @@
       {
         "command": "rat.disableMarkdownPreviewReplacement",
         "title": "Rat: Restore VS Code Markdown Preview Shortcut"
+      },
+      {
+        "command": "rat.configureMarkdownAppearance",
+        "title": "Rat: Configure Rat Markdown Appearance"
       },
       {
         "command": "rat.useMrmdAsDefaultMarkdownEditor",
@@ -375,6 +380,38 @@
           "type": "boolean",
           "default": false,
           "description": "When true, Ctrl+Shift+V / Cmd+Shift+V in Markdown-like files opens Rat Markdown instead of VS Code's built-in Markdown preview. You can also run 'Rat: Use Rat Markdown for Ctrl+Shift+V Preview'."
+        },
+        "rat.markdownPageMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "default": "auto",
+          "description": "Controls page-style presentation in the Rat Markdown editor. 'auto' centers content on a paper-like page when there is enough width, 'always' forces it, and 'never' keeps the continuous editor surface."
+        },
+        "rat.markdownThemeAssociations": {
+          "type": "object",
+          "default": {
+            "light": "vscode-host-light",
+            "dark": "vscode-host-dark",
+            "highContrast": "vscode-host-dark",
+            "highContrastLight": "vscode-host-light"
+          },
+          "description": "Map VS Code theme kinds to mrmd theme names for the Rat Markdown editor. Built-in host themes are vscode-host-light and vscode-host-dark; mrmd themes like github, nord, daylight, midnight, plain-light, and plain-dark can also be used."
+        },
+        "rat.markdownPageCanvasBackground": {
+          "type": "string",
+          "default": "auto",
+          "description": "Background around the paper in Rat Markdown page mode. Use 'auto', 'editor', 'sideBar', 'panel', 'transparent', any CSS color, or a VS Code CSS variable like var(--vscode-sideBar-background)."
+        },
+        "rat.markdownFontScale": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0.5,
+          "maximum": 2.5,
+          "description": "Relative font scale for the Rat Markdown editor compared with the VS Code editor font size. For example, 1.15 makes prose about 15% larger; 0.9 makes it smaller."
         }
       }
     },
@@ -446,6 +483,7 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
+    "test": "node test/run-tests.mjs",
     "package": "npx @vscode/vsce package --no-dependencies",
     "publish:marketplace": "npm run package && npx @vscode/vsce publish --packagePath rat-${npm_package_version}.vsix --skip-duplicate",
     "publish:openvsx": "npm run package && npx ovsx publish --skip-duplicate rat-${npm_package_version}.vsix",

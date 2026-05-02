@@ -67,8 +67,10 @@ export class ExecutionQueue {
   }
 
   get state(): QueueState {
-    if (this.paused) return "paused";
-    return this.busy ? "running" : "idle";
+    // A pause only gates future items; an already-running item is still
+    // executing and must remain cancellable / visible as running.
+    if (this.busy) return "running";
+    return this.paused ? "paused" : "idle";
   }
   get pending(): number {
     return this.items.length;

@@ -48,8 +48,12 @@ func installGenericRuntime(lang string) error {
 		statusLine(cmd, path != "", valueOrNote(path, "not found"))
 	}
 	for _, env := range check.Config.Install.CheckEnv {
-		_, ok := os.LookupEnv(env)
-		statusLine(env, ok, valueOrNote(os.Getenv(env), "not set"))
+		value, ok := os.LookupEnv(env)
+		detail := "not set"
+		if ok {
+			detail = displayEnvValue(env, value)
+		}
+		statusLine(env, ok, detail)
 	}
 	statusLine("config dir", check.ConfigWritable, check.StateDir)
 	statusLine("cache dir", check.CacheWritable, check.CacheDir)

@@ -22,7 +22,9 @@ import {
   getRuntimeOverride,
   getScopeOverride,
   inferScopeFromRuntimeName,
+  projectRuntimeName,
   resolveRuntime,
+  resolveRuntimeForScope,
   scopeLabel,
   setRuntimeOverride,
   setScopeOverride,
@@ -59,7 +61,7 @@ export async function showRuntimePicker(): Promise<string | undefined> {
 
   const state = readState();
   const runningNames = new Set(state.kernels.map((k) => k.name));
-  const matching = [
+  const matching = dedupeRuntimeChoices(lang, [
     ...state.kernels.filter((k) => k.lang === lang).map((k) => ({
       name: k.name,
       cwd: k.cwd,
@@ -74,7 +76,7 @@ export async function showRuntimePicker(): Promise<string | undefined> {
         venv: r.venv,
         detail: "Stopped",
       })),
-  ];
+  ]);
 
   const items: RuntimePickItem[] = [
     {
@@ -91,19 +93,19 @@ export async function showRuntimePicker(): Promise<string | undefined> {
     {
       label: `${current.scope === "notebook" ? "$(check) " : ""}Notebook scope`,
       description: "This file gets its own runtime",
-      detail: resolveRuntimeForScope(editor.document, lang, "notebook").name,
+      detail: resolveRuntimeForScope(lang, editor.document, "notebook").name,
       action: { kind: "scope", scope: "notebook" },
     },
     {
       label: `${current.scope === "project" ? "$(check) " : ""}Project scope`,
       description: "Share one runtime with this workspace",
-      detail: resolveRuntimeForScope(editor.document, lang, "project").name,
+      detail: resolveRuntimeForScope(lang, editor.document, "project").name,
       action: { kind: "scope", scope: "project" },
     },
     {
       label: `${current.scope === "global" ? "$(check) " : ""}Global scope`,
       description: "Share one runtime across projects",
-      detail: resolveRuntimeForScope(editor.document, lang, "global").name,
+      detail: resolveRuntimeForScope(lang, editor.document, "global").name,
       action: { kind: "scope", scope: "global" },
     },
     {
@@ -210,31 +212,10 @@ export async function showRuntimePicker(): Promise<string | undefined> {
   }
 }
 
-function resolveRuntimeForScope(
-  document: vscode.TextDocument,
-  lang: string,
-  scope: RuntimeScope,
-): { name: string } {
-  const docUri = document.uri.toString();
-  const oldOverride = getRuntimeOverride(docUri, lang);
-  const oldScope = getScopeOverride(docUri, lang);
-
-  clearRuntimeOverride(docUri, lang);
-  setScopeOverride(docUri, lang, scope);
-  const resolved = resolveRuntime(lang, document);
-
-  if (oldOverride) setRuntimeOverride(docUri, lang, oldOverride);
-  else clearRuntimeOverride(docUri, lang);
-
-  if (oldScope) setScopeOverride(docUri, lang, oldScope);
-  else setScopeOverride(docUri, lang, "project");
-
-  return resolved;
-}
-
 function currentDocumentLang(document: vscode.TextDocument): string | null {
   const fl = detectFileLang(document);
   if (fl.mode === "source") return fl.ratLang;
+  if (fl.mode !== "notebook") return null;
   const cells = parseCells(document);
   return cells[0]?.ratLang ?? null;
 }
@@ -297,6 +278,40 @@ async function addRuntimeWizard(defaultLang: string): Promise<string | undefined
     );
     return;
   }
+}
+
+function dedupeRuntimeChoices(
+  lang: string,
+  choices: Array<{ name: string; cwd: string; venv: string; detail: string }>,
+): Array<{ name: string; cwd: string; venv: string; detail: string }> {
+  const groups = new Map<string, typeof choices>();
+
+  for (const choice of choices) {
+    const key = `${lang}::${path.resolve(choice.cwd)}::${aliasKey(choice.name)}`;
+    const group = groups.get(key);
+    if (group) group.push(choice);
+    else groups.set(key, [choice]);
+  }
+
+  const deduped: typeof choices = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      deduped.push(group[0]);
+      continue;
+    }
+
+    const preferredName = projectRuntimeName(lang, group[0].cwd);
+    const preferred = group.find((choice) => choice.name === preferredName)
+      ?? group.find((choice) => choice.detail.startsWith("Running"))
+      ?? group[0];
+    deduped.push(preferred);
+  }
+
+  return deduped;
+}
+
+function aliasKey(name: string): string {
+  return name.toLowerCase().replace(/[-_]+/g, "_");
 }
 
 function shortPath(p: string): string {

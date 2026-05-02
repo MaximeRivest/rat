@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/maximerivest/rat/internal/procutil"
+	"github.com/maximerivest/rat/internal/runtimeid"
 	"github.com/maximerivest/rat/internal/securefs"
 	"gopkg.in/yaml.v3"
 )
@@ -179,6 +180,9 @@ func (s *Store) MarkStopped(name string) (bool, error) {
 // Put adds or updates a kernel entry. If a kernel with the same name
 // exists, it is replaced. Status defaults to "running" if not set.
 func (s *Store) Put(k Kernel) error {
+	if err := runtimeid.ValidateName(k.Name); err != nil {
+		return err
+	}
 	if k.Status == "" {
 		k.Status = StatusRunning
 	}
@@ -276,6 +280,9 @@ func (s *Store) GetRuntime(name string) (*Runtime, error) {
 
 // PutRuntime adds or updates a runtime config.
 func (s *Store) PutRuntime(r Runtime) error {
+	if err := runtimeid.ValidateName(r.Name); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f, err := s.readLocked()

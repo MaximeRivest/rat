@@ -265,11 +265,14 @@ export function getKernelPort(name: string): number | null {
 
 // ── MCP client (Streamable HTTP) ───────────────────────────
 
+type RequestTrack = false | "run";
+
 export class McpClient {
   private url: string;
   private sessionId: string | null = null;
   private nextId = 1;
-  private activeReq: http.ClientRequest | null = null;
+  private activeRunReq: http.ClientRequest | null = null;
+  private requests = new Set<http.ClientRequest>();
   private _disposed = false;
 
   constructor(port: number) {
@@ -288,7 +291,7 @@ export class McpClient {
   }
 
   async run(code: string): Promise<ToolResult> {
-    const r = await this.callTool("run", { code });
+    const r = await this.callTool("run", { code }, "run");
     return this.parseToolResult(r);
   }
 
@@ -351,15 +354,17 @@ export class McpClient {
     this.callTool("ctl", { op: "cancel" }).catch(() => {});
   }
 
-  /** Abort the in-flight HTTP request (if any). */
+  /** Abort the in-flight run request (if any). */
   abortCurrentRequest(): void {
-    this.activeReq?.destroy();
-    this.activeReq = null;
+    this.activeRunReq?.destroy();
+    this.activeRunReq = null;
   }
 
   dispose(): void {
     this._disposed = true;
-    this.abortCurrentRequest();
+    for (const req of this.requests) req.destroy();
+    this.requests.clear();
+    this.activeRunReq = null;
   }
 
   /* ---- internal ---- */
@@ -367,8 +372,9 @@ export class McpClient {
   private async callTool(
     name: string,
     args: Record<string, unknown>,
+    track: RequestTrack = false,
   ): Promise<unknown> {
-    return this.rpc("tools/call", { name, arguments: args }, true);
+    return this.rpc("tools/call", { name, arguments: args }, track);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -385,7 +391,7 @@ export class McpClient {
   private rpc(
     method: string,
     params: unknown,
-    track = true,
+    track: RequestTrack = false,
   ): Promise<unknown> {
     const id = this.nextId++;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
@@ -426,7 +432,7 @@ export class McpClient {
 
   private post(
     body: string,
-    track = true,
+    track: RequestTrack = false,
   ): Promise<{
     statusCode: number;
     headers: http.IncomingHttpHeaders;
@@ -446,7 +452,15 @@ export class McpClient {
       };
       if (this.sessionId) hdrs["Mcp-Session-Id"] = this.sessionId;
 
-      const req = http.request(
+      let req: http.ClientRequest;
+      const cleanup = () => {
+        this.requests.delete(req);
+        if (track === "run" && this.activeRunReq === req) {
+          this.activeRunReq = null;
+        }
+      };
+
+      req = http.request(
         {
           hostname: u.hostname,
           port: u.port,
@@ -461,7 +475,7 @@ export class McpClient {
           let data = "";
           res.on("data", (chunk: Buffer) => (data += chunk.toString()));
           res.on("end", () => {
-            this.activeReq = null;
+            cleanup();
             resolve({
               statusCode: res.statusCode ?? 0,
               headers: res.headers,
@@ -471,9 +485,10 @@ export class McpClient {
         },
       );
 
-      if (track) this.activeReq = req;
+      this.requests.add(req);
+      if (track === "run") this.activeRunReq = req;
       req.on("error", (err) => {
-        if (track) this.activeReq = null;
+        cleanup();
         reject(err);
       });
       req.write(body);

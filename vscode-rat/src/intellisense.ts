@@ -12,6 +12,9 @@
  *   - Anywhere in source files (.py, .r, .jl, .js, .sh)
  */
 
+import * as fs from "fs/promises";
+import * as os from "os";
+import * as path from "path";
 import * as vscode from "vscode";
 import {
   parseCells,
@@ -42,6 +45,14 @@ const LANG_ID: Record<string, string> = {
   sh: "shellscript",
 };
 
+const LANG_EXT: Record<string, string> = {
+  python: ".py",
+  r: ".R",
+  julia: ".jl",
+  javascript: ".js",
+  shellscript: ".sh",
+};
+
 const fallbackDocumentUris = new Set<string>();
 
 // ── Resolve context: either a cell in a notebook or whole source file ──
@@ -68,6 +79,8 @@ function getContext(
   if (fl.mode === "source" && fl.ratLang) {
     return { kind: "source", ratLang: fl.ratLang };
   }
+
+  if (fl.mode !== "notebook") return null;
 
   // Notebook mode — must be inside a code cell
   const cells = parseCells(document);
@@ -258,21 +271,13 @@ async function lspFallbackCompletions(
   const fallback = fallbackContext(document, position, ctx);
   if (!fallback) return null;
 
-  let fallbackDoc: vscode.TextDocument;
-  try {
-    fallbackDoc = await vscode.workspace.openTextDocument({
-      content: fallback.code,
-      language: fallback.languageId,
-    });
-  } catch {
-    return null;
-  }
+  const fallbackDoc = await openFallbackDocument(fallback);
+  if (!fallbackDoc) return null;
 
-  fallbackDocumentUris.add(fallbackDoc.uri.toString());
   try {
     const result = await vscode.commands.executeCommand<vscode.CompletionList>(
       "vscode.executeCompletionItemProvider",
-      fallbackDoc.uri,
+      fallbackDoc.document.uri,
       fallback.position,
       triggerCharacter,
     );
@@ -285,7 +290,49 @@ async function lspFallbackCompletions(
   } catch {
     return null;
   } finally {
-    fallbackDocumentUris.delete(fallbackDoc.uri.toString());
+    await fallbackDoc.dispose();
+  }
+}
+
+async function openFallbackDocument(
+  fallback: FallbackContext,
+): Promise<{ document: vscode.TextDocument; dispose: () => Promise<void> } | null> {
+  const ext = LANG_EXT[fallback.languageId] ?? ".txt";
+  const dir = path.join(os.tmpdir(), "rat-vscode-lsp-fallback");
+  const file = path.join(
+    dir,
+    `fallback-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+  );
+  const uri = vscode.Uri.file(file);
+
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(file, fallback.code, "utf8");
+
+    let document = await vscode.workspace.openTextDocument(uri);
+    if (document.languageId !== fallback.languageId) {
+      document = await vscode.languages.setTextDocumentLanguage(document, fallback.languageId);
+    }
+
+    fallbackDocumentUris.add(document.uri.toString());
+    return {
+      document,
+      dispose: async () => {
+        fallbackDocumentUris.delete(document.uri.toString());
+        try {
+          await fs.unlink(file);
+        } catch {
+          // Best effort cleanup.
+        }
+      },
+    };
+  } catch {
+    try {
+      await fs.unlink(file);
+    } catch {
+      // ignore
+    }
+    return null;
   }
 }
 
@@ -501,21 +548,13 @@ async function lspFallbackSignatureHelp(
   const fallback = fallbackContext(document, position, ctx);
   if (!fallback) return null;
 
-  let fallbackDoc: vscode.TextDocument;
-  try {
-    fallbackDoc = await vscode.workspace.openTextDocument({
-      content: fallback.code,
-      language: fallback.languageId,
-    });
-  } catch {
-    return null;
-  }
+  const fallbackDoc = await openFallbackDocument(fallback);
+  if (!fallbackDoc) return null;
 
-  fallbackDocumentUris.add(fallbackDoc.uri.toString());
   try {
     const result = await vscode.commands.executeCommand<vscode.SignatureHelp>(
       "vscode.executeSignatureHelpProvider",
-      fallbackDoc.uri,
+      fallbackDoc.document.uri,
       fallback.position,
       triggerCharacter,
     );
@@ -524,7 +563,7 @@ async function lspFallbackSignatureHelp(
   } catch {
     return null;
   } finally {
-    fallbackDocumentUris.delete(fallbackDoc.uri.toString());
+    await fallbackDoc.dispose();
   }
 }
 

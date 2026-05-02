@@ -3,7 +3,7 @@
  */
 
 import * as vscode from "vscode";
-import { parseCells } from "./cells";
+import { parseRatNotebookDocument } from "./documentModel";
 
 export class RatCodeLensProvider implements vscode.CodeLensProvider {
   private _onDidChange = new vscode.EventEmitter<void>();
@@ -14,10 +14,10 @@ export class RatCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    const cells = parseCells(document);
+    const model = parseRatNotebookDocument(document);
     const lenses: vscode.CodeLens[] = [];
 
-    for (const cell of cells) {
+    for (const cell of model.cells) {
       if (!cell.executable) continue;
 
       const range = new vscode.Range(cell.openLine, 0, cell.openLine, 0);

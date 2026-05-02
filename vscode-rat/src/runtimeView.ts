@@ -12,6 +12,7 @@ import {
   ratStop,
   readState,
 } from "./rat";
+import { projectRuntimeName } from "./resolve";
 
 export class RuntimeTreeProvider
   implements vscode.TreeDataProvider<RuntimeNode>
@@ -64,7 +65,7 @@ export class RuntimeTreeProvider
       nodes.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
     }
 
-    return nodes.sort((a, b) => {
+    return dedupeRuntimeNodes(nodes).sort((a, b) => {
       if (a.running !== b.running) return a.running ? -1 : 1;
       return a.runtimeName.localeCompare(b.runtimeName);
     });
@@ -173,6 +174,37 @@ async function pickName(prompt: string): Promise<string | undefined> {
     return undefined;
   }
   return vscode.window.showQuickPick(unique, { placeHolder: prompt });
+}
+
+function dedupeRuntimeNodes(nodes: RuntimeNode[]): RuntimeNode[] {
+  const grouped = new Map<string, RuntimeNode[]>();
+
+  for (const node of nodes) {
+    const key = `${node.lang}::${path.resolve(node.cwd)}::${aliasKey(node.runtimeName)}`;
+    const group = grouped.get(key);
+    if (group) group.push(node);
+    else grouped.set(key, [node]);
+  }
+
+  const deduped: RuntimeNode[] = [];
+  for (const group of grouped.values()) {
+    if (group.length === 1) {
+      deduped.push(group[0]);
+      continue;
+    }
+
+    const preferredName = projectRuntimeName(group[0].lang, group[0].cwd);
+    const preferred = group.find((node) => node.runtimeName === preferredName)
+      ?? group.find((node) => node.running)
+      ?? group[0];
+    deduped.push(preferred);
+  }
+
+  return deduped;
+}
+
+function aliasKey(name: string): string {
+  return name.toLowerCase().replace(/[-_]+/g, "_");
 }
 
 function isVisibleRuntime(name: string, cwd: string, workspaceDirs: string[]): boolean {

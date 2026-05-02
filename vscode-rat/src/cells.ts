@@ -12,6 +12,9 @@
  */
 
 import * as vscode from "vscode";
+import { ratLangForFence } from "./languages";
+
+export { ratLangForFence } from "./languages";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -41,22 +44,6 @@ export interface OutputBlock {
   imageEndLine: number;
 }
 
-// ── Language map ───────────────────────────────────────────
-
-const LANG_MAP: Record<string, string> = {
-  python: "py", py: "py", python3: "py",
-  r: "r",       R: "r", rlang: "r",
-  bash: "sh",   sh: "sh", shell: "sh", zsh: "sh",
-  julia: "jl",  jl: "jl", ju: "jl",
-  javascript: "js", js: "js", node: "js",
-  pi: "pi",
-  slack: "slack",
-};
-
-export function ratLangForFence(lang: string): string | null {
-  return LANG_MAP[lang] ?? LANG_MAP[lang.toLowerCase()] ?? null;
-}
-
 // ── Parsers ────────────────────────────────────────────────
 
 const FENCE_OPEN = /^(\s{0,3})(`{3,})\s*(?:\{(\w+)(?:[,\s][^}]*)?\}|(\w+))(?:\s+[✓✗].*?)?\s*$/;
@@ -80,39 +67,39 @@ export function parseCells(document: vscode.TextDocument): CodeCell[] {
       const backtickLen = openMatch[2].length;
       const lang = openMatch[3] ?? openMatch[4];
       const ratLang = ratLangForFence(lang);
+      const openLine = i;
+      i++;
+      const codeLines: string[] = [];
 
-      if (ratLang) {
-        const openLine = i;
+      // Always advance to the matching close fence, even for unsupported
+      // languages. Otherwise cells inside literal Markdown/examples/output
+      // blocks can be detected as runnable cells.
+      while (i < lineCount) {
+        const lt = document.lineAt(i).text;
+        const closeMatch = lt.match(FENCE_CLOSE);
+        if (closeMatch) {
+          // Closing fence must have ≥ same backtick count
+          const closeTicks = lt.trim().replace(/[^`]/g, "").length;
+          if (closeTicks >= backtickLen) break;
+        }
+        codeLines.push(lt);
         i++;
-        const codeLines: string[] = [];
+      }
 
-        while (i < lineCount) {
-          const lt = document.lineAt(i).text;
-          const closeMatch = lt.match(FENCE_CLOSE);
-          if (closeMatch) {
-            // Closing fence must have ≥ same backtick count
-            const closeTicks = lt.trim().replace(/[^`]/g, "").length;
-            if (closeTicks >= backtickLen) break;
-          }
-          codeLines.push(lt);
-          i++;
-        }
+      if (i < lineCount && ratLang) {
+        const closeLine = i;
+        const code = codeLines.join("\n");
+        const executable = !/^#\|\s*eval:\s*false/m.test(code);
 
-        if (i < lineCount) {
-          const closeLine = i;
-          const code = codeLines.join("\n");
-          const executable = !/^#\|\s*eval:\s*false/m.test(code);
-
-          cells.push({
-            lang,
-            ratLang,
-            code,
-            range: new vscode.Range(openLine, 0, closeLine, document.lineAt(closeLine).text.length),
-            openLine,
-            closeLine,
-            executable,
-          });
-        }
+        cells.push({
+          lang,
+          ratLang,
+          code,
+          range: new vscode.Range(openLine, 0, closeLine, document.lineAt(closeLine).text.length),
+          openLine,
+          closeLine,
+          executable,
+        });
       }
     }
     i++;

@@ -17,17 +17,8 @@
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { ratLangForAlias } from "./languages";
 import { readState } from "./rat";
-
-const ALIAS: Record<string, string> = {
-  python: "py", py: "py", python3: "py",
-  r: "r", R: "r",
-  bash: "sh", sh: "sh", shell: "sh",
-  julia: "jl", jl: "jl", ju: "jl",
-  javascript: "js", js: "js", node: "js",
-  pi: "pi",
-  slack: "slack",
-};
 
 export type RuntimeScope = "notebook" | "project" | "global";
 
@@ -145,21 +136,51 @@ export function scopeLabel(scope: RuntimeScope): string {
   }
 }
 
+interface RuntimeResolutionOptions {
+  /** undefined = use persisted override; null = intentionally ignore persisted override */
+  runtimeOverride?: string | null;
+  /** undefined = use persisted scope; null = default scope */
+  scopeOverride?: RuntimeScope | null;
+}
+
 export function resolveRuntime(
   ratLang: string,
   document: vscode.TextDocument,
+): RuntimeInfo {
+  return resolveRuntimeInternal(ratLang, document);
+}
+
+/** Pure preview helper for UI labels; does not mutate persisted overrides. */
+export function resolveRuntimeForScope(
+  ratLang: string,
+  document: vscode.TextDocument,
+  scope: RuntimeScope,
+): RuntimeInfo {
+  return resolveRuntimeInternal(ratLang, document, {
+    runtimeOverride: null,
+    scopeOverride: scope,
+  });
+}
+
+function resolveRuntimeInternal(
+  ratLang: string,
+  document: vscode.TextDocument,
+  opts: RuntimeResolutionOptions = {},
 ): RuntimeInfo {
   const docUri = document.uri.toString();
   const cwd = workspaceCwd(document);
 
   // 0. Manual runtime override (exact runtime name chosen by user)
-  const override = getRuntimeOverride(docUri, ratLang);
+  const override = opts.runtimeOverride !== undefined
+    ? opts.runtimeOverride
+    : getRuntimeOverride(docUri, ratLang);
   if (override) {
     return {
       name: override,
       cwd: inferRuntimeCwd(override, cwd),
       lang: ratLang,
-      scope: getScopeOverride(docUri, ratLang) ?? inferScopeFromRuntimeName(override, ratLang, document),
+      scope: (opts.scopeOverride ?? getScopeOverride(docUri, ratLang))
+        ?? inferScopeFromRuntimeName(override, ratLang, document),
     };
   }
 
@@ -180,7 +201,7 @@ export function resolveRuntime(
     .get<Record<string, string>>("runtimes", {});
 
   for (const [key, value] of Object.entries(runtimes)) {
-    if (key === ratLang || ALIAS[key] === ratLang) {
+    if (key === ratLang || ratLangForAlias(key) === ratLang) {
       return {
         name: value,
         cwd: inferRuntimeCwd(value, cwd),
@@ -191,7 +212,9 @@ export function resolveRuntime(
   }
 
   // 3. Explicit scope selection (default is project)
-  const scope = getScopeOverride(docUri, ratLang) ?? "project";
+  const scope = opts.scopeOverride !== undefined
+    ? opts.scopeOverride ?? "project"
+    : getScopeOverride(docUri, ratLang) ?? "project";
   switch (scope) {
     case "notebook":
       return {
@@ -235,15 +258,35 @@ export function globalRuntimeName(ratLang: string): string {
 
 export function projectRuntimeName(ratLang: string, cwd: string): string {
   const state = readState();
+  const canonical = canonicalProjectRuntimeName(ratLang, cwd, state);
 
+  // Prefer the canonical rat CLI-style name when it is already running.
+  for (const k of state.kernels) {
+    if (k.lang === ratLang && isSameProject(k.cwd, cwd) && k.name === canonical) {
+      return k.name;
+    }
+  }
+
+  // Backward compatibility: preserve a currently running legacy runtime name
+  // for this project so we don't unexpectedly fork the live namespace.
   for (const k of state.kernels) {
     if (k.lang === ratLang && isSameProject(k.cwd, cwd)) return k.name;
   }
+
+  // No running kernel — prefer a saved canonical config if present.
+  for (const r of state.runtimes) {
+    if (r.lang === ratLang && isSameProject(r.cwd, cwd) && r.name === canonical) {
+      return r.name;
+    }
+  }
+
+  // Otherwise keep using an existing saved legacy runtime name to avoid
+  // creating duplicate runtimes for the same cwd.
   for (const r of state.runtimes) {
     if (r.lang === ratLang && isSameProject(r.cwd, cwd)) return r.name;
   }
 
-  return `${ratLang}@${slug(path.basename(cwd) || "project")}`;
+  return canonical;
 }
 
 export function notebookRuntimeName(
@@ -253,6 +296,38 @@ export function notebookRuntimeName(
   const base = path.basename(document.fileName, path.extname(document.fileName)) || "file";
   const hash = shortHash(document.uri.toString());
   return `${ratLang}-nb-${slug(base)}-${hash}`;
+}
+
+function canonicalProjectRuntimeName(
+  ratLang: string,
+  cwd: string,
+  state: ReturnType<typeof readState>,
+): string {
+  const project = projectNameSegment(cwd);
+  const base = `${ratLang}@${project}`;
+
+  const collides = state.kernels.some(
+    (k) => k.name === base && !isSameProject(k.cwd, cwd),
+  ) || state.runtimes.some(
+    (r) => r.name === base && r.cwd && !isSameProject(r.cwd, cwd),
+  );
+
+  return collides ? `${ratLang}@${parentQualifiedProjectName(cwd)}` : base;
+}
+
+function projectNameSegment(cwd: string): string {
+  const base = path.basename(path.resolve(cwd)) || "project";
+  return base;
+}
+
+function parentQualifiedProjectName(cwd: string): string {
+  const root = path.resolve(cwd);
+  const base = path.basename(root) || "project";
+  const parent = path.basename(path.dirname(root));
+  if (!parent || parent === "." || parent === path.sep || parent === base) {
+    return base;
+  }
+  return `${parent}-${base}`;
 }
 
 function inferRuntimeCwd(runtimeName: string, fallback: string): string {
@@ -287,7 +362,7 @@ function frontMatterRuntime(
   for (const m of ratBlock[1].matchAll(/^\s+(\w+):\s*(\S+)/gm)) {
     const lang = m[1];
     const name = m[2];
-    if (lang === ratLang || ALIAS[lang] === ratLang) return name;
+    if (lang === ratLang || ratLangForAlias(lang) === ratLang) return name;
   }
   return null;
 }

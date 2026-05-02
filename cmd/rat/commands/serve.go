@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,10 +17,12 @@ import (
 
 	"github.com/maximerivest/rat/internal/activity"
 	"github.com/maximerivest/rat/internal/bash"
+	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/generic"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
 	"github.com/maximerivest/rat/internal/python"
+	"github.com/maximerivest/rat/internal/runtimeid"
 	"github.com/maximerivest/rat/internal/runtimes"
 )
 
@@ -82,6 +85,9 @@ func runServe(input string) error {
 	if serveNameFlag != "" {
 		name = serveNameFlag
 	}
+	if err := runtimeid.ValidateName(name); err != nil {
+		return err
+	}
 
 	lang := serveLangFlag
 	var err error
@@ -101,12 +107,17 @@ func runServe(input string) error {
 	}
 	cwd, _ = filepath.Abs(cwd)
 
-	// Apply extra env vars (from --env flags / rat add --env).
+	// Apply extra env vars (from explicit --env flags). Runtimes started by
+	// the daemon receive saved env directly in the child environment so secret
+	// values don't appear in process arguments.
 	envMap := parseKVFlags(serveEnvFlags)
 	for k, v := range envMap {
 		os.Setenv(k, v)
 	}
-	optionsMap := parseKVFlags(serveOptFlags)
+	optionsMap, err := serveOptionsMap(serveOptFlags)
+	if err != nil {
+		return err
+	}
 
 	// Create the kernel for the requested language.
 	var k kernel.Kernel
@@ -180,6 +191,22 @@ func findRuntimeConfig(lang string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no runtime found for %q\n\nTo add one, create %s\nSee: KERNEL-PROTOCOL.md", lang, userPath)
+}
+
+func serveOptionsMap(flags []string) (map[string]string, error) {
+	options := map[string]string{}
+	if raw := os.Getenv(daemon.ServeOptionsEnv); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &options); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", daemon.ServeOptionsEnv, err)
+		}
+		// This environment variable is only for bootstrapping rat serve; don't
+		// leak the internal JSON blob to runtime subprocesses.
+		os.Unsetenv(daemon.ServeOptionsEnv)
+	}
+	for k, v := range parseKVFlags(flags) {
+		options[k] = v
+	}
+	return options, nil
 }
 
 // parseKVFlags turns ["KEY=VALUE", ...] into a map.

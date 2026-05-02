@@ -10,21 +10,9 @@
  */
 
 import * as vscode from "vscode";
+import { markdownCellSnippets, type CellSnippet } from "./languages";
 
-interface CellSnippet {
-  prefix: string;
-  fence: string;
-  label: string;
-}
-
-export const CELL_SNIPPETS: CellSnippet[] = [
-  { prefix: "py", fence: "python", label: "Python cell" },
-  { prefix: "sh", fence: "bash", label: "Shell cell" },
-  { prefix: "r", fence: "r", label: "R cell" },
-  { prefix: "ju", fence: "julia", label: "Julia cell" },
-  { prefix: "js", fence: "javascript", label: "JavaScript cell" },
-  { prefix: "pi", fence: "pi", label: "Pi cell" },
-];
+export const CELL_SNIPPETS: CellSnippet[] = markdownCellSnippets();
 
 export class RatSnippetProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -37,6 +25,7 @@ export class RatSnippetProvider implements vscode.CompletionItemProvider {
     if (beforeCursor.trim().length === 0) return null; // nothing typed yet
     if (beforeCursor.trimStart() !== beforeCursor.trim()) {
       // There's trailing whitespace after the typed text — skip
+      return null;
     }
 
     // Only match if the line so far is just the prefix (possibly with leading whitespace)

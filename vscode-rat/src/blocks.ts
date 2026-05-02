@@ -10,6 +10,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
+import { grammarWasmForRatLang } from "./languages";
 
 // web-tree-sitter ships as CJS — import the namespace
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -43,14 +44,6 @@ const parsers = new Map<string, TSParser>();
 
 const GRAMMAR_DIR = path.join(__dirname, "..", "grammars");
 
-const LANG_WASM: Record<string, string> = {
-  py: "tree-sitter-python.wasm",
-  r: "tree-sitter-r.wasm",
-  jl: "tree-sitter-julia.wasm",
-  js: "tree-sitter-javascript.wasm",
-  sh: "tree-sitter-bash.wasm",
-};
-
 async function ensureInit(): Promise<void> {
   if (!parserReady) {
     parserReady = TreeSitter.Parser.init({
@@ -66,7 +59,7 @@ async function getParser(ratLang: string): Promise<TSParser | null> {
   await ensureInit();
   if (!ParserClass) return null;
 
-  const wasmFile = LANG_WASM[ratLang];
+  const wasmFile = grammarWasmForRatLang(ratLang);
   if (!wasmFile) return null;
 
   if (!parsers.has(ratLang)) {

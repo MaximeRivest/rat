@@ -15,6 +15,7 @@ import (
 
 	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/mcpclient"
+	"github.com/maximerivest/rat/internal/runtimeid"
 	"github.com/maximerivest/rat/internal/state"
 	"github.com/maximerivest/rat/internal/termstyle"
 )
@@ -102,6 +103,9 @@ Examples:
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
+		if err := runtimeid.ValidateName(name); err != nil {
+			return err
+		}
 
 		if len(args) > 1 && addCwd == "" {
 			addCwd = args[1]
@@ -164,10 +168,10 @@ Examples:
 			fmt.Fprintf(os.Stderr, " runtime=%s", runtimePath)
 		}
 		for k, v := range optionsMap {
-			fmt.Fprintf(os.Stderr, " opt:%s=%s", k, v)
+			fmt.Fprintf(os.Stderr, " opt:%s=%s", k, displayOptionValue(k, v))
 		}
 		for k, v := range envMap {
-			fmt.Fprintf(os.Stderr, " env:%s=%s", k, v)
+			fmt.Fprintf(os.Stderr, " env:%s=%s", k, displayEnvValue(k, v))
 		}
 		fmt.Fprintln(os.Stderr, ")")
 		fmt.Fprintf(os.Stderr, "Start it: rat start %s\n", name)

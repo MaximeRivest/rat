@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/maximerivest/rat/internal/runtimeid"
 )
 
 // Dir returns the user cache directory, ignoring container-scoped
@@ -45,6 +47,9 @@ func Rat() (string, error) {
 
 // Kernels returns $HOME/.cache/rat/kernels/<name>, creating it if needed.
 func Kernels(name string) (string, error) {
+	if err := runtimeid.ValidateName(name); err != nil {
+		return "", err
+	}
 	base, err := Dir()
 	if err != nil {
 		return "", err
