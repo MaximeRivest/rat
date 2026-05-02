@@ -40,8 +40,8 @@ export interface RatNotebookOutputBlock extends OutputBlock {
   pairedCellOpenLine?: number;
 }
 
-const OUTPUT_OPEN_RE = /^```output(?::\S+)?(\s*$|\s*\|)/;
-const OUTPUT_CLOSE_RE = /^```\s*$/;
+const OUTPUT_OPEN_RE = /^(\s{0,3})(`{3,})output(?::\S+)?(\s*$|\s*\|)/;
+const OUTPUT_CLOSE_RE = /^(\s{0,3})(`{3,})\s*$/;
 const IMAGE_LINK_RE = /^!\[.*\]\(.*\)\s*$/;
 
 export function parseRatNotebookDocument(
@@ -88,10 +88,16 @@ export function parseOutputBlocks(
       continue;
     }
 
+    const openMatch = document.lineAt(i).text.match(OUTPUT_OPEN_RE)!;
+    const backtickLen = openMatch[2].length;
     const startLine = i;
     i++;
 
-    while (i < lineCount && !OUTPUT_CLOSE_RE.test(document.lineAt(i).text)) i++;
+    while (i < lineCount) {
+      const closeMatch = document.lineAt(i).text.match(OUTPUT_CLOSE_RE);
+      if (closeMatch && closeMatch[2].length >= backtickLen) break;
+      i++;
+    }
     if (i >= lineCount) break;
 
     const endLine = i;

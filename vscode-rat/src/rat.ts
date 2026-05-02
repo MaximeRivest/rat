@@ -200,37 +200,29 @@ export function readState(): RatState {
   }
   return {
     kernels: parseSection<KernelInfo>(content, "kernels", (entry) => {
-      const name = entry.match(/name:\s*(\S+)/);
-      const lang = entry.match(/lang:\s*(\S+)/);
-      const port = entry.match(/port:\s*(\d+)/);
-      const pid = entry.match(/pid:\s*(\d+)/);
-      const cwd = entry.match(/cwd:\s*(\S+)/);
-      const venv = entry.match(/venv:\s*(\S+)/);
-      const started = entry.match(/started:\s*(\S+)/);
-      if (!name || !port) return null;
-      const status = entry.match(/status:\s*(\S+)/);
+      const name = yamlField(entry, "name");
+      const port = Number(yamlField(entry, "port"));
+      if (!name || !Number.isFinite(port)) return null;
+      const pid = Number(yamlField(entry, "pid"));
       return {
-        name: name[1],
-        lang: lang?.[1] ?? "",
-        port: parseInt(port[1], 10),
-        pid: pid ? parseInt(pid[1], 10) : 0,
-        cwd: cwd?.[1] ?? "",
-        venv: venv?.[1] ?? "",
-        status: status?.[1] ?? "running",
-        started: started?.[1] ?? "",
+        name,
+        lang: yamlField(entry, "lang"),
+        port,
+        pid: Number.isFinite(pid) ? pid : 0,
+        cwd: yamlField(entry, "cwd"),
+        venv: yamlField(entry, "venv"),
+        status: yamlField(entry, "status") || "running",
+        started: yamlField(entry, "started"),
       };
     }),
     runtimes: parseSection<SavedRuntime>(content, "runtimes", (entry) => {
-      const name = entry.match(/name:\s*(\S+)/);
-      const lang = entry.match(/lang:\s*(\S+)/);
-      const cwd = entry.match(/cwd:\s*(\S+)/);
-      const venv = entry.match(/venv:\s*(\S+)/);
+      const name = yamlField(entry, "name");
       if (!name) return null;
       return {
-        name: name[1],
-        lang: lang?.[1] ?? "",
-        cwd: cwd?.[1] ?? "",
-        venv: venv?.[1] ?? "",
+        name,
+        lang: yamlField(entry, "lang"),
+        cwd: yamlField(entry, "cwd"),
+        venv: yamlField(entry, "venv"),
       };
     }),
   };
@@ -258,6 +250,33 @@ function parseSection<T>(
   return results;
 }
 
+function yamlField(entry: string, key: string): string {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = entry.match(new RegExp(`^${escaped}:\\s*(.*)$`, "m"));
+  return match ? parseYamlScalar(match[1]) : "";
+}
+
+function parseYamlScalar(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === "null" || trimmed === "~") return "";
+
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) {
+    return trimmed.slice(1, -1).replace(/''/g, "'");
+  }
+
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      return JSON.parse(trimmed) as string;
+    } catch {
+      return trimmed.slice(1, -1);
+    }
+  }
+
+  // For unquoted YAML scalars, keep spaces in paths but strip common
+  // inline comments that are separated by whitespace.
+  return trimmed.replace(/\s+#.*$/, "");
+}
+
 export function getKernelPort(name: string): number | null {
   const k = readState().kernels.find((k) => k.name === name);
   return k?.port ?? null;
@@ -266,6 +285,13 @@ export function getKernelPort(name: string): number | null {
 // ── MCP client (Streamable HTTP) ───────────────────────────
 
 type RequestTrack = false | "run";
+
+export interface McpNotification {
+  method: string;
+  params: Record<string, unknown>;
+}
+
+type NotificationHandler = (notification: McpNotification) => void;
 
 export class McpClient {
   private url: string;
@@ -290,9 +316,23 @@ export class McpClient {
     await this.notify("notifications/initialized", {});
   }
 
-  async run(code: string): Promise<ToolResult> {
-    const r = await this.callTool("run", { code }, "run");
-    return this.parseToolResult(r);
+  async run(
+    code: string,
+    onOutput?: (chunk: string) => void,
+  ): Promise<ToolResult> {
+    const r = await this.callTool(
+      "run",
+      { code },
+      "run",
+      onOutput
+        ? (notification) => {
+          if (notification.method !== "rat/output") return;
+          const text = notification.params.text;
+          if (typeof text === "string" && text.length > 0) onOutput(text);
+        }
+        : undefined,
+    );
+    return this.parseToolResult(r, { runResult: true });
   }
 
   async sendInput(text: string): Promise<void> {
@@ -373,29 +413,38 @@ export class McpClient {
     name: string,
     args: Record<string, unknown>,
     track: RequestTrack = false,
+    onNotification?: NotificationHandler,
   ): Promise<unknown> {
-    return this.rpc("tools/call", { name, arguments: args }, track);
+    return this.rpc("tools/call", { name, arguments: args }, track, onNotification);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private parseToolResult(result: any): ToolResult {
+  private parseToolResult(result: any, opts: { runResult?: boolean } = {}): ToolResult {
     const content: Array<{ type: string; text?: string }> =
       result?.content ?? [];
     const text = content
       .filter((c) => c.type === "text")
       .map((c) => c.text ?? "")
       .join("\n");
-    return { text, isError: !!result?.isError };
+
+    if (opts.runResult) {
+      const structured = parseStructuredRunResult(result?.structuredContent, text, !!result?.isError);
+      if (structured) return structured;
+      return parseLegacyRunResult(text, !!result?.isError);
+    }
+
+    return { text, isError: !!result?.isError, rawText: text };
   }
 
   private rpc(
     method: string,
     params: unknown,
     track: RequestTrack = false,
+    onNotification?: NotificationHandler,
   ): Promise<unknown> {
     const id = this.nextId++;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-    return this.post(body, track).then((res) => {
+    return this.post(body, track, onNotification).then((res) => {
       let payload = res.body;
 
       // SSE responses: extract the last `data:` line that carries our id.
@@ -403,11 +452,12 @@ export class McpClient {
         res.headers["content-type"]?.toString().includes("text/event-stream")
       ) {
         for (const line of res.body.split("\n")) {
-          if (line.startsWith("data: ")) {
+          if (line.startsWith("data:")) {
+            const raw = line.slice(5).trimStart();
             try {
-              const obj = JSON.parse(line.slice(6));
+              const obj = JSON.parse(raw);
               if (obj.id === id) {
-                payload = line.slice(6);
+                payload = raw;
                 break;
               }
             } catch {
@@ -433,6 +483,7 @@ export class McpClient {
   private post(
     body: string,
     track: RequestTrack = false,
+    onNotification?: NotificationHandler,
   ): Promise<{
     statusCode: number;
     headers: http.IncomingHttpHeaders;
@@ -473,8 +524,22 @@ export class McpClient {
           if (sid) this.sessionId = Array.isArray(sid) ? sid[0] : sid;
 
           let data = "";
-          res.on("data", (chunk: Buffer) => (data += chunk.toString()));
+          let sseBuffer = "";
+          const isEventStream = res.headers["content-type"]
+            ?.toString()
+            .includes("text/event-stream") ?? false;
+
+          res.on("data", (chunk: Buffer) => {
+            const text = chunk.toString();
+            data += text;
+            if (isEventStream && onNotification) {
+              sseBuffer = drainSseEvents(sseBuffer + text, onNotification);
+            }
+          });
           res.on("end", () => {
+            if (isEventStream && onNotification && sseBuffer.trim()) {
+              drainSseEvents(sseBuffer + "\n\n", onNotification);
+            }
             cleanup();
             resolve({
               statusCode: res.statusCode ?? 0,
@@ -498,8 +563,121 @@ export class McpClient {
 }
 
 export interface ToolResult {
+  /** Body text without rat's status trailer when structured metadata is available. */
   text: string;
   isError: boolean;
+  /** Rat execution status trailer, e.g. "✓ 150ms | 2 vars". */
+  status?: string;
+  durationMs?: number;
+  vars?: number;
+  execCount?: number;
+  rawText?: string;
+}
+
+export function toolResultDisplayText(result: ToolResult): string {
+  const body = result.text.trimEnd();
+  if (!result.status) return body;
+  return body ? `${body}\n\n${result.status}` : result.status;
+}
+
+function parseStructuredRunResult(
+  structured: unknown,
+  rawText: string,
+  isError: boolean,
+): ToolResult | null {
+  if (!structured || typeof structured !== "object") return null;
+  const value = structured as Record<string, unknown>;
+
+  const success = typeof value.success === "boolean" ? value.success : !isError;
+  const status = typeof value.status === "string" ? value.status : undefined;
+  const output = typeof value.output === "string" ? value.output : undefined;
+  const error = typeof value.error === "string" ? value.error : undefined;
+  const durationMs = numberField(value, "durationMs") ?? numberField(value, "duration_ms");
+  const vars = numberField(value, "vars");
+  const execCount = numberField(value, "execCount") ?? numberField(value, "exec_count");
+
+  if (output === undefined && error === undefined && !status) return null;
+
+  return {
+    text: success ? (output ?? "") : (error || output || rawText),
+    isError: isError || !success,
+    status,
+    durationMs,
+    vars,
+    execCount,
+    rawText,
+  };
+}
+
+function parseLegacyRunResult(rawText: string, isError: boolean): ToolResult {
+  const { body, status } = splitStatusTrailer(rawText);
+  return { text: body, isError, status: status || undefined, rawText };
+}
+
+function splitStatusTrailer(text: string): { body: string; status: string } {
+  const trimmed = text.trimEnd();
+  if (!trimmed) return { body: "", status: "" };
+
+  const lines = trimmed.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (/^[✓✗] .+$/.test(line)) {
+      const bodyLines = lines.slice(0, i);
+      while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1].trim() === "") {
+        bodyLines.pop();
+      }
+      return { body: bodyLines.join("\n"), status: line };
+    }
+    break;
+  }
+  return { body: trimmed, status: "" };
+}
+
+function numberField(value: Record<string, unknown>, key: string): number | undefined {
+  const raw = value[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+}
+
+function drainSseEvents(
+  buffer: string,
+  onNotification: NotificationHandler,
+): string {
+  while (true) {
+    const match = buffer.match(/\r?\n\r?\n/);
+    if (!match || match.index === undefined) return buffer;
+
+    const eventText = buffer.slice(0, match.index);
+    buffer = buffer.slice(match.index + match[0].length);
+    handleSseEvent(eventText, onNotification);
+  }
+}
+
+function handleSseEvent(
+  eventText: string,
+  onNotification: NotificationHandler,
+): void {
+  const dataLines: string[] = [];
+  for (const line of eventText.split(/\r?\n/)) {
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (dataLines.length === 0) return;
+
+  try {
+    const message = JSON.parse(dataLines.join("\n")) as {
+      method?: unknown;
+      params?: unknown;
+    };
+    if (typeof message.method !== "string") return;
+    onNotification({
+      method: message.method,
+      params: message.params && typeof message.params === "object"
+        ? message.params as Record<string, unknown>
+        : {},
+    });
+  } catch {
+    // Ignore malformed SSE keepalive / intermediary data.
+  }
 }
 
 // ── Connection pool ────────────────────────────────────────

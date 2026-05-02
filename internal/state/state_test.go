@@ -293,6 +293,27 @@ func TestNextPort(t *testing.T) {
 	}
 }
 
+func TestAllocatePortAndPutWritesSelectedPort(t *testing.T) {
+	s := tempStore(t)
+	k, err := s.AllocatePortAndPut(8717, func(port int) (Kernel, error) {
+		return Kernel{Name: "py@proj", Lang: "py", Port: port, PID: os.Getpid(), Cwd: "/tmp", Started: time.Now()}, nil
+	})
+	if err != nil {
+		t.Fatalf("AllocatePortAndPut: %v", err)
+	}
+	if k.Port < 8717 || k.Port > 8816 {
+		t.Fatalf("Port = %d, want in allocation range", k.Port)
+	}
+
+	port, err := s.NextPort(8717)
+	if err != nil {
+		t.Fatalf("NextPort: %v", err)
+	}
+	if port == k.Port {
+		t.Fatal("allocated port was not recorded")
+	}
+}
+
 func TestCorruptedStateFile(t *testing.T) {
 	s := tempStore(t)
 

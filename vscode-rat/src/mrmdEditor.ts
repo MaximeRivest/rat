@@ -12,7 +12,8 @@ import { fileURLToPath } from "url";
 import * as vscode from "vscode";
 
 import { ratLangForFence } from "./cells";
-import { existingOrRunningClient, getClient, type McpClient } from "./rat";
+import type { ExecutionController } from "./queue";
+import { existingOrRunningClient } from "./rat";
 import { resolveRuntime } from "./resolve";
 
 interface WebviewMessage {
@@ -27,6 +28,7 @@ interface WebviewMessage {
   url?: string;
   mimeType?: string;
   assetType?: string;
+  version?: number;
 }
 
 export interface RatMrmdEditorCallbacks {
@@ -70,20 +72,20 @@ export function syncRatMarkdownAppearance(): void {
 export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
   static readonly viewType = "rat.mrmdEditor";
 
-  private readonly running = new Map<number, McpClient>();
-
   constructor(
     private readonly ctx: vscode.ExtensionContext,
+    private readonly execution: ExecutionController,
     private readonly callbacks: RatMrmdEditorCallbacks = {},
   ) {}
 
   static register(
     ctx: vscode.ExtensionContext,
+    execution: ExecutionController,
     callbacks: RatMrmdEditorCallbacks = {},
   ): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       RatMrmdEditorProvider.viewType,
-      new RatMrmdEditorProvider(ctx, callbacks),
+      new RatMrmdEditorProvider(ctx, execution, callbacks),
       {
         supportsMultipleEditorsPerDocument: false,
         webviewOptions: {
@@ -107,11 +109,14 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
 
     const disposables: vscode.Disposable[] = [];
     let ignoredDocumentText: string | undefined;
+    let lastWebviewText = document.getText();
 
     const postDocumentContent = () => {
+      const text = document.getText();
+      lastWebviewText = text;
       void webviewPanel.webview.postMessage({
         type: "setContent",
-        text: document.getText(),
+        text,
         version: document.version,
       });
     };
@@ -123,6 +128,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
         const next = document.getText();
         if (ignoredDocumentText === next) {
           ignoredDocumentText = undefined;
+          lastWebviewText = next;
           return;
         }
 
@@ -145,8 +151,32 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
 
             case "edit":
               if (typeof message.text === "string" && message.text !== document.getText()) {
+                const baseVersion = typeof message.version === "number" ? message.version : undefined;
+                const currentText = document.getText();
+
+                if (
+                  baseVersion !== undefined &&
+                  baseVersion !== document.version &&
+                  currentText !== lastWebviewText
+                ) {
+                  await webviewPanel.webview.postMessage({
+                    type: "editConflict",
+                    text: currentText,
+                    version: document.version,
+                  });
+                  break;
+                }
+
                 ignoredDocumentText = message.text;
-                await this.updateTextDocument(document, message.text);
+                const applied = await this.updateTextDocument(document, message.text);
+                if (applied) {
+                  lastWebviewText = message.text;
+                  await webviewPanel.webview.postMessage({
+                    type: "editApplied",
+                    text: message.text,
+                    version: document.version,
+                  });
+                }
               }
               break;
 
@@ -166,7 +196,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
               break;
 
             case "ratCancel":
-              this.handleRatCancel(message);
+              this.handleRatCancel(webviewPanel, message);
               break;
 
             case "ratAsset":
@@ -230,10 +260,10 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
   private async updateTextDocument(
     document: vscode.TextDocument,
     text: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const edit = new vscode.WorkspaceEdit();
     edit.replace(document.uri, fullDocumentRange(document), text);
-    await vscode.workspace.applyEdit(edit);
+    return vscode.workspace.applyEdit(edit);
   }
 
   private noteActiveDocument(document: vscode.TextDocument): void {
@@ -259,9 +289,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
     const id = message.id;
     if (typeof id !== "number") return;
 
-    const code = message.code ?? "";
     const runtime = this.resolveRuntimeForMessage(document, message.language);
-
     if (!runtime) {
       await webviewPanel.webview.postMessage({
         type: "ratDone",
@@ -274,113 +302,25 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    let client: McpClient;
-    try {
-      client = await getClient(runtime.name, runtime.cwd, runtime.lang);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await webviewPanel.webview.postMessage({
-        type: "ratDone",
-        id,
-        success: false,
-        stdout: "",
-        stderr: msg,
-        error: { message: msg },
-      });
-      return;
-    }
-
-    this.running.set(id, client);
-
-    let lastPartial = "";
-    let inputPromptOpen = false;
-    let tickRunning = false;
-
-    const poll = setInterval(async () => {
-      if (tickRunning) return;
-      tickRunning = true;
-      try {
-        try {
-          const partial = await client.partialOutput();
-          if (partial && partial.startsWith(lastPartial) && partial.length > lastPartial.length) {
-            const chunk = partial.slice(lastPartial.length);
-            lastPartial = partial;
-            await webviewPanel.webview.postMessage({
-              type: "ratOutput",
-              id,
-              chunk,
-            });
-          }
-        } catch {
-          // Best effort while execution is active.
-        }
-
-        if (!inputPromptOpen) {
-          inputPromptOpen = true;
-          try {
-            await this.pollInput(client);
-          } finally {
-            inputPromptOpen = false;
-          }
-        }
-      } finally {
-        tickRunning = false;
-      }
-    }, 300);
-
-    try {
-      const result = await client.run(code);
-      await webviewPanel.webview.postMessage({
-        type: "ratDone",
-        id,
-        success: !result.isError,
-        stdout: result.text,
-        stderr: "",
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      await webviewPanel.webview.postMessage({
-        type: "ratDone",
-        id,
-        success: false,
-        stdout: "",
-        stderr: msg,
-        error: { message: msg },
-      });
-    } finally {
-      clearInterval(poll);
-      this.running.delete(id);
-      this.noteActiveDocument(document);
-    }
+    this.execution.enqueue({
+      kind: "webview",
+      id,
+      code: message.code ?? "",
+      document,
+      webviewPanel,
+      runtimeName: runtime.name,
+      cwd: runtime.cwd,
+      lang: runtime.lang,
+      onDidFinish: () => this.noteActiveDocument(document),
+    });
   }
 
-  private handleRatCancel(message: WebviewMessage): void {
+  private handleRatCancel(
+    webviewPanel: vscode.WebviewPanel,
+    message: WebviewMessage,
+  ): void {
     if (typeof message.id !== "number") return;
-    const client = this.running.get(message.id);
-    if (!client) return;
-    client.abortCurrentRequest();
-    void client.cancel();
-  }
-
-  private async pollInput(client: McpClient): Promise<void> {
-    try {
-      const st = await client.status();
-      const state = st.split("\n", 1)[0].trim();
-      if (state !== "waiting_for_input") return;
-
-      const input = await vscode.window.showInputBox({
-        prompt: "Program is waiting for input",
-        placeHolder: "Type here and press Enter…",
-      });
-
-      if (input !== undefined) {
-        await client.sendInput(input);
-      } else {
-        await client.cancel();
-      }
-    } catch {
-      // Best effort.
-    }
+    this.execution.cancelWebviewRun(webviewPanel, message.id);
   }
 
   private async handleRatAsset(

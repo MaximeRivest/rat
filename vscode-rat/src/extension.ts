@@ -21,6 +21,7 @@ import {
   RatCompletionProvider,
   RatHoverProvider,
   RatSignatureHelpProvider,
+  registerFallbackDocumentProvider,
 } from "./intellisense";
 import {
   RatDefinitionProvider,
@@ -28,7 +29,7 @@ import {
   RatReferenceProvider,
 } from "./navigation";
 import { clearAllOutputs } from "./output";
-import { ExecutionQueue, type QueueState } from "./queue";
+import { ExecutionController, type QueueState } from "./queue";
 import {
   initRuntimeState,
   resolveRuntime,
@@ -55,6 +56,7 @@ import {
   clearResults,
   renderResults,
   disposeInlineOutput,
+  rebaseResultsForDocumentChange,
 } from "./inlineOutput";
 import {
   configureRatMarkdownAppearance,
@@ -71,7 +73,7 @@ import {
 
 let statusBar: vscode.StatusBarItem;
 let runtimeBar: vscode.StatusBarItem;
-let queue: ExecutionQueue;
+let queue: ExecutionController;
 let treeProvider: RuntimeTreeProvider;
 let inspectorProvider: RatInspectorViewProvider;
 let variablesProvider: RatVariablesViewProvider;
@@ -81,21 +83,8 @@ let variablesProvider: RatVariablesViewProvider;
 export function activate(ctx: vscode.ExtensionContext): void {
   initRuntimeState(ctx);
   initRatInstaller(ctx);
+  registerFallbackDocumentProvider(ctx);
 
-  ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx, {
-    onActiveDocument: (document) => {
-      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
-      if (runtimeBar) updateRuntimeBarForDocument(document);
-      variablesProvider?.updateDocument(document);
-    },
-    onSelection: (document, language, expression) => {
-      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
-      const ratLang = language ? ratLangForFence(language) : null;
-      if (runtimeBar) updateRuntimeBarForDocument(document, language ?? undefined);
-      variablesProvider?.updateDocument(document, ratLang);
-      inspectorProvider?.updateRatMarkdownSelection(document, language, expression);
-    },
-  }));
   ctx.subscriptions.push(
     vscode.window.onDidChangeActiveColorTheme(() => syncRatMarkdownThemes()),
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -147,7 +136,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   );
 
   // Execution queue
-  queue = new ExecutionQueue((state, pending) => {
+  queue = new ExecutionController((state, pending) => {
     setStatus(state, pending);
     vscode.commands.executeCommand(
       "setContext",
@@ -155,6 +144,21 @@ export function activate(ctx: vscode.ExtensionContext): void {
       state === "running",
     );
   });
+
+  ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx, queue, {
+    onActiveDocument: (document) => {
+      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
+      if (runtimeBar) updateRuntimeBarForDocument(document);
+      variablesProvider?.updateDocument(document);
+    },
+    onSelection: (document, language, expression) => {
+      vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
+      const ratLang = language ? ratLangForFence(language) : null;
+      if (runtimeBar) updateRuntimeBarForDocument(document, language ?? undefined);
+      variablesProvider?.updateDocument(document, ratLang);
+      inspectorProvider?.updateRatMarkdownSelection(document, language, expression);
+    },
+  }));
 
   // ── Providers — notebook files (markdown/quarto) ─────────
 
@@ -284,6 +288,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       inspectorProvider.update(e.textEditor);
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
+      rebaseResultsForDocumentChange(e);
       updateRuntimeBar(vscode.window.activeTextEditor);
       variablesProvider.update(vscode.window.activeTextEditor);
       const ed = vscode.window.activeTextEditor;
@@ -291,6 +296,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
         const fl = detectFileLang(ed.document);
         if (fl.mode === "notebook") {
           applyDecorations(ed);
+        } else if (fl.mode === "source") {
+          renderResults(ed);
         }
       }
     }),

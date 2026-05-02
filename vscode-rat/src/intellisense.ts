@@ -12,9 +12,6 @@
  *   - Anywhere in source files (.py, .r, .jl, .js, .sh)
  */
 
-import * as fs from "fs/promises";
-import * as os from "os";
-import * as path from "path";
 import * as vscode from "vscode";
 import {
   parseCells,
@@ -54,6 +51,61 @@ const LANG_EXT: Record<string, string> = {
 };
 
 const fallbackDocumentUris = new Set<string>();
+const FALLBACK_SCHEME = "rat-fallback";
+
+class RatFallbackDocumentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
+  private readonly documents = new Map<string, string>();
+  private readonly _onDidChange = new vscode.EventEmitter<vscode.Uri>();
+  readonly onDidChange = this._onDidChange.event;
+
+  open(fallback: FallbackContext): { uri: vscode.Uri; dispose: () => void } {
+    const ext = LANG_EXT[fallback.languageId] ?? ".txt";
+    const id = `fallback-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const uri = vscode.Uri.from({
+      scheme: FALLBACK_SCHEME,
+      authority: "lsp",
+      path: `/${id}${ext}`,
+    });
+
+    const key = uri.toString();
+    this.documents.set(key, fallback.code);
+    fallbackDocumentUris.add(key);
+    this._onDidChange.fire(uri);
+
+    return {
+      uri,
+      dispose: () => {
+        this.documents.delete(key);
+        fallbackDocumentUris.delete(key);
+      },
+    };
+  }
+
+  provideTextDocumentContent(uri: vscode.Uri): string {
+    return this.documents.get(uri.toString()) ?? "";
+  }
+
+  dispose(): void {
+    this.documents.clear();
+    fallbackDocumentUris.clear();
+    this._onDidChange.dispose();
+  }
+}
+
+const fallbackDocumentProvider = new RatFallbackDocumentProvider();
+let fallbackDocumentProviderRegistered = false;
+
+export function registerFallbackDocumentProvider(ctx: vscode.ExtensionContext): void {
+  if (fallbackDocumentProviderRegistered) return;
+  fallbackDocumentProviderRegistered = true;
+  ctx.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(
+      FALLBACK_SCHEME,
+      fallbackDocumentProvider,
+    ),
+    fallbackDocumentProvider,
+  );
+}
 
 // ── Resolve context: either a cell in a notebook or whole source file ──
 
@@ -297,41 +349,22 @@ async function lspFallbackCompletions(
 async function openFallbackDocument(
   fallback: FallbackContext,
 ): Promise<{ document: vscode.TextDocument; dispose: () => Promise<void> } | null> {
-  const ext = LANG_EXT[fallback.languageId] ?? ".txt";
-  const dir = path.join(os.tmpdir(), "rat-vscode-lsp-fallback");
-  const file = path.join(
-    dir,
-    `fallback-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
-  );
-  const uri = vscode.Uri.file(file);
+  const entry = fallbackDocumentProvider.open(fallback);
 
   try {
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(file, fallback.code, "utf8");
-
-    let document = await vscode.workspace.openTextDocument(uri);
+    let document = await vscode.workspace.openTextDocument(entry.uri);
     if (document.languageId !== fallback.languageId) {
       document = await vscode.languages.setTextDocumentLanguage(document, fallback.languageId);
     }
 
-    fallbackDocumentUris.add(document.uri.toString());
     return {
       document,
       dispose: async () => {
-        fallbackDocumentUris.delete(document.uri.toString());
-        try {
-          await fs.unlink(file);
-        } catch {
-          // Best effort cleanup.
-        }
+        entry.dispose();
       },
     };
   } catch {
-    try {
-      await fs.unlink(file);
-    } catch {
-      // ignore
-    }
+    entry.dispose();
     return null;
   }
 }

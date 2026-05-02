@@ -560,6 +560,15 @@ def main():
                 send(handle_look_at(req.get("at", "")))
             elif op == "look_overview":
                 send(handle_look_overview())
+            elif op == "status":
+                if _client is None:
+                    send({"text": f"error\n{_init_error or 'Jupyter client not initialized'}"})
+                else:
+                    runtime = "Jupyter"
+                    if _kernel_id:
+                        runtime += f" {_kernel_id[:8]}"
+                    state = "waiting_for_input" if _waiting_for_input.is_set() else "busy" if _busy.is_set() else "idle"
+                    send({"text": f"{state}\nruntime_version: {runtime}"})
             else:
                 send({"error": f"unknown op: {op}"})
         except Exception as exc:

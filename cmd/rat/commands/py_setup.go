@@ -69,11 +69,7 @@ func inspectPythonEnv() pythonEnvCheck {
 	check.VenvPath, check.VenvPython = detectVenv(check.PythonPath)
 
 	// Check if IPython and jedi are importable.
-	py := check.effectivePython()
-	if py != "" {
-		check.IPythonOK = canImport(py, "IPython")
-		check.JediOK = canImport(py, "jedi")
-	}
+	refreshPythonImportChecks(&check)
 
 	return check
 }
@@ -186,6 +182,20 @@ func canImport(pythonPath, module string) bool {
 	return cmd.Run() == nil
 }
 
+func refreshPythonImportChecks(check *pythonEnvCheck) {
+	if check == nil {
+		return
+	}
+	py := check.effectivePython()
+	if py == "" {
+		check.IPythonOK = false
+		check.JediOK = false
+		return
+	}
+	check.IPythonOK = canImport(py, "IPython")
+	check.JediOK = canImport(py, "jedi")
+}
+
 // ── Install ─────────────────────────────────────────────────
 
 func installPythonRuntime() error {
@@ -227,6 +237,10 @@ func installPythonRuntime() error {
 		}
 	}
 	statusLine("venv", true, check.VenvPath)
+
+	// Recompute dependency checks against the effective interpreter after
+	// venv creation. The initial inspection may have checked system Python.
+	refreshPythonImportChecks(&check)
 
 	// Install ipython + jedi into the venv.
 	py := check.effectivePython()

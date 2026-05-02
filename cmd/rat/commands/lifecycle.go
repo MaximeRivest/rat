@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,10 +26,12 @@ var (
 	removeAll     bool
 	rmYes         bool
 	statusVerbose bool
+	statusJSON    bool
 )
 
 func init() {
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show details: URL, PID, memory, clients, runtime")
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Print status rows as JSON")
 	stopCmd.Flags().BoolVar(&stopAll, "all", false, "Stop all running kernels")
 	removeCmd.Flags().BoolVar(&removeAll, "all", false, "Delete all runtime state entries")
 	removeCmd.Flags().BoolVar(&rmYes, "yes", false, "Delete without confirmation")
@@ -301,12 +304,22 @@ URL, PID, and memory.
 			return err
 		}
 		if len(rows) == 0 {
+			if statusJSON {
+				fmt.Println("[]")
+				return nil
+			}
 			fmt.Println("No runtimes.")
 			fmt.Println("Start one: rat py")
 			return nil
 		}
 
 		enrichStatusRows(rows)
+
+		if statusJSON {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(rows)
+		}
 
 		if statusVerbose {
 			printVerboseStatus(rows)
@@ -455,14 +468,15 @@ Examples:
 
 var resetCmd = &cobra.Command{
 	Use:     "reset <runtime>",
-	Short:   "Clear namespace (keep process)",
+	Short:   "Clear namespace (may restart runtime)",
 	GroupID: "setup",
-	Long: `Clear the namespace without restarting the process.
+	Long: `Clear the runtime namespace.
 
-This is faster than restart but less reliable. It does NOT auto-start —
-the kernel must already be running.
+This keeps the rat MCP server entry running, but many runtimes restart
+their interpreter or session under the hood to guarantee a clean state.
+It does NOT auto-start — the kernel must already be running.
 
-For a full restart: rat restart <name>`,
+For an explicit daemon restart: rat restart <name>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -559,19 +573,19 @@ var updateCmd = &cobra.Command{
 const idleWarningAfter = 24 * time.Hour
 
 type statusRow struct {
-	Name           string
-	Status         string
-	Cwd            string
-	Venv           string
-	Port           int
-	PID            int
-	RuntimeState   string
-	IdleSeconds    int
-	MemoryMB       int
-	Clients        int
-	ClientNames    string
-	LastCaller     string
-	RuntimeVersion string
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	Cwd            string `json:"cwd"`
+	Venv           string `json:"venv,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	PID            int    `json:"pid,omitempty"`
+	RuntimeState   string `json:"runtime_state,omitempty"`
+	IdleSeconds    int    `json:"idle_seconds,omitempty"`
+	MemoryMB       int    `json:"memory_mb,omitempty"`
+	Clients        int    `json:"clients,omitempty"`
+	ClientNames    string `json:"client_names,omitempty"`
+	LastCaller     string `json:"last_caller,omitempty"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
 }
 
 func buildStatusRows(s *state.Store) ([]statusRow, error) {

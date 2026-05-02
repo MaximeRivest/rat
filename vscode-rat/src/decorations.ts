@@ -7,7 +7,7 @@
  */
 
 import * as vscode from "vscode";
-import { parseCells, findOutputBlock } from "./cells";
+import { parseRatNotebookDocument } from "./documentModel";
 
 // ── Decoration types ───────────────────────────────────────
 
@@ -57,9 +57,9 @@ export function applyDecorations(editor: vscode.TextEditor): void {
   const outBodyRanges: vscode.DecorationOptions[] = [];
   const outFenceRanges: vscode.DecorationOptions[] = [];
 
-  const cells = parseCells(doc);
+  const model = parseRatNotebookDocument(doc);
 
-  for (const cell of cells) {
+  for (const cell of model.cells) {
     // Fence lines — small and subtle
     fenceRanges.push({
       range: new vscode.Range(cell.openLine, 0, cell.openLine, doc.lineAt(cell.openLine).text.length),
@@ -76,7 +76,7 @@ export function applyDecorations(editor: vscode.TextEditor): void {
     }
 
     // Output block (if present)
-    const output = findOutputBlock(doc, cell.closeLine);
+    const output = cell.output;
     if (output) {
       outFenceRanges.push({
         range: new vscode.Range(output.startLine, 0, output.startLine, doc.lineAt(output.startLine).text.length),

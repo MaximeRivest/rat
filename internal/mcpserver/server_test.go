@@ -38,6 +38,13 @@ func TestFormatRunResultSuccess(t *testing.T) {
 	if !strings.Contains(text, "✓ 10ms | 1 var") {
 		t.Fatalf("text = %q, want hint", text)
 	}
+	structured, ok := r.StructuredContent.(structuredRunResult)
+	if !ok {
+		t.Fatalf("StructuredContent = %#v, want structuredRunResult", r.StructuredContent)
+	}
+	if !structured.Success || structured.Output != "42" || structured.DurationMS != 10 || structured.Vars != 1 || structured.Status != "✓ 10ms | 1 var" {
+		t.Fatalf("structured = %#v", structured)
+	}
 }
 
 func TestFormatRunResultError(t *testing.T) {
@@ -53,6 +60,13 @@ func TestFormatRunResultError(t *testing.T) {
 	}
 	if !strings.Contains(text, "✗") {
 		t.Fatalf("text = %q, want ✗", text)
+	}
+	structured, ok := r.StructuredContent.(structuredRunResult)
+	if !ok {
+		t.Fatalf("StructuredContent = %#v, want structuredRunResult", r.StructuredContent)
+	}
+	if structured.Success || structured.Error != "NameError: x not defined" || structured.Status != "✗ 5ms" {
+		t.Fatalf("structured = %#v", structured)
 	}
 }
 
@@ -223,5 +237,60 @@ func TestFormatActivity(t *testing.T) {
 	}
 	if !strings.Contains(text, "slack") || !strings.Contains(text, "hi") {
 		t.Fatalf("text = %q, want event", text)
+	}
+}
+
+type elicitationKernel struct {
+	inputs []string
+	ops    []string
+}
+
+func (k *elicitationKernel) Run(code string) kernel.RunResult { return kernel.RunResult{} }
+func (k *elicitationKernel) SendInput(text string) error {
+	k.inputs = append(k.inputs, text)
+	return nil
+}
+func (k *elicitationKernel) IsWaitingForInput() bool { return false }
+func (k *elicitationKernel) Look(req kernel.LookRequest) kernel.LookResult {
+	return kernel.LookResult{}
+}
+func (k *elicitationKernel) Ctl(op string) kernel.CtlResult {
+	k.ops = append(k.ops, op)
+	return kernel.CtlResult{Text: op}
+}
+func (k *elicitationKernel) Shutdown() error { return nil }
+
+func TestHandleElicitationResultAcceptSendsInput(t *testing.T) {
+	k := &elicitationKernel{}
+	result := &mcp.ElicitationResult{
+		ElicitationResponse: mcp.ElicitationResponse{
+			Action:  mcp.ElicitationResponseActionAccept,
+			Content: map[string]any{"text": "hello"},
+		},
+	}
+
+	handleElicitationResult(k, result)
+
+	if len(k.inputs) != 1 || k.inputs[0] != "hello\n" {
+		t.Fatalf("inputs = %#v, want hello newline", k.inputs)
+	}
+	if len(k.ops) != 0 {
+		t.Fatalf("ops = %#v, want no cancel", k.ops)
+	}
+}
+
+func TestHandleElicitationResultCancelCancelsKernel(t *testing.T) {
+	k := &elicitationKernel{}
+	result := &mcp.ElicitationResult{
+		ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionCancel},
+	}
+
+	handleElicitationResult(k, result)
+
+	if len(k.inputs) != 0 {
+		t.Fatalf("inputs = %#v, want none", k.inputs)
+	}
+	if len(k.ops) != 1 || k.ops[0] != "cancel" {
+		t.Fatalf("ops = %#v, want cancel", k.ops)
 	}
 }

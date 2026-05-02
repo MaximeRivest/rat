@@ -254,6 +254,9 @@ func TestGenericKernelCtlStatus(t *testing.T) {
 	if !strings.Contains(r.Text, "idle") {
 		t.Fatalf("status = %q, want idle", r.Text)
 	}
+	if !strings.Contains(r.Text, "runtime_version: MockKernel 1.0") {
+		t.Fatalf("status = %q, want runtime-provided version", r.Text)
+	}
 }
 
 func TestGenericKernelCtlReset(t *testing.T) {

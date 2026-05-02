@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,4 +153,58 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func TestValidateMCPResponseRejectsJSONRPCError(t *testing.T) {
+	resp := testHTTPResponse(200, `{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"boom"}}`)
+
+	err := validateMCPResponse(resp, 2, "ctl(status)", validateToolStatusResult)
+	if err == nil {
+		t.Fatal("expected JSON-RPC error")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error = %v, want boom", err)
+	}
+}
+
+func TestValidateMCPResponseRejectsToolError(t *testing.T) {
+	resp := testHTTPResponse(200, `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"not healthy"}]}}`)
+
+	err := validateMCPResponse(resp, 2, "ctl(status)", validateToolStatusResult)
+	if err == nil {
+		t.Fatal("expected tool error")
+	}
+	if !strings.Contains(err.Error(), "not healthy") {
+		t.Fatalf("error = %v, want tool text", err)
+	}
+}
+
+func TestValidateMCPResponseAcceptsSSEToolResult(t *testing.T) {
+	body := "event: message\n" +
+		`data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"idle"}]}}` +
+		"\n\n"
+	resp := testHTTPResponse(200, body)
+
+	if err := validateMCPResponse(resp, 2, "ctl(status)", validateToolStatusResult); err != nil {
+		t.Fatalf("validateMCPResponse: %v", err)
+	}
+}
+
+func TestValidateMCPResponseRejectsErrorStatusText(t *testing.T) {
+	resp := testHTTPResponse(200, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"error\nauth failed"}]}}`)
+
+	err := validateMCPResponse(resp, 2, "ctl(status)", validateToolStatusResult)
+	if err == nil {
+		t.Fatal("expected unhealthy status error")
+	}
+	if !strings.Contains(err.Error(), "auth failed") {
+		t.Fatalf("error = %v, want status text", err)
+	}
+}
+
+func testHTTPResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
 }

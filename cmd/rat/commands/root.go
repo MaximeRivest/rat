@@ -208,19 +208,42 @@ func isKnownCommand(name string) bool {
 	return false
 }
 
-func handleREPL(input string, args []string) error {
-	instance := 0
+func replTargetInput(input string, args []string) (targetInput string, instance int, err error) {
+	instance = 1
+	if len(args) == 0 {
+		return input, instance, nil
+	}
 	if len(args) == 1 {
-		if n, err := strconv.Atoi(args[0]); err == nil && n >= 1 {
+		if n, convErr := strconv.Atoi(args[0]); convErr == nil && n >= 1 {
 			instance = n
-			args = nil
+			if n >= 2 {
+				return fmt.Sprintf("%s.%d", input, n), instance, nil
+			}
+			return input, instance, nil
 		}
 	}
-	if len(args) > 0 {
-		return fmt.Errorf("unexpected arguments after %q: %s", input, strings.Join(args, " "))
+	return "", 0, fmt.Errorf("unexpected arguments after %q: %s", input, strings.Join(args, " "))
+}
+
+func splitInstanceSuffix(name string) (base string, instance int, ok bool) {
+	dot := strings.LastIndex(name, ".")
+	if dot < 1 || dot == len(name)-1 {
+		return "", 0, false
+	}
+	instance, err := strconv.Atoi(name[dot+1:])
+	if err != nil || instance < 2 {
+		return "", 0, false
+	}
+	return name[:dot], instance, true
+}
+
+func handleREPL(input string, args []string) error {
+	targetInput, instance, err := replTargetInput(input, args)
+	if err != nil {
+		return err
 	}
 
-	k, action, err := ensureKernel(input)
+	k, action, err := ensureKernel(targetInput)
 	if err != nil {
 		// Signpost: suggest rat setup for common missing-runtime errors.
 		errStr := err.Error()
@@ -232,17 +255,12 @@ func handleREPL(input string, args []string) error {
 		return err
 	}
 
-	// Apply instance suffix: py@myproject.2, py@myproject.3, etc.
+	// Instance suffixes are resolved before ensureKernel() so `rat py 2`
+	// starts only py@project.2, not the base py@project kernel first.
 	baseName := k.Name
-	if instance >= 2 {
-		// Resolve via the instance-aware resolver path.
-		instanceInput := fmt.Sprintf("%s.%d", input, instance)
-		k, action, err = ensureKernel(instanceInput)
-		if err != nil {
-			return err
-		}
-	} else {
-		instance = 1
+	if base, n, ok := splitInstanceSuffix(k.Name); ok {
+		baseName = base
+		instance = n
 	}
 	printKernelAction(k, action)
 

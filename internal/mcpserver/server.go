@@ -278,18 +278,49 @@ func newRunID() string {
 
 // formatRunResult converts a kernel.RunResult to an MCP tool result.
 func formatRunResult(r kernel.RunResult) *mcp.CallToolResult {
+	status := formatHint(r.Success, r.Duration, r.Vars)
+	output := cleanOutput(r.Output)
+	structured := structuredRunResult{
+		Success:    r.Success,
+		Output:     output,
+		ExecCount:  r.ExecCount,
+		DurationMS: r.Duration,
+		Vars:       r.Vars,
+		Status:     status,
+	}
+
 	if !r.Success {
 		text := r.Error
 		if text == "" {
 			text = "execution failed"
 		}
-		text += "\n\n" + formatHint(false, r.Duration, r.Vars)
-		return mcp.NewToolResultError(text)
+		structured.Error = text
+		result := mcp.NewToolResultStructured(structured, text+"\n\n"+status)
+		result.IsError = true
+		return result
 	}
 
-	text := cleanOutput(r.Output)
-	text += "\n\n" + formatHint(true, r.Duration, r.Vars)
-	return mcp.NewToolResultText(text)
+	return mcp.NewToolResultStructured(structured, formatRunText(output, status))
+}
+
+// structuredRunResult is the machine-readable run payload returned alongside
+// the legacy text fallback. Clients like vscode-rat can render body/status
+// separately without guessing which final line is metadata.
+type structuredRunResult struct {
+	Success    bool   `json:"success"`
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
+	ExecCount  int    `json:"exec_count,omitempty"`
+	DurationMS int    `json:"duration_ms"`
+	Vars       int    `json:"vars,omitempty"`
+	Status     string `json:"status"`
+}
+
+func formatRunText(output, status string) string {
+	if output == "" {
+		return status
+	}
+	return output + "\n\n" + status
 }
 
 func formatHint(ok bool, durationMs, vars int) string {
@@ -646,23 +677,48 @@ func requestInputViaElicitation(ctx context.Context, s *server.MCPServer, k kern
 
 	result, err := s.RequestElicitation(ctx, req)
 	if err != nil {
-		// Client doesn't support elicitation — send a notification as fallback.
+		// Client doesn't support elicitation — send a notification as fallback,
+		// then cancel the blocked runtime so input() doesn't hang forever.
 		session := server.ClientSessionFromContext(ctx)
 		if session != nil {
 			sendNotification(session.NotificationChannel(), "rat/input_request", nil)
 		}
+		cancelKernelInput(k)
 		return
 	}
 
-	if result.Action == mcp.ElicitationResponseActionAccept {
-		if content, ok := result.Content.(map[string]any); ok {
-			if text, ok := content["text"].(string); ok {
-				if !strings.HasSuffix(text, "\n") {
-					text += "\n"
-				}
-				k.SendInput(text)
-			}
-		}
+	handleElicitationResult(k, result)
+}
+
+func handleElicitationResult(k kernel.Kernel, result *mcp.ElicitationResult) {
+	if k == nil {
+		return
+	}
+	if result == nil || result.Action != mcp.ElicitationResponseActionAccept {
+		cancelKernelInput(k)
+		return
+	}
+	content, ok := result.Content.(map[string]any)
+	if !ok {
+		cancelKernelInput(k)
+		return
+	}
+	text, ok := content["text"].(string)
+	if !ok {
+		cancelKernelInput(k)
+		return
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	if err := k.SendInput(text); err != nil {
+		cancelKernelInput(k)
+	}
+}
+
+func cancelKernelInput(k kernel.Kernel) {
+	if k != nil {
+		_ = k.Ctl("cancel")
 	}
 }
 

@@ -73,6 +73,14 @@ interface InlineResult {
   isError: boolean;
 }
 
+interface LineChange {
+  startLine: number;
+  startCharacter: number;
+  endLine: number;
+  endCharacter: number;
+  text: string;
+}
+
 // Map<documentUri, InlineResult[]>
 const results = new Map<string, InlineResult[]>();
 
@@ -162,6 +170,48 @@ export function clearResults(editor: vscode.TextEditor): void {
 }
 
 /**
+ * Keep stored inline result locations aligned after source edits.
+ *
+ * Decorations are anchored to line numbers, not semantic blocks. When users
+ * insert/delete text above a result we can rebase it; when the edit touches the
+ * result line itself we drop that result to avoid stale diagnostics.
+ */
+export function rebaseResultsForDocumentChange(
+  event: vscode.TextDocumentChangeEvent,
+): void {
+  const uri = event.document.uri.toString();
+  const docResults = results.get(uri);
+  if (!docResults || docResults.length === 0 || event.contentChanges.length === 0) {
+    return;
+  }
+
+  const changes = event.contentChanges.map((change) => ({
+    startLine: change.range.start.line,
+    startCharacter: change.range.start.character,
+    endLine: change.range.end.line,
+    endCharacter: change.range.end.character,
+    text: change.text,
+  }));
+
+  const next = rebaseInlineResults(docResults, changes);
+  if (next.length === 0) {
+    results.delete(uri);
+    diagnostics.delete(event.document.uri);
+    return;
+  }
+
+  results.set(uri, next);
+  updateDiagnostics(event.document);
+}
+
+export function rebaseInlineResultsForTest(
+  input: InlineResult[],
+  changes: LineChange[],
+): InlineResult[] {
+  return rebaseInlineResults(input, changes);
+}
+
+/**
  * Re-render all stored results (call after editor switch).
  */
 export function renderResults(editor: vscode.TextEditor): void {
@@ -226,6 +276,47 @@ export function disposeInlineOutput(): void {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+function rebaseInlineResults(
+  input: InlineResult[],
+  changes: LineChange[],
+): InlineResult[] {
+  let rebased = input.map((result) => ({ ...result }));
+  let accumulatedDelta = 0;
+
+  for (const change of changes) {
+    const startLine = change.startLine + accumulatedDelta;
+    const endLine = change.endLine + accumulatedDelta;
+    const oldLineSpan = change.endLine - change.startLine;
+    const newLineSpan = lineSpan(change.text);
+    const delta = newLineSpan - oldLineSpan;
+    const isPureInsertion =
+      change.startLine === change.endLine &&
+      change.startCharacter === change.endCharacter;
+
+    rebased = rebased.flatMap((result) => {
+      if (isPureInsertion) {
+        if (result.line >= startLine) {
+          return [{ ...result, line: result.line + delta }];
+        }
+        return [result];
+      }
+
+      if (result.line < startLine) return [result];
+      if (result.line > endLine) return [{ ...result, line: result.line + delta }];
+      return [];
+    });
+
+    accumulatedDelta += delta;
+  }
+
+  return rebased;
+}
+
+function lineSpan(text: string): number {
+  if (text.length === 0) return 0;
+  return text.split(/\r\n|\r|\n/).length - 1;
+}
 
 /**
  * Format a successful result for inline display.

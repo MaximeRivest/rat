@@ -367,6 +367,7 @@ type response struct {
 	Output  string `json:"output,omitempty"`
 	Error   string `json:"error,omitempty"`
 	Text    string `json:"text,omitempty"`
+	State   string `json:"state,omitempty"`
 	OK      bool   `json:"ok,omitempty"`
 	Vars    int    `json:"vars,omitempty"`
 }
@@ -648,11 +649,31 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 		// No streaming output buffer for generic kernels.
 		return kernel.CtlResult{Text: ""}
 	case "status":
-		state := "idle"
 		if k.executing.Load() {
-			state = "busy"
+			return kernel.CtlResult{Text: "busy"}
 		}
-		return kernel.CtlResult{Text: state}
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		if err := k.ensureStarted(); err != nil {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+		}
+		if err := k.send(request{Op: "status"}); err != nil {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+		}
+		resp, err := k.readResponse(5 * time.Second)
+		if err != nil {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+		}
+		if resp.Text != "" {
+			return kernel.CtlResult{Text: resp.Text}
+		}
+		if resp.State != "" {
+			return kernel.CtlResult{Text: resp.State}
+		}
+		if resp.Error != "" {
+			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %s", resp.Error)}
+		}
+		return kernel.CtlResult{Text: "idle"}
 	default:
 		return kernel.CtlResult{Text: fmt.Sprintf("ERROR: unknown op '%s'", op)}
 	}

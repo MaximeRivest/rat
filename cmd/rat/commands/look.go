@@ -41,6 +41,10 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
+		if lookAt != "" && lookCode != "" {
+			return fmt.Errorf("use either --at or --code, not both")
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -49,10 +53,6 @@ Examples:
 			return err
 		}
 		defer session.Close()
-
-		if lookAt != "" && lookCode != "" {
-			return fmt.Errorf("use either --at or --code, not both")
-		}
 
 		var text string
 		if lookCode != "" {

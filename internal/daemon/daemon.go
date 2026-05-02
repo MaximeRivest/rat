@@ -11,6 +11,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -145,12 +146,6 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 		forceStopAndRemove(store, existing)
 	}
 
-	// Find a free port
-	port, err := store.NextPort(BasePort)
-	if err != nil {
-		return nil, err
-	}
-
 	// Find our own binary path
 	self, err := os.Executable()
 	if err != nil {
@@ -158,64 +153,70 @@ func Start(store *state.Store, opts StartOpts) (*state.Kernel, error) {
 	}
 	self, _ = filepath.EvalSymlinks(self)
 
-	// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd> [--venv <venv>]
-	// Runtime env/options are delivered through the child environment, not argv,
-	// so secrets don't show up in process listings.
-	args := buildServeArgs(opts, port)
-
-	cmd := exec.Command(self, args...)
-	cmd.Dir = opts.Cwd
-	cmd.Env = buildServeEnv(os.Environ(), opts)
-
-	// Detach: new session, no stdin, logs to file
 	logDir := filepath.Join(filepath.Dir(store.Path()), "logs")
-	logFile, err := openKernelLog(logDir, opts.Name)
-	if err != nil {
-		return nil, fmt.Errorf("open log: %w", err)
-	}
 
-	cmd.Stdin = nil
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	procutil.ConfigureBackgroundProcess(cmd)
+	// Select the port and record the started process while holding the state
+	// file lock, so concurrent `rat start` calls don't reserve the same port.
+	k, err := store.AllocatePortAndPut(BasePort, func(port int) (state.Kernel, error) {
+		// Build the command: rat serve <name> --lang <lang> --http --port <port> --cwd <cwd> [--venv <venv>]
+		// Runtime env/options are delivered through the child environment, not argv,
+		// so secrets don't show up in process listings.
+		args := buildServeArgs(opts, port)
 
-	if err := cmd.Start(); err != nil {
+		cmd := exec.Command(self, args...)
+		cmd.Dir = opts.Cwd
+		cmd.Env = buildServeEnv(os.Environ(), opts)
+
+		// Detach: new session, no stdin, logs to file
+		logFile, err := openKernelLog(logDir, opts.Name)
+		if err != nil {
+			return state.Kernel{}, fmt.Errorf("open log: %w", err)
+		}
+
+		cmd.Stdin = nil
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		procutil.ConfigureBackgroundProcess(cmd)
+
+		if err := cmd.Start(); err != nil {
+			logFile.Close()
+			return state.Kernel{}, fmt.Errorf("start kernel: %w", err)
+		}
 		logFile.Close()
-		return nil, fmt.Errorf("start kernel: %w", err)
-	}
-	logFile.Close()
 
-	// Don't wait for the child — it's detached
-	go cmd.Wait()
+		// Don't wait for the child — it's detached
+		go cmd.Wait()
 
-	// Record in state
-	k := state.Kernel{
-		Name:    opts.Name,
-		Lang:    opts.Lang,
-		Port:    port,
-		PID:     cmd.Process.Pid,
-		Cwd:     opts.Cwd,
-		Venv:    opts.Venv,
-		Started: time.Now(),
-	}
-	if err := store.Put(k); err != nil {
-		// Kill the process we just started — state is the source of truth
-		_ = procutil.Terminate(cmd.Process.Pid)
-		return nil, fmt.Errorf("save state: %w", err)
+		return state.Kernel{
+			Name:    opts.Name,
+			Lang:    opts.Lang,
+			Port:    port,
+			PID:     cmd.Process.Pid,
+			Cwd:     opts.Cwd,
+			Venv:    opts.Venv,
+			Started: time.Now(),
+		}, nil
+	})
+	if err != nil {
+		if k != nil && k.PID > 0 {
+			_ = procutil.Terminate(k.PID)
+			return nil, fmt.Errorf("save state: %w", err)
+		}
+		return nil, err
 	}
 
 	// Wait for the HTTP endpoint to become ready
 	logPath := filepath.Join(logDir, opts.Name+".log")
-	if err := waitReady(port, StartupMax); err != nil {
+	if err := waitReady(k.Port, StartupMax); err != nil {
 		// Surface the real error from the kernel log if available.
 		tail := readLogTail(logPath, 512)
 		if tail != "" {
-			return &k, fmt.Errorf("%s", strings.TrimSpace(tail))
+			return k, fmt.Errorf("%s", strings.TrimSpace(tail))
 		}
-		return &k, fmt.Errorf("kernel started (PID %d) but not responding on :%d: %w", k.PID, port, err)
+		return k, fmt.Errorf("kernel started (PID %d) but not responding on :%d: %w", k.PID, k.Port, err)
 	}
 
-	return &k, nil
+	return k, nil
 }
 
 // Stop terminates a kernel by name. Returns an error if not found.
@@ -324,60 +325,207 @@ func waitReady(port int, timeout time.Duration) error {
 }
 
 // healthCheck does a full MCP round-trip: initialize → ctl(status).
-// This verifies the Go server AND the language subprocess are both
-// functional. A simple HTTP probe only tests the Go server.
+// This verifies the HTTP server, MCP protocol handling, and the runtime's
+// status path. A simple HTTP probe only tests that something is listening.
 func healthCheck(port int, timeout time.Duration) error {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
 	client := &http.Client{Timeout: timeout}
 
-	// 1. Initialize MCP session
 	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"rat-health","version":"0.1.0"}}}`
-	resp, err := client.Post(url, "application/json", strings.NewReader(initBody))
+	initReq, _ := http.NewRequest("POST", url, strings.NewReader(initBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := client.Do(initReq)
 	if err != nil {
 		return err
 	}
-	body, _ := readBody(resp)
-	resp.Body.Close()
-
-	// Extract session ID
 	sessionID := resp.Header.Get("Mcp-Session-Id")
+	if err := validateMCPResponse(resp, 1, "initialize", nil); err != nil {
+		return err
+	}
 
-	// Send initialized notification
 	notifyBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
-	req, _ := http.NewRequest("POST", url, strings.NewReader(notifyBody))
-	req.Header.Set("Content-Type", "application/json")
+	notifyReq, _ := http.NewRequest("POST", url, strings.NewReader(notifyBody))
+	notifyReq.Header.Set("Content-Type", "application/json")
 	if sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", sessionID)
+		notifyReq.Header.Set("Mcp-Session-Id", sessionID)
 	}
-	nr, err := client.Do(req)
+	nr, err := client.Do(notifyReq)
 	if err != nil {
 		return err
 	}
-	nr.Body.Close()
+	if err := validateHTTPStatus(nr, "initialized notification"); err != nil {
+		return err
+	}
 
-	// 2. Call ctl(status) — this exercises the language subprocess
 	statusBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ctl","arguments":{"op":"status"}}}`
-	req2, _ := http.NewRequest("POST", url, strings.NewReader(statusBody))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Accept", "application/json, text/event-stream")
+	statusReq, _ := http.NewRequest("POST", url, strings.NewReader(statusBody))
+	statusReq.Header.Set("Content-Type", "application/json")
+	statusReq.Header.Set("Accept", "application/json, text/event-stream")
 	if sessionID != "" {
-		req2.Header.Set("Mcp-Session-Id", sessionID)
+		statusReq.Header.Set("Mcp-Session-Id", sessionID)
 	}
-	resp2, err := client.Do(req2)
+	resp2, err := client.Do(statusReq)
 	if err != nil {
 		return err
 	}
-	resp2.Body.Close()
+	return validateMCPResponse(resp2, 2, "ctl(status)", validateToolStatusResult)
+}
 
-	_ = body // used for init check
+type mcpEnvelope struct {
+	ID     json.RawMessage `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *mcpError       `json:"error"`
+}
+
+type mcpError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func validateHTTPStatus(resp *http.Response, label string) error {
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 	return nil
 }
 
-func readBody(resp *http.Response) ([]byte, error) {
+func validateMCPResponse(resp *http.Response, id int, label string, validateResult func(json.RawMessage) error) error {
 	defer resp.Body.Close()
-	buf := make([]byte, 4096)
-	n, _ := resp.Body.Read(buf)
-	return buf[:n], nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%s: read response: %w", label, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	env, err := findMCPEnvelope(body, id)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	if env.Error != nil {
+		return fmt.Errorf("%s: JSON-RPC error %d: %s", label, env.Error.Code, env.Error.Message)
+	}
+	if len(env.Result) == 0 || string(env.Result) == "null" {
+		return fmt.Errorf("%s: missing JSON-RPC result", label)
+	}
+	if validateResult != nil {
+		if err := validateResult(env.Result); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+	}
+	return nil
+}
+
+func findMCPEnvelope(body []byte, id int) (mcpEnvelope, error) {
+	for _, payload := range mcpPayloads(body) {
+		if strings.TrimSpace(payload) == "" {
+			continue
+		}
+		var env mcpEnvelope
+		if err := json.Unmarshal([]byte(payload), &env); err != nil {
+			return mcpEnvelope{}, fmt.Errorf("decode JSON-RPC response: %w", err)
+		}
+		if jsonIDMatches(env.ID, id) {
+			return env, nil
+		}
+	}
+	return mcpEnvelope{}, fmt.Errorf("no JSON-RPC response with id %d", id)
+}
+
+func mcpPayloads(body []byte) []string {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return nil
+	}
+	if !strings.Contains(text, "data:") {
+		return []string{text}
+	}
+
+	var payloads []string
+	var dataLines []string
+	flush := func() {
+		if len(dataLines) == 0 {
+			return
+		}
+		payloads = append(payloads, strings.Join(dataLines, "\n"))
+		dataLines = nil
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flush()
+	if len(payloads) == 0 {
+		return []string{text}
+	}
+	return payloads
+}
+
+func jsonIDMatches(raw json.RawMessage, want int) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n == want
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int(f) == want
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s == strconv.Itoa(want)
+	}
+	return false
+}
+
+func validateToolStatusResult(raw json.RawMessage) error {
+	var result struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("decode tool result: %w", err)
+	}
+	text := strings.TrimSpace(toolResultText(result.Content))
+	if result.IsError {
+		return fmt.Errorf("tool returned error: %s", text)
+	}
+	if text == "" {
+		return fmt.Errorf("tool result has no status text")
+	}
+	firstLine := strings.ToLower(strings.TrimSpace(strings.SplitN(text, "\n", 2)[0]))
+	if strings.HasPrefix(firstLine, "error") {
+		return fmt.Errorf("unhealthy status: %s", text)
+	}
+	return nil
+}
+
+func toolResultText(content []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) string {
+	var parts []string
+	for _, c := range content {
+		if c.Type == "text" && c.Text != "" {
+			parts = append(parts, c.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func openKernelLog(logDir, name string) (*os.File, error) {

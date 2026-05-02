@@ -91,12 +91,38 @@ func (s *Store) Path() string {
 	return s.path
 }
 
+// lock serializes state access inside this process and across rat processes.
+// The file lock protects read-modify-write operations like port allocation;
+// the in-memory mutex keeps goroutines sharing one Store orderly too.
+func (s *Store) lock() (func(), error) {
+	s.mu.Lock()
+
+	if err := securefs.EnsurePrivateDir(filepath.Dir(s.path)); err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("create state dir: %w", err)
+	}
+
+	lockFile, err := acquireFileLock(s.path + ".lock")
+	if err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("lock state: %w", err)
+	}
+
+	return func() {
+		_ = releaseFileLock(lockFile)
+		s.mu.Unlock()
+	}, nil
+}
+
 // ListKnown returns all kernels (running + stopped), normalizing stale state
 // as a side effect. Dead running PIDs are marked stopped, and legacy entries
 // with missing status are normalized.
 func (s *Store) ListKnown() ([]Kernel, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	f, err := s.readLocked()
 	if err != nil {
@@ -157,8 +183,11 @@ func (s *Store) GetRunning(name string) (*Kernel, error) {
 
 // MarkStopped changes a kernel's status to stopped. Returns true if found.
 func (s *Store) MarkStopped(name string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 
 	f, err := s.readLocked()
 	if err != nil {
@@ -187,8 +216,11 @@ func (s *Store) Put(k Kernel) error {
 		k.Status = StatusRunning
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	f, err := s.readLocked()
 	if err != nil {
@@ -209,8 +241,11 @@ func (s *Store) Put(k Kernel) error {
 
 // Remove deletes a kernel entry by name. Returns true if it existed.
 func (s *Store) Remove(name string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 
 	f, err := s.readLocked()
 	if err != nil {
@@ -238,14 +273,68 @@ func (s *Store) Remove(name string) (bool, error) {
 // NextPort finds the next available port starting from base.
 // It checks both the state file and whether the port is actually in use.
 func (s *Store) NextPort(base int) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
 
 	f, err := s.readLocked()
 	if err != nil {
 		return 0, err
 	}
 
+	return nextPortLocked(f, base)
+}
+
+// AllocatePortAndPut selects a free port and writes the returned kernel while
+// holding the inter-process state lock. The callback should be quick; it is
+// intended for daemon startup where the child process needs the selected port
+// before the state entry can be written.
+func (s *Store) AllocatePortAndPut(base int, build func(port int) (Kernel, error)) (*Kernel, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	f, err := s.readLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	port, err := nextPortLocked(f, base)
+	if err != nil {
+		return nil, err
+	}
+
+	k, err := build(port)
+	if err != nil {
+		return nil, err
+	}
+	if err := runtimeid.ValidateName(k.Name); err != nil {
+		return &k, err
+	}
+	if k.Status == "" {
+		k.Status = StatusRunning
+	}
+
+	filtered := make([]Kernel, 0, len(f.Kernels))
+	for _, existing := range f.Kernels {
+		if existing.Name != k.Name {
+			filtered = append(filtered, existing)
+		}
+	}
+	filtered = append(filtered, k)
+	f.Kernels = filtered
+
+	if err := s.writeLocked(f); err != nil {
+		return &k, err
+	}
+	return &k, nil
+}
+
+func nextPortLocked(f *File, base int) (int, error) {
 	used := make(map[int]bool, len(f.Kernels))
 	for _, k := range f.Kernels {
 		used[k.Port] = true
@@ -264,8 +353,11 @@ func (s *Store) NextPort(base int) (int, error) {
 
 // GetRuntime returns a saved runtime config by name, or nil.
 func (s *Store) GetRuntime(name string) (*Runtime, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	f, err := s.readLocked()
 	if err != nil {
 		return nil, err
@@ -283,8 +375,11 @@ func (s *Store) PutRuntime(r Runtime) error {
 	if err := runtimeid.ValidateName(r.Name); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	f, err := s.readLocked()
 	if err != nil {
 		return err
@@ -302,8 +397,11 @@ func (s *Store) PutRuntime(r Runtime) error {
 
 // RemoveRuntime deletes a saved runtime config. Returns true if found.
 func (s *Store) RemoveRuntime(name string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	f, err := s.readLocked()
 	if err != nil {
 		return false, err
@@ -326,8 +424,11 @@ func (s *Store) RemoveRuntime(name string) (bool, error) {
 
 // ListRuntimes returns all saved runtime configs.
 func (s *Store) ListRuntimes() ([]Runtime, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	f, err := s.readLocked()
 	if err != nil {
 		return nil, err

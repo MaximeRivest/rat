@@ -18,6 +18,7 @@
   let applyingHostUpdate = false;
   let editTimer = 0;
   let lastSentText = "";
+  let documentVersion = 0;
   let nextId = 1;
 
   const pendingRuns = new Map();
@@ -515,7 +516,7 @@
     if (editTimer) clearTimeout(editTimer);
     editTimer = setTimeout(() => {
       editTimer = 0;
-      vscode.postMessage({ type: "edit", text });
+      vscode.postMessage({ type: "edit", text, version: documentVersion });
     }, 150);
   }
 
@@ -961,6 +962,7 @@
     editor.onSelectionChange(postSelection);
 
     lastSentText = message.text || "";
+    documentVersion = Number(message.version) || 0;
     setStatus("Ready");
     editor.focus();
     postSelection();
@@ -976,6 +978,7 @@
 
       case "setContent":
         if (!editor) return;
+        documentVersion = Number(message.version) || documentVersion;
         if (message.text === editor.getContent()) return;
         applyingHostUpdate = true;
         editor.setContent(message.text || "");
@@ -1000,6 +1003,22 @@
         markdownFontScale = normalizeFontScale(message.fontScale);
         scheduleHostThemeSync();
         applyResponsivePresentation();
+        break;
+
+      case "editApplied":
+        documentVersion = Number(message.version) || documentVersion;
+        if (typeof message.text === "string") lastSentText = message.text;
+        break;
+
+      case "editConflict":
+        if (!editor) return;
+        documentVersion = Number(message.version) || documentVersion;
+        applyingHostUpdate = true;
+        editor.setContent(message.text || "");
+        lastSentText = message.text || "";
+        setStatus("Document changed externally; reloaded.");
+        setTimeout(() => { applyingHostUpdate = false; }, 0);
+        postSelection();
         break;
 
       case "ratOutput": {

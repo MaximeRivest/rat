@@ -25,6 +25,7 @@
 
 import * as vscode from "vscode";
 import { findOutputBlock } from "./cells";
+import { findModelCellByFenceLines, parseRatNotebookDocument } from "./documentModel";
 
 // ── Status line detection ──────────────────────────────────
 
@@ -80,9 +81,10 @@ export function separateStatus(text: string): { body: string; status: string } {
  * @param editor    Active editor
  * @param openLine  Line number of the code cell's opening fence
  * @param closeLine Line number of the code cell's closing fence
- * @param text      Output text (already formatted by rat)
+ * @param text      Output body text
  * @param images    Markdown image links to append (may be empty)
  * @param maxLines  Max output lines (0 = unlimited)
+ * @param statusOverride Structured rat status trailer, if supplied by the protocol
  */
 export async function upsertOutput(
   editor: vscode.TextEditor,
@@ -91,10 +93,15 @@ export async function upsertOutput(
   text: string,
   images: string[],
   maxLines: number,
+  statusOverride?: string,
 ): Promise<void> {
   const doc = editor.document;
-  const existing = findOutputBlock(doc, closeLine);
-  const { body, status } = separateStatus(text);
+  const model = parseRatNotebookDocument(doc);
+  const existing = findModelCellByFenceLines(model, openLine, closeLine)?.output
+    ?? findOutputBlock(doc, closeLine);
+  const { body, status } = statusOverride !== undefined
+    ? { body: text.trimEnd(), status: statusOverride }
+    : separateStatus(text);
   const isError = status.startsWith("✗");
   const hasBody = body.trim().length > 0 || images.length > 0;
   // Collapse to a fence annotation only for successful runs with no output.
@@ -209,42 +216,26 @@ export async function clearAllOutputs(
   editor: vscode.TextEditor,
 ): Promise<void> {
   const doc = editor.document;
+  const model = parseRatNotebookDocument(doc);
 
   // Collect output block regions bottom-up so line numbers stay valid.
-  const regions: { start: number; end: number }[] = [];
-  // Collect opening fence annotations to clean
+  const regions: { start: number; end: number }[] = model.outputs.map((output) => {
+    let start = output.startLine;
+    if (start > 0 && doc.lineAt(start - 1).isEmptyOrWhitespace) start--;
+
+    let end = Math.max(output.endLine, output.imageEndLine) + 1;
+    while (end < doc.lineCount && doc.lineAt(end).isEmptyOrWhitespace) end++;
+
+    return { start, end };
+  });
+
+  // Collect opening fence annotations to clean.
   const annotations: { line: number; clean: string }[] = [];
-
-  for (let i = 0; i < doc.lineCount; i++) {
-    // Detect output blocks
-    if (/^```output/.test(doc.lineAt(i).text)) {
-      let start = i;
-      if (start > 0 && doc.lineAt(start - 1).isEmptyOrWhitespace) start--;
-
-      let j = i + 1;
-      while (j < doc.lineCount && !/^```\s*$/.test(doc.lineAt(j).text)) j++;
-      let end = j < doc.lineCount ? j : i;
-
-      let k = end + 1;
-      while (k < doc.lineCount) {
-        const t = doc.lineAt(k).text;
-        if (/^!\[.*\]\(.*\)/.test(t) || t.trim() === "") k++;
-        else break;
-      }
-      end = k;
-
-      regions.push({ start, end });
-      i = end;
-      continue;
-    }
-
-    // Detect annotated opening fences (e.g. ```python ✓)
-    const lineText = doc.lineAt(i).text;
-    if (/^```\w.*\s+[✓✗]/.test(lineText)) {
+  for (const cell of model.cells) {
+    const lineText = doc.lineAt(cell.openLine).text;
+    if (/^`{3,}\w.*\s+[✓✗]/.test(lineText)) {
       const clean = lineText.replace(/\s+[✓✗].*$/, "");
-      if (clean !== lineText) {
-        annotations.push({ line: i, clean });
-      }
+      if (clean !== lineText) annotations.push({ line: cell.openLine, clean });
     }
   }
 
@@ -291,14 +282,24 @@ function buildBlock(
     content = raw;
   }
 
-  // Fence line includes status when available
-  const fence = status ? `\`\`\`output | ${status}` : "```output";
+  // Fence line includes status when available. Use enough backticks to
+  // safely contain Markdown/code output that itself includes ``` fences.
+  const ticks = outputFenceTicks(content);
+  const fence = status ? `${ticks}output | ${status}` : `${ticks}output`;
 
-  let result = "\n\n" + fence + "\n" + content + "\n```";
+  let result = "\n\n" + fence + "\n" + content + "\n" + ticks;
 
   for (const img of images) {
     result += "\n\n" + img;
   }
 
   return result;
+}
+
+function outputFenceTicks(content: string): string {
+  let maxRun = 0;
+  for (const match of content.matchAll(/`+/g)) {
+    maxRun = Math.max(maxRun, match[0].length);
+  }
+  return "`".repeat(Math.max(3, maxRun + 1));
 }

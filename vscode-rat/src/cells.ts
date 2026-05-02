@@ -129,13 +129,20 @@ export function findOutputBlock(
   }
 
   if (i >= lineCount) return null;
-  if (!/^```output(?::\S+)?(\s*$|\s*\|)/.test(document.lineAt(i).text)) return null;
+  const openMatch = document.lineAt(i).text.match(/^(\s{0,3})(`{3,})output(?::\S+)?(\s*$|\s*\|)/);
+  if (!openMatch) return null;
+  const backtickLen = openMatch[2].length;
 
   const startLine = i;
   i++;
 
-  // Find closing fence
-  while (i < lineCount && !/^```\s*$/.test(document.lineAt(i).text)) i++;
+  // Find closing fence. It must use at least as many backticks as the opener
+  // so output bodies can safely contain shorter Markdown code fences.
+  while (i < lineCount) {
+    const closeMatch = document.lineAt(i).text.match(/^(\s{0,3})(`{3,})\s*$/);
+    if (closeMatch && closeMatch[2].length >= backtickLen) break;
+    i++;
+  }
   if (i >= lineCount) return null;
 
   const endLine = i;
