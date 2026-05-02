@@ -16,6 +16,16 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-05-02
+
+### Highlights
+
+- Added a short animated demo to the Marketplace page so new users can see Rat Markdown execution before installing.
+
+### Changed
+
+- The extension README now includes a compressed demo GIF near the top.
+
 ## [0.2.6] - 2026-05-02
 
 ### Highlights

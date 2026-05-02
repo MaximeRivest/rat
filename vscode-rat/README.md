@@ -2,6 +2,8 @@
 
 Run code cells in Markdown (`.md`) and Quarto (`.qmd`) files, powered by [rat](https://github.com/maximerivest/rat) kernels.
 
+![Rat VS Code demo](media/rat-demo.gif)
+
 Works **on top of** whatever Markdown / Quarto extension you already use — it only adds code execution.
 
 ## Features
