@@ -49,7 +49,7 @@ npm run build
 
 # Option B: install globally
 npm run package
-code --install-extension rat-0.1.0.vsix
+code --install-extension rat-<version>.vsix
 ```
 
 ## Usage

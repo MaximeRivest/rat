@@ -1,5 +1,6 @@
 src/**
 test/**
+docs/releasing.md
 node_modules/**
 tsconfig.json
 esbuild.mjs
