@@ -67,6 +67,10 @@ def _open_protocol():
     if tcp_addr:
         host, port_s = tcp_addr.rsplit(":", 1)
         sock = socket.create_connection((host, int(port_s)), timeout=10)
+        # create_connection(timeout=...) leaves the socket in timeout mode.
+        # The protocol reader is intentionally long-lived and must block while
+        # the kernel is idle; otherwise it dies after 10s and future runs hang.
+        sock.settimeout(None)
         proto_in = sock.makefile("r", buffering=1, encoding="utf-8")
         proto_out = sock.makefile("w", buffering=1, encoding="utf-8")
         proto_out.write(json.dumps({"op": "protocol_hello", "token": tcp_token}) + "\n")

@@ -16,6 +16,17 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-05-02
+
+### Highlights
+
+- Hotfix for Python runtimes hanging after sitting idle for a few seconds.
+
+### Fixed
+
+- Python runtime protocol sockets now return to blocking mode after startup, preventing idle kernels from losing their control channel and leaving notebook cells stuck executing.
+- Interrupt/cancel works again for long-running Python cells after an idle period.
+
 ## [0.2.5] - 2026-05-02
 
 ### Highlights
