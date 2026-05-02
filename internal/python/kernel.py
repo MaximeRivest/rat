@@ -10,6 +10,7 @@ import os
 import pkgutil
 import queue
 import rlcompleter
+import socket
 import sys
 import threading
 import time
@@ -49,67 +50,54 @@ def _init_ipython():
 
 _init_ipython()
 
+
+def _open_protocol():
+    """Open Rat's private control channel.
+
+    User code is allowed to use normal stdin/stdout/stderr. The Rat protocol
+    must therefore live on a dedicated channel so subprocesses, os.write(1),
+    native libraries, audio players, etc. cannot corrupt JSON control messages.
+
+    Preferred mode is a localhost socket provided by the Go parent. FD mode is
+    also supported for embedders that pass private fds as RAT_PROTOCOL_*_FD.
+    A stdio fallback remains only for manual/debug launches of this file.
+    """
+    tcp_addr = os.environ.pop("RAT_PROTOCOL_TCP_ADDR", "")
+    tcp_token = os.environ.pop("RAT_PROTOCOL_TOKEN", "")
+    if tcp_addr:
+        host, port_s = tcp_addr.rsplit(":", 1)
+        sock = socket.create_connection((host, int(port_s)), timeout=10)
+        proto_in = sock.makefile("r", buffering=1, encoding="utf-8")
+        proto_out = sock.makefile("w", buffering=1, encoding="utf-8")
+        proto_out.write(json.dumps({"op": "protocol_hello", "token": tcp_token}) + "\n")
+        proto_out.flush()
+        return proto_in, proto_out
+
+    in_fd = os.environ.pop("RAT_PROTOCOL_IN_FD", "")
+    out_fd = os.environ.pop("RAT_PROTOCOL_OUT_FD", "")
+    if in_fd and out_fd:
+        try:
+            os.set_inheritable(int(in_fd), False)
+            os.set_inheritable(int(out_fd), False)
+        except Exception:
+            pass
+        return (
+            os.fdopen(int(in_fd), "r", buffering=1, encoding="utf-8"),
+            os.fdopen(int(out_fd), "w", buffering=1, encoding="utf-8"),
+        )
+
+    return sys.stdin, sys.stdout
+
+
+_proto_in, _proto_out = _open_protocol()
 _write_lock = threading.Lock()
-_pipe = sys.stdout          # original fd — survives redirect_stdout
 
 
 def send(obj):
-    """Write a JSON message to the Go parent via the original pipe."""
+    """Write a JSON message to the Go parent via the private protocol."""
     with _write_lock:
-        _pipe.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        _pipe.flush()
-
-
-class _StreamCapture:
-    """Drop-in replacement for io.StringIO that sends output_chunk
-    messages to Go every `interval` seconds so the VS Code extension
-    can stream output into the document while code is still running.
-
-    Also pretends to be a TTY so libraries like tqdm use \\r overwrites
-    instead of flooding separate lines.
-    """
-
-    encoding = "utf-8"
-
-    def __init__(self, interval=0.15):
-        self._parts = []
-        self._sent = 0
-        self._interval = interval
-        self._last = 0.0
-
-    # ── file-like interface ──
-
-    def write(self, text):
-        self._parts.append(text)
-        now = time.time()
-        if now - self._last >= self._interval:
-            self._flush()
-        return len(text)
-
-    def flush(self):
-        self._flush()
-
-    def isatty(self):          # makes tqdm use \r
-        return True
-
-    def writable(self):
-        return True
-
-    def fileno(self):
-        raise io.UnsupportedOperation("fileno")
-
-    # ── internal ──
-
-    def _flush(self):
-        full = "".join(self._parts)
-        chunk = full[self._sent:]
-        if chunk:
-            self._sent = len(full)
-            self._last = time.time()
-            send({"op": "output_chunk", "text": chunk})
-
-    def getvalue(self):
-        return "".join(self._parts)
+        _proto_out.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        _proto_out.flush()
 
 
 class InputMailbox:
@@ -736,22 +724,24 @@ sys.meta_path.insert(0, _MatplotlibFinder())
 
 
 def run_code(code, allow_stdin):
-    capture = _StreamCapture()     # streams chunks to Go while executing
-    stdout = capture
-    stderr = capture
-
+    # Normal stdout/stderr are now safe user-output streams. The Rat protocol
+    # lives on _proto_in/_proto_out, so Python prints, os.write(1/2), native
+    # libraries, and subprocess children can all write to fd 1/2 without
+    # corrupting control messages. Go captures those pipes and exposes them as
+    # live/final cell output.
     original_input = builtins.input
     original_getpass = getpass_module.getpass
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
 
     def hooked_input(prompt=""):
         if not allow_stdin:
             raise RuntimeError("stdin is only supported when the client handles input")
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        # Flush the capture so Go sees the prompt text, then tell Go
-        # we are blocked on input() so it can relay to the VS Code
-        # extension or CLI.
-        capture.flush()
+        # Flush stdout so Go sees the prompt text, then tell Go we are blocked
+        # on input() so it can relay to the VS Code extension or CLI.
+        sys.stdout.flush()
         send({"op": "input_request", "prompt": prompt})
         state.set_waiting(True)
         mailbox.begin()
@@ -773,7 +763,6 @@ def run_code(code, allow_stdin):
             raise RuntimeError("stdin is only supported when the client handles input")
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        capture.flush()
         send({"op": "input_request", "prompt": prompt})
         state.set_waiting(True)
         mailbox.begin()
@@ -798,39 +787,40 @@ def run_code(code, allow_stdin):
 
     try:
         tree = ast.parse(code, mode="exec")
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                body = tree.body[:-1]
-                if body:
-                    module = ast.Module(body=body, type_ignores=[])
-                    exec(compile(module, "<rat>", "exec"), namespace, namespace)
-                expr = ast.Expression(tree.body[-1].value)
-                result = eval(compile(expr, "<rat>", "eval"), namespace, namespace)
-                namespace["_"] = result
-                if result is not None:
-                    print(repr(result))
-            else:
-                exec(compile(tree, "<rat>", "exec"), namespace, namespace)
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            body = tree.body[:-1]
+            if body:
+                module = ast.Module(body=body, type_ignores=[])
+                exec(compile(module, "<rat>", "exec"), namespace, namespace)
+            expr = ast.Expression(tree.body[-1].value)
+            result = eval(compile(expr, "<rat>", "eval"), namespace, namespace)
+            namespace["_"] = result
+            if result is not None:
+                print(repr(result))
+        else:
+            exec(compile(tree, "<rat>", "exec"), namespace, namespace)
         _maybe_patch_matplotlib()
-        capture.flush()                # send any trailing chunk
-        output = capture.getvalue()
-        return {"success": True, "output": output, "error": "", "vars": len(visible_items())}
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return {"success": True, "output": "", "error": "", "vars": len(visible_items())}
     except KeyboardInterrupt:
-        capture.flush()
-        output = capture.getvalue()
-        return {"success": False, "output": output, "error": "KeyboardInterrupt", "vars": len(visible_items())}
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return {"success": False, "output": "", "error": "KeyboardInterrupt", "vars": len(visible_items())}
     except Exception:
-        capture.flush()
-        output = capture.getvalue()
-        return {"success": False, "output": output, "error": traceback.format_exc(), "vars": len(visible_items())}
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return {"success": False, "output": "", "error": traceback.format_exc(), "vars": len(visible_items())}
     finally:
         builtins.input = original_input
         getpass_module.getpass = original_getpass
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
         state.set_waiting(False)
 
 
 def reader_loop():
-    for raw in sys.stdin:
+    for raw in _proto_in:
         line = raw.strip()
         if not line:
             continue

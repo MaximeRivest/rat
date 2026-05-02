@@ -430,6 +430,90 @@ func TestPythonExprLastLineReturned(t *testing.T) {
 	}
 }
 
+func TestPythonSubprocessStdoutDoesNotCorruptProtocol(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r := p.Run(`import subprocess, sys
+subprocess.run([sys.executable, "-c", "print('child stdout')"], check=True)`)
+	if !r.Success {
+		t.Fatalf("Run failed: %s", r.Error)
+	}
+	if !strings.Contains(r.Output, "child stdout") {
+		t.Fatalf("output = %q, want child stdout", r.Output)
+	}
+
+	stillAlive := p.Run(`"still alive"`)
+	if !stillAlive.Success {
+		t.Fatalf("kernel did not survive subprocess stdout: %s", stillAlive.Error)
+	}
+	if !strings.Contains(stillAlive.Output, "still alive") {
+		t.Fatalf("output = %q, want still alive", stillAlive.Output)
+	}
+}
+
+func TestPythonSubprocessStderrDoesNotCorruptProtocol(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r := p.Run(`import subprocess, sys
+subprocess.run([sys.executable, "-c", "import sys; print('child stderr', file=sys.stderr)"], check=True)`)
+	if !r.Success {
+		t.Fatalf("Run failed: %s", r.Error)
+	}
+	if !strings.Contains(r.Output, "child stderr") {
+		t.Fatalf("output = %q, want child stderr", r.Output)
+	}
+}
+
+func TestPythonRawFdWritesDoNotCorruptProtocol(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r := p.Run(`import os
+os.write(1, b"raw stdout\\n")
+os.write(2, b"raw stderr\\n")`)
+	if !r.Success {
+		t.Fatalf("Run failed: %s", r.Error)
+	}
+	for _, want := range []string{"raw stdout", "raw stderr"} {
+		if !strings.Contains(r.Output, want) {
+			t.Fatalf("output = %q, want %s", r.Output, want)
+		}
+	}
+}
+
+func TestPythonSubprocessStdinIsNotProtocolInput(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r := p.Run(`import subprocess, sys
+subprocess.run([sys.executable, "-c", "import sys; print('stdin:' + sys.stdin.read())"], check=True)`)
+	if !r.Success {
+		t.Fatalf("Run failed: %s", r.Error)
+	}
+	if !strings.Contains(r.Output, "stdin:") {
+		t.Fatalf("output = %q, want stdin marker", r.Output)
+	}
+
+	stillAlive := p.Run(`1 + 1`)
+	if !stillAlive.Success || !strings.Contains(stillAlive.Output, "2") {
+		t.Fatalf("kernel protocol was consumed by child stdin: success=%v output=%q error=%q", stillAlive.Success, stillAlive.Output, stillAlive.Error)
+	}
+}
+
+func TestPythonProtocolEnvDoesNotLeakToSubprocesses(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r := p.Run(`import subprocess, sys
+cp = subprocess.run([sys.executable, "-c", "import os; print(os.environ.get('RAT_PROTOCOL_TCP_ADDR'), os.environ.get('RAT_PROTOCOL_TOKEN'))"], check=True)`)
+	if !r.Success {
+		t.Fatalf("Run failed: %s", r.Error)
+	}
+	if !strings.Contains(r.Output, "None None") {
+		t.Fatalf("output = %q, want protocol env to be absent", r.Output)
+	}
+	if strings.Contains(r.Output, "127.0.0.1") {
+		t.Fatalf("protocol address leaked to subprocess output: %q", r.Output)
+	}
+}
+
 // ── CWD ────────────────────────────────────────────────────────
 
 func TestPythonKernelCwd(t *testing.T) {

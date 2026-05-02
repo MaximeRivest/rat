@@ -3,10 +3,13 @@ package python
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,8 +59,8 @@ type response struct {
 	Vars    int    `json:"vars,omitempty"`
 }
 
-// partialBuf accumulates output_chunk messages during execution
-// so Ctl("output") can return partial output to streaming clients.
+// partialBuf accumulates live output during execution so Ctl("output") can
+// return partial output to streaming clients.
 type partialBuf struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -73,6 +76,12 @@ func (b *partialBuf) Get() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func (b *partialBuf) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 func (b *partialBuf) Reset() {
@@ -92,14 +101,16 @@ type Python struct {
 
 	mu              sync.Mutex
 	cmd             *exec.Cmd
-	stdin           io.WriteCloser
-	stdout          *bufio.Reader
+	stdin           io.WriteCloser // private protocol writer
+	stdout          *bufio.Reader  // private protocol reader
+	stderrMu        sync.Mutex
 	stderrBuf       bytes.Buffer
 	executionCount  int
 	executing       atomic.Bool
 	waitingForInput atomic.Bool
 	writeMu         sync.Mutex
 	partial         partialBuf // live output during execution
+	externalOutput  partialBuf // process stdout/stderr captured for final output
 
 	interruptMu   sync.Mutex
 	interruptProc *os.Process
@@ -166,6 +177,7 @@ func (p *Python) Run(code string) kernel.RunResult {
 	defer p.executing.Store(false)
 
 	p.partial.Reset()
+	p.externalOutput.Reset()
 
 	if err := p.sendLocked(request{Op: "run", Code: code, AllowStdin: true}); err != nil {
 		return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: execCount, Duration: int(time.Since(start).Milliseconds())}
@@ -196,7 +208,8 @@ func (p *Python) Run(code string) kernel.RunResult {
 		break
 	}
 
-	output := strings.TrimSpace(resp.Output)
+	p.waitForExternalOutputQuiet()
+	output := strings.TrimSpace(joinOutput(resp.Output, p.externalOutput.Get()))
 	if !resp.Success {
 		errText := strings.TrimSpace(resp.Error)
 		if output != "" {
@@ -353,33 +366,49 @@ func (p *Python) ensureStartedLocked() error {
 	cmd.Env = os.Environ()
 	procutil.HideWindow(cmd)
 
-	stdin, err := cmd.StdinPipe()
+	listener, token, err := newProtocolListener()
 	if err != nil {
-		return fmt.Errorf("python stdin: %w", err)
+		return err
 	}
-	stdout, err := cmd.StdoutPipe()
+	defer listener.Close()
+	cmd.Env = append(cmd.Env,
+		"RAT_PROTOCOL_TCP_ADDR="+listener.Addr().String(),
+		"RAT_PROTOCOL_TOKEN="+token,
+	)
+
+	devNull, err := os.Open(os.DevNull)
 	if err != nil {
-		_ = stdin.Close()
+		return fmt.Errorf("open devnull for python stdin: %w", err)
+	}
+	defer devNull.Close()
+	cmd.Stdin = devNull
+
+	userStdout, err := cmd.StdoutPipe()
+	if err != nil {
 		return fmt.Errorf("python stdout: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
+	userStderr, err := cmd.StderrPipe()
 	if err != nil {
-		_ = stdin.Close()
 		return fmt.Errorf("python stderr: %w", err)
 	}
 
-	p.stderrBuf.Reset()
+	p.resetStderrBuf()
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
 		return fmt.Errorf("start python kernel: %w", err)
 	}
-	go func() {
-		_, _ = io.Copy(&p.stderrBuf, stderr)
-	}()
+	go p.consumeUserOutput(userStdout)
+	go p.consumeUserOutput(userStderr)
+
+	conn, reader, err := acceptProtocol(listener, token)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
 
 	p.cmd = cmd
-	p.stdin = stdin
-	p.stdout = bufio.NewReader(stdout)
+	p.stdin = conn
+	p.stdout = reader
 	p.interruptMu.Lock()
 	p.interruptProc = cmd.Process
 	p.interruptMu.Unlock()
@@ -399,6 +428,121 @@ func (p *Python) ensureStartedLocked() error {
 	}
 
 	return nil
+}
+
+func newProtocolListener() (net.Listener, string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, "", fmt.Errorf("python protocol listener: %w", err)
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		_ = listener.Close()
+		return nil, "", fmt.Errorf("python protocol token: %w", err)
+	}
+	return listener, hex.EncodeToString(buf), nil
+}
+
+func acceptProtocol(
+	listener net.Listener,
+	token string,
+) (net.Conn, *bufio.Reader, error) {
+	tcp, ok := listener.(*net.TCPListener)
+	if ok {
+		_ = tcp.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+	conn, err := listener.Accept()
+	if err != nil {
+		return nil, nil, fmt.Errorf("accept python protocol connection: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("read python protocol hello: %w", err)
+	}
+	var hello struct {
+		Op    string `json:"op"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(line), &hello); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("decode python protocol hello: %w", err)
+	}
+	if hello.Op != "protocol_hello" || hello.Token != token {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("invalid python protocol hello")
+	}
+	return conn, reader, nil
+}
+
+func (p *Python) consumeUserOutput(r io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			text := string(buf[:n])
+			if p.executing.Load() {
+				p.partial.Append(text)
+				p.externalOutput.Append(text)
+			} else {
+				p.appendStderrBuf(text)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (p *Python) resetStderrBuf() {
+	p.stderrMu.Lock()
+	p.stderrBuf.Reset()
+	p.stderrMu.Unlock()
+}
+
+func (p *Python) appendStderrBuf(text string) {
+	p.stderrMu.Lock()
+	_, _ = p.stderrBuf.WriteString(text)
+	p.stderrMu.Unlock()
+}
+
+func (p *Python) getStderrBuf() string {
+	p.stderrMu.Lock()
+	defer p.stderrMu.Unlock()
+	return p.stderrBuf.String()
+}
+
+func (p *Python) waitForExternalOutputQuiet() {
+	deadline := time.Now().Add(150 * time.Millisecond)
+	quietSince := time.Now()
+	lastLen := p.externalOutput.Len()
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+		n := p.externalOutput.Len()
+		if n != lastLen {
+			lastLen = n
+			quietSince = time.Now()
+			continue
+		}
+		if time.Since(quietSince) >= 20*time.Millisecond {
+			return
+		}
+	}
+}
+
+func joinOutput(primary, external string) string {
+	if primary == "" {
+		return external
+	}
+	if external == "" {
+		return primary
+	}
+	if strings.HasSuffix(primary, "\n") || strings.HasPrefix(external, "\n") {
+		return primary + external
+	}
+	return primary + "\n" + external
 }
 
 func (p *Python) sendLocked(req request) error {
@@ -424,7 +568,7 @@ func (p *Python) readLocked() (response, error) {
 	}
 	line, err := p.stdout.ReadBytes('\n')
 	if err != nil {
-		stderr := strings.TrimSpace(p.stderrBuf.String())
+		stderr := strings.TrimSpace(p.getStderrBuf())
 		p.killLocked()
 		if stderr != "" {
 			return response{}, fmt.Errorf("read from python kernel: %w: %s", err, stderr)
