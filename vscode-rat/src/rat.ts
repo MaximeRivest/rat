@@ -354,11 +354,11 @@ export class McpClient {
   async look(at?: string): Promise<string> {
     const args: Record<string, unknown> = {};
     if (at) args.at = at;
-    return this.parseToolResult(await this.callTool("look", args, false, undefined, 10_000, true)).text;
+    return this.parseToolResult(await this.callTool("look", args, false, undefined, 10_000)).text;
   }
 
   async lookFull(at: string): Promise<string> {
-    return this.parseToolResult(await this.callTool("look", { at, full: true }, false, undefined, 10_000, true)).text;
+    return this.parseToolResult(await this.callTool("look", { at, full: true }, false, undefined, 10_000)).text;
   }
 
   async tail(n = 10, format = "json"): Promise<string> {
@@ -368,7 +368,7 @@ export class McpClient {
   }
 
   async complete(code: string, cursor: number): Promise<string[]> {
-    const r = await this.callTool("look", { code, cursor }, false, undefined, 8_000, true);
+    const r = await this.callTool("look", { code, cursor }, false, undefined, 8_000);
     const text = this.parseToolResult(r).text;
     return text
       ? text

@@ -79,6 +79,7 @@ let queue: ExecutionController;
 let treeProvider: RuntimeTreeProvider;
 let inspectorProvider: RatInspectorViewProvider;
 let variablesProvider: RatVariablesViewProvider;
+let lastVariablesTargetKey = "";
 
 // ── Activate ───────────────────────────────────────────────
 
@@ -152,13 +153,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
     onActiveDocument: (document) => {
       vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
       if (runtimeBar) updateRuntimeBarForDocument(document);
-      variablesProvider?.updateDocument(document);
+      updateVariablesForDocument(document, ratLangForContext(document), true);
     },
     onSelection: (document, language, expression) => {
       vscode.commands.executeCommand("setContext", "rat.activeFile", isRatFile(document));
       const ratLang = language ? ratLangForFence(language) : null;
       if (runtimeBar) updateRuntimeBarForDocument(document, language ?? undefined);
-      variablesProvider?.updateDocument(document, ratLang);
+      updateVariablesForDocument(document, ratLang);
       inspectorProvider?.updateRatMarkdownSelection(document, language, expression);
     },
   }));
@@ -275,10 +276,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
     updateRuntimeBar(ed);
     inspectorProvider.update(ed);
-    variablesProvider.updateDocument(
-      ed?.document,
-      ed ? ratLangForContext(ed.document, ed.selection.active.line) : null,
-    );
+    updateVariablesForEditor(ed, true);
     if (ed && isRatFile(ed.document)) {
       const fl = detectFileLang(ed.document);
       if (fl.mode === "notebook") {
@@ -293,15 +291,12 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.window.onDidChangeTextEditorSelection((e) => {
       inspectorProvider.update(e.textEditor);
       updateRuntimeBar(e.textEditor);
-      variablesProvider.updateDocument(
-        e.textEditor.document,
-        ratLangForContext(e.textEditor.document, e.textEditor.selection.active.line),
-      );
+      updateVariablesForEditor(e.textEditor);
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       rebaseResultsForDocumentChange(e);
       updateRuntimeBar(vscode.window.activeTextEditor);
-      variablesProvider.update(vscode.window.activeTextEditor);
+      updateVariablesForEditor(vscode.window.activeTextEditor);
       const ed = vscode.window.activeTextEditor;
       if (ed && ed.document === e.document && isRatFile(ed.document)) {
         const fl = detectFileLang(ed.document);
@@ -491,6 +486,32 @@ function ratLangForContext(
 
 function currentRatLang(editor: vscode.TextEditor): string | null {
   return ratLangForContext(editor.document, editor.selection.active.line);
+}
+
+function updateVariablesForEditor(
+  editor: vscode.TextEditor | undefined,
+  force = false,
+): void {
+  if (!editor) {
+    updateVariablesForDocument(undefined, null, force);
+    return;
+  }
+  updateVariablesForDocument(
+    editor.document,
+    ratLangForContext(editor.document, editor.selection.active.line),
+    force,
+  );
+}
+
+function updateVariablesForDocument(
+  document: vscode.TextDocument | undefined,
+  ratLang: string | null | undefined,
+  force = false,
+): void {
+  const key = document && ratLang ? `${document.uri.toString()}::${ratLang}` : "";
+  if (!force && key === lastVariablesTargetKey) return;
+  lastVariablesTargetKey = key;
+  variablesProvider?.updateDocument(document, ratLang);
 }
 
 // ── Notebook-mode helpers ──────────────────────────────────

@@ -16,6 +16,22 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-05-02
+
+### Highlights
+
+- Hotfix for Python runtimes being interrupted or restarted by background variable/completion requests.
+
+### Changed
+
+- Variable and completion request timeouts no longer send `ctl(cancel)` to Python, so they cannot interrupt a user's running cell.
+- The Variables side panel now refreshes on cursor movement only when the current runtime language changes.
+
+### Fixed
+
+- Python subprocesses are no longer torn down automatically just because an inspection request times out.
+- Reduced background Variables panel polling that could make Python runtimes appear to restart continuously.
+
 ## [0.2.4] - 2026-05-02
 
 ### Highlights
