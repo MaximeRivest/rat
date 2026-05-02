@@ -16,6 +16,22 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-05-02
+
+### Highlights
+
+- The VS Code extension installer now mirrors the Rat CLI into the user's normal terminal PATH, so `rat` works from terminals instead of only from inside the extension.
+- **Rat: Install CLI** now acts as an install/update command and refreshes the PATH-visible binary.
+
+### Changed
+
+- Extension-managed CLI installs still keep a fallback copy in VS Code global storage, but the extension prefers the PATH-visible user install when available.
+- The integrated terminal REPL command uses the same PATH-visible Rat binary after install/update.
+
+### Fixed
+
+- First-use CLI install no longer leaves users with a working extension but no `rat` command in their shell.
+
 ## [0.2.2] - 2026-05-02
 
 ### Highlights

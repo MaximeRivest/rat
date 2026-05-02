@@ -2,7 +2,7 @@
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
   "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "maximerivest",
   "license": "MIT",
   "repository": {
@@ -350,7 +350,7 @@
         "rat.path": {
           "type": "string",
           "default": "rat",
-          "description": "Path to the rat binary. Leave as \"rat\" to use the extension-managed CLI when installed, otherwise PATH."
+          "description": "Path to the rat binary. Leave as \"rat\" to use the extension-installed PATH binary when available, then the extension-managed fallback, otherwise PATH."
         },
         "rat.autoInstall": {
           "type": "string",

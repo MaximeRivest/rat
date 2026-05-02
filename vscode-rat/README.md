@@ -21,7 +21,7 @@ Works **on top of** whatever Markdown / Quarto extension you already use — it 
 
 ## Prerequisites
 
-The extension can install the `rat` CLI for you on first use on supported macOS, Linux, and Windows platforms. When you run a cell and `rat` is not found, choose **Install Rat** and the extension downloads the CLI into VS Code's extension storage.
+The extension can install the `rat` CLI for you on first use on supported macOS, Linux, and Windows platforms. When you run a cell and `rat` is not found, choose **Install Rat** and the extension downloads the CLI into VS Code storage and mirrors it into your normal terminal `PATH` when possible, so `rat` works from shells too.
 
 Manual install is still supported:
 
@@ -35,7 +35,7 @@ irm https://runanything.dev/install.ps1 | iex
 rat install py    # or sh, r, ju, js
 ```
 
-If you already have a custom binary, set `rat.path` or run **Rat: Install CLI** / **Set rat.path** from the prompt.
+If you already have a custom binary, set `rat.path` or run **Rat: Install CLI** / **Set rat.path** from the prompt. **Rat: Install CLI** also updates the extension-managed and PATH-visible binary to the latest release.
 
 ## Install the extension
 

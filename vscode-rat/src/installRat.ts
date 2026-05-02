@@ -4,7 +4,8 @@
  * VS Code extensions do not get a reliable "post-install" hook where they can
  * run arbitrary setup. Instead, we make the CLI self-serve on first use:
  * when a rat command is missing, ask the user, download the platform binary
- * into the extension's global storage, and have the extension use that path.
+ * into extension storage, then mirror it into the user's normal PATH so `rat`
+ * works from terminals too.
  */
 
 import * as cp from "child_process";
@@ -34,8 +35,14 @@ export function initRatInstaller(ctx: vscode.ExtensionContext): void {
 /** Return the extension-managed rat binary path. */
 export function managedRatPath(): string | null {
   if (!context) return null;
-  const exe = process.platform === "win32" ? "rat.exe" : "rat";
+  const exe = ratExecutableName();
   return path.join(context.globalStorageUri.fsPath, "bin", exe);
+}
+
+/** Return the path where the extension mirrors rat for normal terminals. */
+export function userPathRatPath(): string | null {
+  const dir = userPathInstallDir();
+  return dir ? path.join(dir, ratExecutableName()) : null;
 }
 
 /**
@@ -43,8 +50,9 @@ export function managedRatPath(): string | null {
  *
  * Priority:
  * 1. User setting rat.path when explicitly set to something other than "rat".
- * 2. Extension-managed binary, if already installed.
- * 3. Plain "rat" on PATH.
+ * 2. Extension-installed user PATH binary, if present.
+ * 3. Extension-managed fallback binary, if present.
+ * 4. Plain "rat" on PATH.
  */
 export function resolveRatExecutable(): string {
   const configured = vscode.workspace
@@ -53,6 +61,9 @@ export function resolveRatExecutable(): string {
     .trim();
 
   if (configured && configured !== "rat") return configured;
+
+  const userPath = userPathRatPath();
+  if (userPath && fs.existsSync(userPath)) return userPath;
 
   const managed = managedRatPath();
   if (managed && fs.existsSync(managed)) return managed;
@@ -67,14 +78,8 @@ export function ratTerminalCommand(args: string[]): string {
 
 /** Command-palette entry: Rat: Install CLI. */
 export async function installRatCliCommand(): Promise<void> {
-  const existing = resolveRatExecutable();
-  if (await canRunRat(existing)) {
-    vscode.window.showInformationMessage(`Rat CLI is ready: ${existing}`);
-    return;
-  }
-
-  const installed = await ensureRatInstalled({ manual: true });
-  vscode.window.showInformationMessage(`Rat CLI installed: ${installed}`);
+  const installed = await ensureRatInstalled({ manual: true, force: true });
+  vscode.window.showInformationMessage(`Rat CLI installed/updated: ${installed}`);
 }
 
 /**
@@ -82,7 +87,7 @@ export async function installRatCliCommand(): Promise<void> {
  * The user is always asked before anything is downloaded.
  */
 export async function ensureRatInstalled(
-  opts: { manual?: boolean } = {},
+  opts: { manual?: boolean; force?: boolean } = {},
 ): Promise<string> {
   if (installPromise) return installPromise;
 
@@ -93,15 +98,15 @@ export async function ensureRatInstalled(
 }
 
 async function doEnsureRatInstalled(
-  opts: { manual?: boolean },
+  opts: { manual?: boolean; force?: boolean },
 ): Promise<string> {
   if (!context) {
     throw new Error(manualInstallMessage());
   }
 
   const managed = managedRatPath();
-  if (managed && await canRunRat(managed)) {
-    return managed;
+  if (!opts.force && managed && await canRunRat(managed)) {
+    return exposeRatOnUserPath(managed);
   }
 
   const mode = vscode.workspace
@@ -113,9 +118,11 @@ async function doEnsureRatInstalled(
   }
 
   const picked = await vscode.window.showInformationMessage(
-    "Rat CLI is required to run cells, but it was not found. Install it into VS Code's extension storage now?",
+    opts.force
+      ? "Install or update the Rat CLI into VS Code storage and your normal terminal PATH?"
+      : "Rat CLI is required to run cells, but it was not found. Install it into VS Code storage and your normal terminal PATH now?",
     { modal: opts.manual ?? false },
-    "Install Rat",
+    opts.force ? "Install/Update Rat" : "Install Rat",
     "Set rat.path",
     "Open Docs",
   );
@@ -131,14 +138,14 @@ async function doEnsureRatInstalled(
     throw new Error(manualInstallMessage());
   }
 
-  if (picked !== "Install Rat") {
+  if (picked !== "Install Rat" && picked !== "Install/Update Rat") {
     throw new Error(manualInstallMessage());
   }
 
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "Rat: installing CLI…",
+      title: opts.force ? "Rat: installing/updating CLI…" : "Rat: installing CLI…",
       cancellable: false,
     },
     async (progress) => {
@@ -172,13 +179,60 @@ async function doEnsureRatInstalled(
 
         progress.report({ message: "Verifying install" });
         await verifyRat(dest);
-        return dest;
+
+        progress.report({ message: "Adding rat to terminal PATH" });
+        return exposeRatOnUserPath(dest);
       } catch (err) {
         await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
         throw err;
       }
     },
   );
+}
+
+async function exposeRatOnUserPath(source: string): Promise<string> {
+  try {
+    const installed = await installRatToUserPath(source);
+    if (!installed.onPath) {
+      vscode.window.showWarningMessage(
+        `Rat CLI installed at ${installed.path}, but ${path.dirname(installed.path)} is not currently on PATH. Add it to PATH so terminal sessions can run \`rat\`.`,
+      );
+    }
+    return installed.path;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    vscode.window.showWarningMessage(
+      `Rat CLI is installed for this extension, but could not be added to your terminal PATH: ${msg}`,
+    );
+    return source;
+  }
+}
+
+async function installRatToUserPath(
+  source: string,
+): Promise<{ path: string; onPath: boolean }> {
+  const target = userPathRatPath();
+  if (!target) throw new Error("Could not choose a user PATH install location.");
+
+  if (samePath(source, target)) {
+    await verifyRat(target);
+    return { path: target, onPath: dirIsOnPath(path.dirname(target)) };
+  }
+
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.download-${Date.now()}`;
+  try {
+    await fs.promises.copyFile(source, tmp);
+    if (process.platform !== "win32") {
+      await fs.promises.chmod(tmp, 0o755);
+    }
+    await fs.promises.rename(tmp, target);
+    await verifyRat(target);
+    return { path: target, onPath: dirIsOnPath(path.dirname(target)) };
+  } catch (err) {
+    await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }
 
 async function pickRatExecutable(): Promise<string | undefined> {
@@ -197,6 +251,87 @@ async function pickRatExecutable(): Promise<string | undefined> {
     .getConfiguration("rat")
     .update("path", file, vscode.ConfigurationTarget.Global);
   return file;
+}
+
+function ratExecutableName(): string {
+  return process.platform === "win32" ? "rat.exe" : "rat";
+}
+
+function userPathInstallDir(): string | null {
+  const explicit = process.env.RAT_VSCODE_INSTALL_DIR;
+  if (explicit?.trim()) return expandHome(explicit.trim());
+
+  const existing = findRatOnPathSync();
+  if (existing && isUnderHome(existing)) {
+    return path.dirname(existing);
+  }
+
+  for (const dir of pathDirs()) {
+    if (isUnderHome(dir) && fs.existsSync(dir)) return dir;
+  }
+
+  const home = osHomeDir();
+  if (!home) return null;
+
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA;
+    return local ? path.join(local, "Programs", "rat", "bin") : path.join(home, "bin");
+  }
+
+  return path.join(home, ".local", "bin");
+}
+
+function findRatOnPathSync(): string | null {
+  const names = process.platform === "win32"
+    ? ["rat.exe", "rat.cmd", "rat.bat", "rat"]
+    : ["rat"];
+
+  for (const dir of pathDirs()) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function pathDirs(): string[] {
+  return (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry.trim().length > 0)
+    .map((entry) => path.resolve(expandHome(entry)));
+}
+
+function dirIsOnPath(dir: string): boolean {
+  const resolved = path.resolve(dir);
+  return pathDirs().some((entry) => samePath(entry, resolved));
+}
+
+function isUnderHome(value: string): boolean {
+  const home = osHomeDir();
+  if (!home) return false;
+  const rel = path.relative(path.resolve(home), path.resolve(value));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function expandHome(value: string): string {
+  const home = osHomeDir();
+  if (!home) return value;
+  return value === "~" || value.startsWith(`~${path.sep}`)
+    ? path.join(home, value.slice(2))
+    : value;
+}
+
+function osHomeDir(): string {
+  return process.env.HOME || process.env.USERPROFILE || "";
+}
+
+function samePath(a: string, b: string): boolean {
+  const ra = path.resolve(a);
+  const rb = path.resolve(b);
+  return process.platform === "win32"
+    ? ra.toLowerCase() === rb.toLowerCase()
+    : ra === rb;
 }
 
 function releaseAssetNames(): string[] {
