@@ -16,6 +16,12 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-05-02
+
+### Fixed
+
+- The Marketplace demo GIF now uses an absolute GitHub raw URL so it renders reliably in VS Code's extension details page before install/update.
+
 ## [0.2.7] - 2026-05-02
 
 ### Highlights

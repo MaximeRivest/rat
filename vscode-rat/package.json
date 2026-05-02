@@ -2,7 +2,7 @@
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
   "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publisher": "maximerivest",
   "license": "MIT",
   "repository": {
