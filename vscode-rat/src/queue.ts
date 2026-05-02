@@ -63,6 +63,24 @@ export interface WebviewItem {
 export type QueueItem = NotebookItem | SourceItem | WebviewItem;
 
 export type QueueState = "idle" | "running" | "paused";
+export type QueueItemState = "running" | "queued";
+
+export interface QueueSnapshotItem {
+  id: number;
+  state: QueueItemState;
+  /** Index in the global queued list. Undefined for running items. */
+  queuedIndex?: number;
+  runtimeName: string;
+  cwd: string;
+  lang: string;
+  kind: QueueItem["kind"];
+  title: string;
+  detail: string;
+  codePreview: string;
+  documentUri: string;
+  /** Zero-based source/document line when known. */
+  line?: number;
+}
 
 export type StateCallback = (state: QueueState, pending: number) => void;
 
@@ -91,6 +109,8 @@ interface RunningExecution {
 export class ExecutionController {
   private items: QueueItem[] = [];
   private running = new Map<string, RunningExecution>();
+  private itemIds = new WeakMap<QueueItem, number>();
+  private nextItemId = 1;
   private paused = false;
   private onChange: StateCallback;
 
@@ -109,7 +129,18 @@ export class ExecutionController {
     return this.items.length;
   }
 
+  snapshot(): QueueSnapshotItem[] {
+    const running = Array.from(this.running.values()).map((run) =>
+      this.snapshotItem(run.item, "running"),
+    );
+    const queued = this.items.map((item, index) =>
+      this.snapshotItem(item, "queued", index),
+    );
+    return [...running, ...queued];
+  }
+
   enqueue(item: QueueItem): void {
+    this.itemId(item);
     this.items.push(item);
     this.pump();
   }
@@ -119,6 +150,49 @@ export class ExecutionController {
       run.cancellation.cancel();
     }
     this.emit();
+  }
+
+  cancelRuntime(runtimeName: string): boolean {
+    const run = this.running.get(runtimeName);
+    if (!run) return false;
+    run.cancellation.cancel();
+    this.emit();
+    return true;
+  }
+
+  clearRuntime(runtimeName: string): boolean {
+    let changed = false;
+    const run = this.running.get(runtimeName);
+    if (run) {
+      run.cancellation.cancel();
+      changed = true;
+    }
+
+    const kept: QueueItem[] = [];
+    for (const item of this.items) {
+      if (this.runtimeKey(item) === runtimeName) {
+        if (item.kind === "webview") {
+          void this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+        }
+        changed = true;
+      } else {
+        kept.push(item);
+      }
+    }
+    this.items = kept;
+
+    if (changed) this.emit();
+    return changed;
+  }
+
+  cancelRunning(id: number): boolean {
+    for (const run of this.running.values()) {
+      if (this.itemId(run.item) !== id) continue;
+      run.cancellation.cancel();
+      this.emit();
+      return true;
+    }
+    return false;
   }
 
   cancelAll(): void {
@@ -141,12 +215,15 @@ export class ExecutionController {
   }
 
   remove(index: number): void {
-    if (index < 0 || index >= this.items.length) return;
-    const [item] = this.items.splice(index, 1);
-    if (item.kind === "webview") {
-      void this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
-    }
+    if (!this.removeQueuedAt(index)) return;
     this.emit();
+  }
+
+  removeQueued(id: number): boolean {
+    const index = this.items.findIndex((item) => this.itemId(item) === id);
+    if (!this.removeQueuedAt(index)) return false;
+    this.emit();
+    return true;
   }
 
   cancelWebviewRun(webviewPanel: vscode.WebviewPanel, id: number): void {
@@ -154,8 +231,7 @@ export class ExecutionController {
       (item) => item.kind === "webview" && item.webviewPanel === webviewPanel && item.id === id,
     );
     if (queuedIdx >= 0) {
-      const [item] = this.items.splice(queuedIdx, 1) as [WebviewItem];
-      void this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+      this.removeQueuedAt(queuedIdx);
       this.emit();
       return;
     }
@@ -181,6 +257,48 @@ export class ExecutionController {
 
   private runtimeKey(item: QueueItem): string {
     return item.runtimeName;
+  }
+
+  private itemId(item: QueueItem): number {
+    let id = this.itemIds.get(item);
+    if (id === undefined) {
+      id = this.nextItemId++;
+      this.itemIds.set(item, id);
+    }
+    return id;
+  }
+
+  private removeQueuedAt(index: number): QueueItem | null {
+    if (index < 0 || index >= this.items.length) return null;
+    const [item] = this.items.splice(index, 1);
+    if (item.kind === "webview") {
+      void this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+    }
+    return item;
+  }
+
+  private snapshotItem(
+    item: QueueItem,
+    state: QueueItemState,
+    queuedIndex?: number,
+  ): QueueSnapshotItem {
+    const code = queueItemCode(item);
+    const location = queueItemLocation(item);
+    const codePreview = previewCode(code);
+    return {
+      id: this.itemId(item),
+      state,
+      queuedIndex,
+      runtimeName: item.runtimeName,
+      cwd: item.cwd,
+      lang: item.lang,
+      kind: item.kind,
+      title: queueItemTitle(item, location),
+      detail: codePreview,
+      codePreview,
+      documentUri: location.document.uri.toString(),
+      line: location.line,
+    };
   }
 
   private pump(): void {
@@ -531,6 +649,66 @@ export class ExecutionController {
       return false;
     }
   }
+}
+
+interface QueueItemLocation {
+  document: vscode.TextDocument;
+  line?: number;
+}
+
+function queueItemCode(item: QueueItem): string {
+  switch (item.kind) {
+    case "notebook":
+      return item.cell.code;
+    case "source":
+      return item.code;
+    case "webview":
+      return item.code;
+  }
+}
+
+function queueItemLocation(item: QueueItem): QueueItemLocation {
+  switch (item.kind) {
+    case "notebook":
+      return { document: item.editor.document, line: item.cell.openLine };
+    case "source":
+      return { document: item.editor.document, line: item.block.range.start.line };
+    case "webview":
+      return { document: item.document };
+  }
+}
+
+function queueItemTitle(item: QueueItem, location: QueueItemLocation): string {
+  const lang = displayLang(item);
+  const doc = documentLabel(location.document);
+  const where = location.line !== undefined ? `${doc}:${location.line + 1}` : doc;
+
+  switch (item.kind) {
+    case "notebook":
+      return `${lang} cell · ${where}`;
+    case "source":
+      return `${lang} block · ${where}`;
+    case "webview":
+      return `${lang} cell · ${where}`;
+  }
+}
+
+function displayLang(item: QueueItem): string {
+  return item.kind === "notebook" ? item.cell.lang : item.lang;
+}
+
+function documentLabel(document: vscode.TextDocument): string {
+  const fileName = document.uri.fsPath || document.fileName || document.uri.toString();
+  return path.basename(fileName) || document.uri.toString();
+}
+
+function previewCode(code: string): string {
+  const first = code
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!first) return "(empty)";
+  return first.length > 90 ? `${first.slice(0, 87)}…` : first;
 }
 
 export { ExecutionController as ExecutionQueue };

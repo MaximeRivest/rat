@@ -2,7 +2,7 @@
   "name": "rat",
   "displayName": "Rat — Run AnyThing",
   "description": "Run code in any file — Markdown cells, Python, R, Julia, JS, Shell — powered by rat kernels",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "maximerivest",
   "license": "MIT",
   "repository": {
@@ -125,6 +125,16 @@
       {
         "command": "rat.cancelExecution",
         "title": "Rat: Cancel Execution"
+      },
+      {
+        "command": "rat.interruptQueueItem",
+        "title": "Rat: Interrupt Queue Item",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rat.removeQueuedItem",
+        "title": "Rat: Remove Queued Item",
+        "icon": "$(close)"
       },
       {
         "command": "rat.clearQueue",
@@ -295,8 +305,23 @@
           "group": "inline"
         },
         {
+          "command": "rat.interruptQueueItem",
+          "when": "view == ratRuntimes && viewItem == queueRunning",
+          "group": "inline"
+        },
+        {
+          "command": "rat.removeQueuedItem",
+          "when": "view == ratRuntimes && viewItem == queueQueued",
+          "group": "inline"
+        },
+        {
           "command": "rat.removeRuntime",
-          "when": "view == ratRuntimes",
+          "when": "view == ratRuntimes && viewItem == runningKernel",
+          "group": "2_modify"
+        },
+        {
+          "command": "rat.removeRuntime",
+          "when": "view == ratRuntimes && viewItem == savedRuntime",
           "group": "2_modify"
         }
       ]

@@ -16,6 +16,35 @@ Use extension-specific tags such as `vscode-rat-v0.2.2` when tagging VS Code ext
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-02
+
+### Highlights
+
+- Runtime selection in Markdown notebooks now follows the current cell instead of the first cell in the file.
+- The runtime sidebar now shows executing and queued work under each runtime, with inline interrupt/remove actions.
+- Python notebook execution is more resilient when variable inspection or completion requests time out.
+
+### Added
+
+- Queue/execution details in the Runtimes tree, grouped by runtime.
+- Inline controls to interrupt an executing queue item or remove a queued item.
+
+### Changed
+
+- **Open REPL**, variables, stop/restart, runtime picker, and scope commands now use the current Markdown cell language.
+- Stopping or restarting a runtime from VS Code also clears that runtime's in-memory execution queue.
+- VS Code MCP calls for status, variables, completions, tail, input, and cancel now have explicit request timeouts.
+
+### Fixed
+
+- Markdown files whose first runnable cell is shell no longer cause Python cells later in the file to show or control the shell runtime.
+- Stale Python variable/completion requests no longer wedge the VS Code queue indefinitely.
+- Runtime stop/restart buttons now target the runtime associated with the current cell.
+
+### Internal
+
+- Added Python kernel protocol read deadlines for inspection/completion requests so a hung read tears down the Python subprocess instead of holding the kernel lock forever.
+
 ## [0.2.3] - 2026-05-02
 
 ### Highlights

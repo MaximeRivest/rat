@@ -4,6 +4,7 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
+import type { ExecutionController, QueueSnapshotItem } from "./queue";
 import {
   log,
   ratRemove,
@@ -14,12 +15,16 @@ import {
 } from "./rat";
 import { projectRuntimeName } from "./resolve";
 
+type RuntimeTreeNode = RuntimeNode | RuntimeQueueNode;
+
 export class RuntimeTreeProvider
-  implements vscode.TreeDataProvider<RuntimeNode>
+  implements vscode.TreeDataProvider<RuntimeTreeNode>
 {
   private _onChange = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onChange.event;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(private readonly queue?: ExecutionController) {}
 
   refresh(): void {
     this._onChange.fire();
@@ -37,13 +42,25 @@ export class RuntimeTreeProvider
     }
   }
 
-  getTreeItem(el: RuntimeNode): vscode.TreeItem {
+  getTreeItem(el: RuntimeTreeNode): vscode.TreeItem {
     return el;
   }
 
-  getChildren(): RuntimeNode[] {
+  getChildren(el?: RuntimeTreeNode): RuntimeTreeNode[] {
+    if (el instanceof RuntimeQueueNode) return [];
+    if (el instanceof RuntimeNode) {
+      let queuedOrdinal = 0;
+      return el.queueItems.map((entry) => {
+        const ordinal = entry.state === "queued" ? ++queuedOrdinal : 0;
+        return new RuntimeQueueNode(entry, ordinal);
+      });
+    }
+
     const state = readState();
+    const queueItems = this.queue?.snapshot() ?? [];
+    const queueByRuntime = groupQueueItems(queueItems);
     const runningNames = new Set(state.kernels.map((k) => k.name));
+    const runtimeNodeNames = new Set<string>();
     const workspaceDirs = (vscode.workspace.workspaceFolders ?? []).map(
       (f) => path.resolve(f.uri.fsPath),
     );
@@ -51,22 +68,66 @@ export class RuntimeTreeProvider
     log(`tree: workspaceDirs=${JSON.stringify(workspaceDirs)}`);
     log(`tree: kernels=${JSON.stringify(state.kernels.map(k => ({ name: k.name, cwd: k.cwd, port: k.port, status: k.status })))}`);
     log(`tree: runtimes=${JSON.stringify(state.runtimes.map(r => ({ name: r.name, cwd: r.cwd })))}`);
+    log(`tree: queue=${JSON.stringify(queueItems.map(q => ({ runtime: q.runtimeName, state: q.state, title: q.title })))}`);
 
     const nodes: RuntimeNode[] = [];
 
     for (const k of state.kernels) {
-      if (!isVisibleRuntime(k.name, k.cwd, workspaceDirs)) continue;
-      nodes.push(new RuntimeNode(k.name, k.lang, k.cwd, k.venv, true, k.port));
+      const entries = queueByRuntime.get(k.name) ?? [];
+      if (!isVisibleRuntime(k.name, k.cwd, workspaceDirs) && entries.length === 0) continue;
+      runtimeNodeNames.add(k.name);
+      nodes.push(new RuntimeNode(
+        k.name,
+        k.lang,
+        k.cwd,
+        k.venv,
+        true,
+        k.port,
+        entries,
+        true,
+      ));
     }
 
     for (const r of state.runtimes) {
       if (runningNames.has(r.name)) continue;
-      if (!isVisibleRuntime(r.name, r.cwd, workspaceDirs)) continue;
-      nodes.push(new RuntimeNode(r.name, r.lang, r.cwd, r.venv, false, 0));
+      const entries = queueByRuntime.get(r.name) ?? [];
+      if (!isVisibleRuntime(r.name, r.cwd, workspaceDirs) && entries.length === 0) continue;
+      runtimeNodeNames.add(r.name);
+      nodes.push(new RuntimeNode(
+        r.name,
+        r.lang,
+        r.cwd,
+        r.venv,
+        false,
+        0,
+        entries,
+        true,
+      ));
+    }
+
+    // Show queued/executing work even before rat has written a runtime/kernel to
+    // state.yaml. This makes newly submitted cells visible immediately.
+    for (const [runtimeName, entries] of queueByRuntime) {
+      if (runtimeNodeNames.has(runtimeName)) continue;
+      const first = entries[0];
+      const executing = entries.some((entry) => entry.state === "running");
+      nodes.push(new RuntimeNode(
+        runtimeName,
+        first.lang,
+        first.cwd,
+        "",
+        executing,
+        0,
+        entries,
+        false,
+      ));
     }
 
     return dedupeRuntimeNodes(nodes).sort((a, b) => {
       if (a.running !== b.running) return a.running ? -1 : 1;
+      if (a.queueItems.length !== b.queueItems.length) {
+        return b.queueItems.length - a.queueItems.length;
+      }
       return a.runtimeName.localeCompare(b.runtimeName);
     });
   }
@@ -80,8 +141,15 @@ export class RuntimeNode extends vscode.TreeItem {
     public readonly venv: string,
     public readonly running: boolean,
     public readonly port: number,
+    public readonly queueItems: QueueSnapshotItem[] = [],
+    public readonly saved: boolean = !running,
   ) {
-    super(runtimeName, vscode.TreeItemCollapsibleState.None);
+    super(
+      runtimeName,
+      queueItems.length > 0
+        ? vscode.TreeItemCollapsibleState.Expanded
+        : vscode.TreeItemCollapsibleState.None,
+    );
 
     const icon = running ? "circle-filled" : "circle-outline";
     const color = running
@@ -93,7 +161,10 @@ export class RuntimeNode extends vscode.TreeItem {
     if (cwd) parts.push(shortPath(cwd));
     if (venv) parts.push(".venv");
     if (runtimeName.endsWith("-global")) parts.push("global");
-    if (!running) parts.push("saved");
+    const queueDescription = describeQueue(queueItems);
+    if (queueDescription) parts.push(queueDescription);
+    if (!running && saved) parts.push("saved");
+    else if (!running && !saved && queueItems.length > 0) parts.push("pending");
     this.description = parts.join(" · ");
 
     this.tooltip = [
@@ -101,12 +172,63 @@ export class RuntimeNode extends vscode.TreeItem {
       `Language: ${lang}`,
       `CWD: ${cwd}`,
       venv ? `Venv: ${venv}` : null,
-      running ? `Port: ${port}` : "Status: stopped",
+      running ? (port ? `Port: ${port}` : "Status: executing") : "Status: stopped",
+      queueItems.length > 0 ? `Queue: ${describeQueue(queueItems)}` : null,
     ]
       .filter(Boolean)
       .join("\n");
 
-    this.contextValue = running ? "runningKernel" : "savedRuntime";
+    this.contextValue = running ? "runningKernel" : saved ? "savedRuntime" : "queuedRuntime";
+  }
+
+  withQueueItems(queueItems: QueueSnapshotItem[]): RuntimeNode {
+    return new RuntimeNode(
+      this.runtimeName,
+      this.lang,
+      this.cwd,
+      this.venv,
+      this.running,
+      this.port,
+      queueItems,
+      this.saved,
+    );
+  }
+}
+
+export class RuntimeQueueNode extends vscode.TreeItem {
+  public readonly queueId: number;
+  public readonly runtimeName: string;
+
+  constructor(
+    public readonly entry: QueueSnapshotItem,
+    queuedOrdinal: number,
+  ) {
+    super(entry.title, vscode.TreeItemCollapsibleState.None);
+
+    this.queueId = entry.id;
+    this.runtimeName = entry.runtimeName;
+
+    const running = entry.state === "running";
+    this.iconPath = new vscode.ThemeIcon(
+      running ? "loading" : "clock",
+      running ? new vscode.ThemeColor("progressBar.background") : undefined,
+    );
+
+    this.description = running
+      ? `executing · ${entry.detail}`
+      : `queued #${queuedOrdinal} · ${entry.detail}`;
+    this.tooltip = [
+      running ? "Executing" : "Queued",
+      `Runtime: ${entry.runtimeName}`,
+      `Language: ${entry.lang}`,
+      entry.line !== undefined ? `Line: ${entry.line + 1}` : null,
+      `Document: ${entry.documentUri}`,
+      "",
+      entry.codePreview,
+    ]
+      .filter((line) => line !== null)
+      .join("\n");
+    this.contextValue = running ? "queueRunning" : "queueQueued";
   }
 }
 
@@ -162,6 +284,26 @@ export async function removeRuntimeCmd(node?: RuntimeNode): Promise<void> {
   }
 }
 
+export function interruptQueueItemCmd(
+  queue: ExecutionController,
+  node?: RuntimeQueueNode,
+): void {
+  if (!node) return;
+  queue.cancelRunning(node.queueId) || queue.cancelRuntime(node.runtimeName);
+}
+
+export function removeQueuedItemCmd(
+  queue: ExecutionController,
+  node?: RuntimeQueueNode,
+): void {
+  if (!node) return;
+  if (node.entry.state === "running") {
+    queue.cancelRunning(node.queueId) || queue.cancelRuntime(node.runtimeName);
+    return;
+  }
+  queue.removeQueued(node.queueId);
+}
+
 async function pickName(prompt: string): Promise<string | undefined> {
   const state = readState();
   const names = [
@@ -188,8 +330,9 @@ function dedupeRuntimeNodes(nodes: RuntimeNode[]): RuntimeNode[] {
 
   const deduped: RuntimeNode[] = [];
   for (const group of grouped.values()) {
+    const mergedQueue = uniqueQueueItems(group.flatMap((node) => node.queueItems));
     if (group.length === 1) {
-      deduped.push(group[0]);
+      deduped.push(group[0].withQueueItems(mergedQueue));
       continue;
     }
 
@@ -197,7 +340,7 @@ function dedupeRuntimeNodes(nodes: RuntimeNode[]): RuntimeNode[] {
     const preferred = group.find((node) => node.runtimeName === preferredName)
       ?? group.find((node) => node.running)
       ?? group[0];
-    deduped.push(preferred);
+    deduped.push(preferred.withQueueItems(mergedQueue));
   }
 
   return deduped;
@@ -205,6 +348,40 @@ function dedupeRuntimeNodes(nodes: RuntimeNode[]): RuntimeNode[] {
 
 function aliasKey(name: string): string {
   return name.toLowerCase().replace(/[-_]+/g, "_");
+}
+
+function groupQueueItems(items: QueueSnapshotItem[]): Map<string, QueueSnapshotItem[]> {
+  const grouped = new Map<string, QueueSnapshotItem[]>();
+  for (const item of items) {
+    const group = grouped.get(item.runtimeName);
+    if (group) group.push(item);
+    else grouped.set(item.runtimeName, [item]);
+  }
+  for (const group of grouped.values()) {
+    group.sort((a, b) => {
+      if (a.state !== b.state) return a.state === "running" ? -1 : 1;
+      return (a.queuedIndex ?? 0) - (b.queuedIndex ?? 0);
+    });
+  }
+  return grouped;
+}
+
+function uniqueQueueItems(items: QueueSnapshotItem[]): QueueSnapshotItem[] {
+  const byId = new Map<number, QueueSnapshotItem>();
+  for (const item of items) byId.set(item.id, item);
+  return [...byId.values()].sort((a, b) => {
+    if (a.state !== b.state) return a.state === "running" ? -1 : 1;
+    return (a.queuedIndex ?? 0) - (b.queuedIndex ?? 0);
+  });
+}
+
+function describeQueue(items: QueueSnapshotItem[]): string {
+  const executing = items.filter((item) => item.state === "running").length;
+  const queued = items.length - executing;
+  const parts: string[] = [];
+  if (executing) parts.push(`${executing} executing`);
+  if (queued) parts.push(`${queued} queued`);
+  return parts.join(" · ");
 }
 
 function isVisibleRuntime(name: string, cwd: string, workspaceDirs: string[]): boolean {

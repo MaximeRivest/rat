@@ -293,6 +293,18 @@ export interface McpNotification {
 
 type NotificationHandler = (notification: McpNotification) => void;
 
+class RequestTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestTimeoutError";
+  }
+}
+
+function isRequestTimeout(err: unknown): boolean {
+  return err instanceof RequestTimeoutError ||
+    (err instanceof Error && err.name === "RequestTimeoutError");
+}
+
 export class McpClient {
   private url: string;
   private sessionId: string | null = null;
@@ -336,27 +348,27 @@ export class McpClient {
   }
 
   async sendInput(text: string): Promise<void> {
-    await this.callTool("run", { input: text });
+    await this.callTool("run", { input: text }, false, undefined, 5_000);
   }
 
   async look(at?: string): Promise<string> {
     const args: Record<string, unknown> = {};
     if (at) args.at = at;
-    return this.parseToolResult(await this.callTool("look", args)).text;
+    return this.parseToolResult(await this.callTool("look", args, false, undefined, 10_000, true)).text;
   }
 
   async lookFull(at: string): Promise<string> {
-    return this.parseToolResult(await this.callTool("look", { at, full: true })).text;
+    return this.parseToolResult(await this.callTool("look", { at, full: true }, false, undefined, 10_000, true)).text;
   }
 
   async tail(n = 10, format = "json"): Promise<string> {
     return this.parseToolResult(
-      await this.callTool("tail", { n, format }),
+      await this.callTool("tail", { n, format }, false, undefined, 5_000),
     ).text;
   }
 
   async complete(code: string, cursor: number): Promise<string[]> {
-    const r = await this.callTool("look", { code, cursor });
+    const r = await this.callTool("look", { code, cursor }, false, undefined, 8_000, true);
     const text = this.parseToolResult(r).text;
     return text
       ? text
@@ -368,12 +380,12 @@ export class McpClient {
 
   async status(): Promise<string> {
     return this.parseToolResult(
-      await this.callTool("ctl", { op: "status" }),
+      await this.callTool("ctl", { op: "status" }, false, undefined, 2_000),
     ).text;
   }
 
   async reset(): Promise<void> {
-    await this.callTool("ctl", { op: "reset" });
+    await this.callTool("ctl", { op: "reset" }, false, undefined, 5_000);
   }
 
   /**
@@ -384,14 +396,14 @@ export class McpClient {
    */
   async partialOutput(): Promise<string> {
     return this.parseToolResult(
-      await this.rpc("tools/call", { name: "ctl", arguments: { op: "output" } }, false),
+      await this.rpc("tools/call", { name: "ctl", arguments: { op: "output" } }, false, undefined, 2_000),
     ).text;
   }
 
   async cancel(): Promise<void> {
     // fire-and-forget cancel, don't await because the run request might
     // be in flight on the same client
-    this.callTool("ctl", { op: "cancel" }).catch(() => {});
+    this.callTool("ctl", { op: "cancel" }, false, undefined, 5_000).catch(() => {});
   }
 
   /** Abort the in-flight run request (if any). */
@@ -414,8 +426,17 @@ export class McpClient {
     args: Record<string, unknown>,
     track: RequestTrack = false,
     onNotification?: NotificationHandler,
+    timeoutMs = 0,
+    cancelOnTimeout = false,
   ): Promise<unknown> {
-    return this.rpc("tools/call", { name, arguments: args }, track, onNotification);
+    try {
+      return await this.rpc("tools/call", { name, arguments: args }, track, onNotification, timeoutMs);
+    } catch (err) {
+      if (cancelOnTimeout && isRequestTimeout(err)) {
+        this.callTool("ctl", { op: "cancel" }, false, undefined, 5_000).catch(() => {});
+      }
+      throw err;
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -441,10 +462,11 @@ export class McpClient {
     params: unknown,
     track: RequestTrack = false,
     onNotification?: NotificationHandler,
+    timeoutMs = 0,
   ): Promise<unknown> {
     const id = this.nextId++;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-    return this.post(body, track, onNotification).then((res) => {
+    return this.post(body, track, onNotification, timeoutMs).then((res) => {
       let payload = res.body;
 
       // SSE responses: extract the last `data:` line that carries our id.
@@ -484,6 +506,7 @@ export class McpClient {
     body: string,
     track: RequestTrack = false,
     onNotification?: NotificationHandler,
+    timeoutMs = 0,
   ): Promise<{
     statusCode: number;
     headers: http.IncomingHttpHeaders;
@@ -552,6 +575,11 @@ export class McpClient {
 
       this.requests.add(req);
       if (track === "run") this.activeRunReq = req;
+      if (timeoutMs > 0) {
+        req.setTimeout(timeoutMs, () => {
+          req.destroy(new RequestTimeoutError(`MCP request timed out after ${timeoutMs}ms`));
+        });
+      }
       req.on("error", (err) => {
         cleanup();
         reject(err);

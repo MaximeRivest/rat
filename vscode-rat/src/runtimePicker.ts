@@ -30,7 +30,7 @@ import {
   setScopeOverride,
   type RuntimeScope,
 } from "./resolve";
-import { parseCells } from "./cells";
+import { cellAtLine, parseCells } from "./cells";
 import { detectFileLang } from "./langDetect";
 
 interface RuntimePickItem extends vscode.QuickPickItem {
@@ -48,7 +48,7 @@ export async function showRuntimePicker(): Promise<string | undefined> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
-  const lang = currentDocumentLang(editor.document);
+  const lang = currentDocumentLang(editor.document, editor.selection.active.line);
   if (!lang) {
     vscode.window.showInformationMessage("No rat runtime available for this file");
     return;
@@ -212,12 +212,20 @@ export async function showRuntimePicker(): Promise<string | undefined> {
   }
 }
 
-function currentDocumentLang(document: vscode.TextDocument): string | null {
+function currentDocumentLang(document: vscode.TextDocument, line?: number): string | null {
   const fl = detectFileLang(document);
   if (fl.mode === "source") return fl.ratLang;
   if (fl.mode !== "notebook") return null;
+
   const cells = parseCells(document);
-  return cells[0]?.ratLang ?? null;
+  if (cells.length === 0) return null;
+  if (line === undefined) return cells[0].ratLang;
+
+  const containing = cellAtLine(cells, line);
+  if (containing) return containing.ratLang;
+
+  const preceding = [...cells].reverse().find((cell) => cell.openLine <= line);
+  return (preceding ?? cells[0]).ratLang;
 }
 
 async function addRuntimeWizard(defaultLang: string): Promise<string | undefined> {

@@ -43,6 +43,8 @@ import {
   stopRuntimeCmd,
   restartRuntimeCmd,
   removeRuntimeCmd,
+  interruptQueueItemCmd,
+  removeQueuedItemCmd,
 } from "./runtimeView";
 import { showRuntimePicker } from "./runtimePicker";
 import { getRuntimeOverride } from "./resolve";
@@ -118,8 +120,19 @@ export function activate(ctx: vscode.ExtensionContext): void {
   runtimeBar.tooltip = "Click to select rat runtime";
   ctx.subscriptions.push(runtimeBar);
 
+  // Execution queue
+  queue = new ExecutionController((state, pending) => {
+    setStatus(state, pending);
+    vscode.commands.executeCommand(
+      "setContext",
+      "rat.executing",
+      state === "running",
+    );
+    treeProvider?.refresh();
+  });
+
   // Tree view
-  treeProvider = new RuntimeTreeProvider();
+  treeProvider = new RuntimeTreeProvider(queue);
   const treeView = vscode.window.createTreeView("ratRuntimes", {
     treeDataProvider: treeProvider,
   });
@@ -134,16 +147,6 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider("ratInspector", inspectorProvider),
     vscode.window.registerWebviewViewProvider("ratVariables", variablesProvider),
   );
-
-  // Execution queue
-  queue = new ExecutionController((state, pending) => {
-    setStatus(state, pending);
-    vscode.commands.executeCommand(
-      "setContext",
-      "rat.executing",
-      state === "running",
-    );
-  });
 
   ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx, queue, {
     onActiveDocument: (document) => {
@@ -272,7 +275,10 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
     updateRuntimeBar(ed);
     inspectorProvider.update(ed);
-    variablesProvider.update(ed);
+    variablesProvider.updateDocument(
+      ed?.document,
+      ed ? ratLangForContext(ed.document, ed.selection.active.line) : null,
+    );
     if (ed && isRatFile(ed.document)) {
       const fl = detectFileLang(ed.document);
       if (fl.mode === "notebook") {
@@ -286,6 +292,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.window.onDidChangeActiveTextEditor(updateCtx),
     vscode.window.onDidChangeTextEditorSelection((e) => {
       inspectorProvider.update(e.textEditor);
+      updateRuntimeBar(e.textEditor);
+      variablesProvider.updateDocument(
+        e.textEditor.document,
+        ratLangForContext(e.textEditor.document, e.textEditor.selection.active.line),
+      );
     }),
     vscode.workspace.onDidChangeTextDocument((e) => {
       rebaseResultsForDocumentChange(e);
@@ -349,9 +360,17 @@ export function activate(ctx: vscode.ExtensionContext): void {
   reg("rat.useGlobalScope", () => setCurrentScope("global"));
   reg("rat.refreshRuntimes", () => treeProvider.refresh());
   reg("rat.startRuntime", (n: any) => startRuntimeCmd(n).then(() => treeProvider.refresh()));
-  reg("rat.stopRuntime", (n: any) => stopRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); }));
-  reg("rat.restartRuntime", (n: any) => restartRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); }));
+  reg("rat.stopRuntime", (n: any) => {
+    if (typeof n?.runtimeName === "string") queue.clearRuntime(n.runtimeName);
+    return stopRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); });
+  });
+  reg("rat.restartRuntime", (n: any) => {
+    if (typeof n?.runtimeName === "string") queue.clearRuntime(n.runtimeName);
+    return restartRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); });
+  });
   reg("rat.removeRuntime", (n: any) => removeRuntimeCmd(n).then(() => treeProvider.refresh()));
+  reg("rat.interruptQueueItem", (n: any) => { interruptQueueItemCmd(queue, n); treeProvider.refresh(); });
+  reg("rat.removeQueuedItem", (n: any) => { removeQueuedItemCmd(queue, n); treeProvider.refresh(); });
   reg("rat.addRuntime", async () => { await showRuntimePicker(); treeProvider.refresh(); });
 }
 
@@ -410,34 +429,23 @@ function updateRuntimeBar(editor: vscode.TextEditor | undefined): void {
     runtimeBar.hide();
     return;
   }
-  updateRuntimeBarForDocument(editor.document);
+  updateRuntimeBarForDocument(editor.document, undefined, editor.selection.active.line);
 }
 
 function updateRuntimeBarForDocument(
   document: vscode.TextDocument,
   preferredFenceLang?: string,
+  preferredLine?: number,
 ): void {
   if (!isRatFile(document)) {
     runtimeBar.hide();
     return;
   }
 
-  const fl = detectFileLang(document);
-  let lang: string;
-  const preferredRatLang = preferredFenceLang ? ratLangForFence(preferredFenceLang) : null;
-
-  if (preferredRatLang) {
-    lang = preferredRatLang;
-  } else if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else {
-    // Notebook mode — use first cell's language
-    const cells = parseCells(document);
-    if (cells.length === 0) {
-      runtimeBar.hide();
-      return;
-    }
-    lang = cells[0].ratLang;
+  const lang = ratLangForContext(document, preferredLine, preferredFenceLang);
+  if (!lang) {
+    runtimeBar.hide();
+    return;
   }
 
   const docUri = document.uri.toString();
@@ -456,6 +464,33 @@ function updateRuntimeBarForDocument(
     runtimeBar.text += " (override)";
   }
   runtimeBar.show();
+}
+
+function ratLangForContext(
+  document: vscode.TextDocument,
+  line?: number,
+  preferredFenceLang?: string,
+): string | null {
+  const preferredRatLang = preferredFenceLang ? ratLangForFence(preferredFenceLang) : null;
+  if (preferredRatLang) return preferredRatLang;
+
+  const fl = detectFileLang(document);
+  if (fl.mode === "source") return fl.ratLang;
+  if (fl.mode !== "notebook") return null;
+
+  const cells = parseCells(document);
+  if (cells.length === 0) return null;
+  if (line === undefined) return cells[0].ratLang;
+
+  const containing = cellAtLine(cells, line);
+  if (containing) return containing.ratLang;
+
+  const preceding = [...cells].reverse().find((cell) => cell.openLine <= line);
+  return (preceding ?? cells[0]).ratLang;
+}
+
+function currentRatLang(editor: vscode.TextEditor): string | null {
+  return ratLangForContext(editor.document, editor.selection.active.line);
 }
 
 // ── Notebook-mode helpers ──────────────────────────────────
@@ -874,17 +909,8 @@ async function showVariablesCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
-  const fl = detectFileLang(editor.document);
-  let lang: string;
-  if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else if (fl.mode === "notebook") {
-    const cells = parseCells(editor.document);
-    if (!cells.length) return;
-    lang = cells[0].ratLang;
-  } else {
-    return;
-  }
+  const lang = currentRatLang(editor);
+  if (!lang) return;
 
   const { name, cwd } = resolveRuntime(lang, editor.document);
   try {
@@ -908,20 +934,12 @@ async function stopKernelCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
-  const fl = detectFileLang(editor.document);
-  let lang: string;
-  if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else if (fl.mode === "notebook") {
-    const cells = parseCells(editor.document);
-    if (!cells.length) return;
-    lang = cells[0].ratLang;
-  } else {
-    return;
-  }
+  const lang = currentRatLang(editor);
+  if (!lang) return;
 
   const { name } = resolveRuntime(lang, editor.document);
   try {
+    queue.clearRuntime(name);
     await ratStop(name);
     disposeAll();
     vscode.window.showInformationMessage(`Rat: ${name} stopped`);
@@ -934,15 +952,8 @@ async function openReplCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor || !isRatFile(editor.document)) return;
 
-  const fl = detectFileLang(editor.document);
-  let lang: string;
-  if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else {
-    const cells = parseCells(editor.document);
-    if (!cells.length) return;
-    lang = cells[0].ratLang;
-  }
+  const lang = currentRatLang(editor);
+  if (!lang) return;
 
   const { name, cwd } = resolveRuntime(lang, editor.document);
   try {
@@ -963,15 +974,8 @@ async function setCurrentScope(scope: "notebook" | "project" | "global"): Promis
   const editor = vscode.window.activeTextEditor;
   if (!editor || !isRatFile(editor.document)) return;
 
-  const fl = detectFileLang(editor.document);
-  let lang: string;
-  if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else {
-    const cells = parseCells(editor.document);
-    if (!cells.length) return;
-    lang = cells[0].ratLang;
-  }
+  const lang = currentRatLang(editor);
+  if (!lang) return;
 
   setScopeOverride(editor.document.uri.toString(), lang, scope);
   updateRuntimeBar(editor);
@@ -984,20 +988,12 @@ async function restartKernelCmd(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
-  const fl = detectFileLang(editor.document);
-  let lang: string;
-  if (fl.mode === "source" && fl.ratLang) {
-    lang = fl.ratLang;
-  } else if (fl.mode === "notebook") {
-    const cells = parseCells(editor.document);
-    if (!cells.length) return;
-    lang = cells[0].ratLang;
-  } else {
-    return;
-  }
+  const lang = currentRatLang(editor);
+  if (!lang) return;
 
   const { name, cwd } = resolveRuntime(lang, editor.document);
   try {
+    queue.clearRuntime(name);
     disposeAll();
     await ratRestart(name, cwd);
     vscode.window.showInformationMessage(`Rat: ${name} restarted`);

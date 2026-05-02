@@ -101,6 +101,7 @@ type Python struct {
 
 	mu              sync.Mutex
 	cmd             *exec.Cmd
+	protocolConn    net.Conn       // private protocol connection (used for read deadlines)
 	stdin           io.WriteCloser // private protocol writer
 	stdout          *bufio.Reader  // private protocol reader
 	stderrMu        sync.Mutex
@@ -286,7 +287,7 @@ func (p *Python) Look(req kernel.LookRequest) kernel.LookResult {
 		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
 	}
 
-	resp, err := p.readLocked()
+	resp, err := p.readLockedWithTimeout(10 * time.Second)
 	if err != nil {
 		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
 	}
@@ -407,6 +408,7 @@ func (p *Python) ensureStartedLocked() error {
 	}
 
 	p.cmd = cmd
+	p.protocolConn = conn
 	p.stdin = conn
 	p.stdout = reader
 	p.interruptMu.Lock()
@@ -563,8 +565,17 @@ func (p *Python) sendLocked(req request) error {
 }
 
 func (p *Python) readLocked() (response, error) {
+	return p.readLockedWithTimeout(0)
+}
+
+func (p *Python) readLockedWithTimeout(timeout time.Duration) (response, error) {
 	if p.stdout == nil {
 		return response{}, fmt.Errorf("python kernel not started")
+	}
+	if timeout > 0 && p.protocolConn != nil {
+		conn := p.protocolConn
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		defer conn.SetReadDeadline(time.Time{})
 	}
 	line, err := p.stdout.ReadBytes('\n')
 	if err != nil {
@@ -600,6 +611,7 @@ func (p *Python) killLocked() {
 		_ = p.stdin.Close()
 		p.stdin = nil
 	}
+	p.protocolConn = nil
 	if p.cmd != nil {
 		if p.cmd.Process != nil {
 			_ = p.cmd.Process.Kill()
