@@ -18,7 +18,7 @@ import * as vscode from "vscode";
 
 import { refindCell, type CodeCell } from "./cells";
 import { upsertOutput } from "./output";
-import { getClient, toolResultDisplayText, type McpClient } from "./rat";
+import { getClient, ratCancel, toolResultDisplayText, type McpClient } from "./rat";
 import {
   showRunning,
   clearRunning,
@@ -63,7 +63,7 @@ export interface WebviewItem {
 export type QueueItem = NotebookItem | SourceItem | WebviewItem;
 
 export type QueueState = "idle" | "running" | "paused";
-export type QueueItemState = "running" | "queued";
+export type QueueItemState = "running" | "cancelling" | "stale" | "queued";
 
 export interface QueueSnapshotItem {
   id: number;
@@ -86,23 +86,58 @@ export type StateCallback = (state: QueueState, pending: number) => void;
 
 class RunCancellation {
   cancelled = false;
+  locallyFinalized = false;
   private cancelImpl: (() => void) | null = null;
+  private cleanupFns: Array<() => void> = [];
+  private cleanupRan = false;
 
   setCancel(fn: () => void): void {
     this.cancelImpl = fn;
-    if (this.cancelled) fn();
+    if (this.cancelled) this.safeCall(fn);
+  }
+
+  onCancel(fn: () => void): void {
+    this.cleanupFns.push(fn);
+    if (this.cancelled) this.safeCall(fn);
   }
 
   cancel(): void {
+    const first = !this.cancelled;
     this.cancelled = true;
-    this.cancelImpl?.();
+    this.cancelImpl && this.safeCall(this.cancelImpl);
+    if (first) this.runCleanup();
+  }
+
+  markLocallyFinalized(): void {
+    this.locallyFinalized = true;
+    this.cancel();
+  }
+
+  private runCleanup(): void {
+    if (this.cleanupRan) return;
+    this.cleanupRan = true;
+    for (const fn of this.cleanupFns) this.safeCall(fn);
+  }
+
+  private safeCall(fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      // Cancellation should be best-effort and never keep VS Code stuck.
+    }
   }
 }
 
 interface RunningExecution {
   item: QueueItem;
   cancellation: RunCancellation;
+  state: Exclude<QueueItemState, "queued">;
+  cancelRequestedAt?: number;
+  forceTimer?: ReturnType<typeof setTimeout>;
 }
+
+const DEFAULT_CANCEL_FORCE_MS = 3_000;
+const STOP_CANCEL_FORCE_MS = 1_000;
 
 // ── Controller ─────────────────────────────────────────────
 
@@ -112,6 +147,7 @@ export class ExecutionController {
   private itemIds = new WeakMap<QueueItem, number>();
   private nextItemId = 1;
   private paused = false;
+  private blockedRuntimes = new Set<string>();
   private onChange: StateCallback;
 
   constructor(onChange: StateCallback) {
@@ -131,7 +167,7 @@ export class ExecutionController {
 
   snapshot(): QueueSnapshotItem[] {
     const running = Array.from(this.running.values()).map((run) =>
-      this.snapshotItem(run.item, "running"),
+      this.snapshotItem(run.item, run.state),
     );
     const queued = this.items.map((item, index) =>
       this.snapshotItem(item, "queued", index),
@@ -145,17 +181,29 @@ export class ExecutionController {
     this.pump();
   }
 
-  cancelCurrent(): void {
-    for (const run of this.running.values()) {
-      run.cancellation.cancel();
-    }
-    this.emit();
+  isRuntimeBlocked(runtimeName: string): boolean {
+    return this.blockedRuntimes.has(runtimeName);
   }
 
-  cancelRuntime(runtimeName: string): boolean {
+  resumeRuntime(runtimeName: string): boolean {
+    const changed = this.blockedRuntimes.delete(runtimeName);
+    if (changed) this.pump();
+    return changed;
+  }
+
+  cancelCurrent(forceAfterMs = DEFAULT_CANCEL_FORCE_MS): void {
+    let changed = false;
+    for (const [key, run] of this.running) {
+      this.requestCancel(key, run, forceAfterMs);
+      changed = true;
+    }
+    if (changed) this.emit();
+  }
+
+  cancelRuntime(runtimeName: string, forceAfterMs = DEFAULT_CANCEL_FORCE_MS): boolean {
     const run = this.running.get(runtimeName);
     if (!run) return false;
-    run.cancellation.cancel();
+    this.requestCancel(runtimeName, run, forceAfterMs);
     this.emit();
     return true;
   }
@@ -164,10 +212,18 @@ export class ExecutionController {
     let changed = false;
     const run = this.running.get(runtimeName);
     if (run) {
-      run.cancellation.cancel();
+      this.requestCancel(runtimeName, run, STOP_CANCEL_FORCE_MS);
       changed = true;
     }
 
+    changed = this.blockedRuntimes.delete(runtimeName) || changed;
+    changed = this.clearQueuedRuntime(runtimeName, false) || changed;
+    if (changed) this.emit();
+    return changed;
+  }
+
+  clearQueuedRuntime(runtimeName: string, emit = true): boolean {
+    let changed = this.blockedRuntimes.delete(runtimeName);
     const kept: QueueItem[] = [];
     for (const item of this.items) {
       if (this.runtimeKey(item) === runtimeName) {
@@ -180,31 +236,52 @@ export class ExecutionController {
       }
     }
     this.items = kept;
-
-    if (changed) this.emit();
+    if (changed && emit) this.emit();
     return changed;
   }
 
-  cancelRunning(id: number): boolean {
-    for (const run of this.running.values()) {
+  cancelRunning(id: number, forceAfterMs = DEFAULT_CANCEL_FORCE_MS): boolean {
+    for (const [key, run] of this.running) {
       if (this.itemId(run.item) !== id) continue;
-      run.cancellation.cancel();
+      this.requestCancel(key, run, forceAfterMs);
       this.emit();
       return true;
     }
     return false;
   }
 
+  forceClearRunning(id: number): boolean {
+    for (const [key, run] of this.running) {
+      if (this.itemId(run.item) !== id) continue;
+      this.requestCancel(key, run, 0, false);
+      this.forceFinishRun(key, run, "Cancelled", false);
+      return true;
+    }
+    return false;
+  }
+
+  forceClearRuntime(runtimeName: string): boolean {
+    const run = this.running.get(runtimeName);
+    if (!run) return false;
+    this.requestCancel(runtimeName, run, 0, false);
+    this.forceFinishRun(runtimeName, run, "Cancelled", false);
+    return true;
+  }
+
   cancelAll(): void {
-    this.cancelCurrent();
+    for (const [key, run] of this.running) {
+      this.requestCancel(key, run, STOP_CANCEL_FORCE_MS);
+    }
     this.cancelQueuedWebviews();
     this.items = [];
+    this.blockedRuntimes.clear();
     this.emit();
   }
 
   clear(): void {
     this.cancelQueuedWebviews();
     this.items = [];
+    this.blockedRuntimes.clear();
     this.emit();
   }
 
@@ -236,13 +313,13 @@ export class ExecutionController {
       return;
     }
 
-    for (const run of this.running.values()) {
+    for (const [key, run] of this.running) {
       if (
         run.item.kind === "webview" &&
         run.item.webviewPanel === webviewPanel &&
         run.item.id === id
       ) {
-        run.cancellation.cancel();
+        this.requestCancel(key, run, DEFAULT_CANCEL_FORCE_MS);
         this.emit();
         return;
       }
@@ -275,6 +352,67 @@ export class ExecutionController {
       void this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
     }
     return item;
+  }
+
+  private requestCancel(
+    key: string,
+    run: RunningExecution,
+    forceAfterMs: number,
+    notifyOnForce = true,
+  ): void {
+    run.state = "cancelling";
+    run.cancelRequestedAt ??= Date.now();
+    run.cancellation.cancel();
+
+    this.clearForceTimer(run);
+    if (forceAfterMs <= 0) return;
+
+    run.forceTimer = setTimeout(() => {
+      const current = this.running.get(key);
+      if (current !== run) return;
+      this.forceFinishRun(key, run, "Cancelled", notifyOnForce);
+    }, forceAfterMs);
+  }
+
+  private forceFinishRun(
+    key: string,
+    run: RunningExecution,
+    reason: string,
+    notify: boolean,
+  ): void {
+    const current = this.running.get(key);
+    if (current !== run) return;
+
+    this.clearForceTimer(run);
+    run.state = "stale";
+    run.cancellation.markLocallyFinalized();
+    this.finishLocalUi(run.item, reason);
+    this.running.delete(key);
+
+    if (notify) {
+      this.blockedRuntimes.add(key);
+      vscode.window.showWarningMessage(
+        `Rat: ${run.item.runtimeName} did not finish after interrupt; VS Code execution state was reset. Queued work for this runtime is paused until resumed, cleared, or restarted.`,
+      );
+    }
+
+    this.emit();
+    if (!notify) this.pump();
+  }
+
+  private finishLocalUi(item: QueueItem, reason: string): void {
+    if (item.kind === "source") {
+      clearRunning(item.editor);
+    } else if (item.kind === "webview") {
+      void this.postWebviewDone(item, false, "", reason, { message: reason });
+      item.onDidFinish?.();
+    }
+  }
+
+  private clearForceTimer(run: RunningExecution): void {
+    if (!run.forceTimer) return;
+    clearTimeout(run.forceTimer);
+    run.forceTimer = undefined;
   }
 
   private snapshotItem(
@@ -311,7 +449,7 @@ export class ExecutionController {
     for (let i = 0; i < this.items.length;) {
       const item = this.items[i];
       const key = this.runtimeKey(item);
-      if (this.running.has(key)) {
+      if (this.running.has(key) || this.blockedRuntimes.has(key)) {
         i++;
         continue;
       }
@@ -326,7 +464,7 @@ export class ExecutionController {
 
   private startItem(item: QueueItem, key: string): void {
     const cancellation = new RunCancellation();
-    this.running.set(key, { item, cancellation });
+    this.running.set(key, { item, cancellation, state: "running" });
     this.emit();
 
     void this.runItem(item, cancellation)
@@ -337,7 +475,10 @@ export class ExecutionController {
       })
       .finally(() => {
         const current = this.running.get(key);
-        if (current?.item === item) this.running.delete(key);
+        if (current?.item === item) {
+          this.clearForceTimer(current);
+          this.running.delete(key);
+        }
         this.emit();
         this.pump();
       });
@@ -390,6 +531,7 @@ export class ExecutionController {
     cancellation.setCancel(() => {
       client.abortCurrentRequest();
       void client.cancel();
+      void ratCancel(runtimeName).catch(() => {});
     });
     if (cancellation.cancelled) return;
 
@@ -427,7 +569,7 @@ export class ExecutionController {
       }, 200);
     };
 
-    const poll = setInterval(() => {
+    let poll: ReturnType<typeof setInterval> | null = setInterval(() => {
       if (cancellation.cancelled || promptActive) return;
       promptActive = true;
       void this.pollInput(client, () => {
@@ -438,6 +580,16 @@ export class ExecutionController {
         promptActive = false;
       });
     }, 300);
+    cancellation.onCancel(() => {
+      if (partialTimer) {
+        clearTimeout(partialTimer);
+        partialTimer = null;
+      }
+      if (poll) {
+        clearInterval(poll);
+        poll = null;
+      }
+    });
 
     try {
       const result = await client.run(cell.code, (chunk) => {
@@ -471,7 +623,7 @@ export class ExecutionController {
       );
     } finally {
       if (partialTimer) clearTimeout(partialTimer);
-      clearInterval(poll);
+      if (poll) clearInterval(poll);
     }
   }
 
@@ -485,6 +637,7 @@ export class ExecutionController {
     const lastLine = block.range.end.line;
 
     showRunning(editor, lastLine);
+    cancellation.onCancel(() => clearRunning(editor));
 
     let client: McpClient;
     try {
@@ -497,6 +650,7 @@ export class ExecutionController {
     cancellation.setCancel(() => {
       client.abortCurrentRequest();
       void client.cancel();
+      void ratCancel(runtimeName).catch(() => {});
     });
     if (cancellation.cancelled) {
       clearRunning(editor);
@@ -508,7 +662,7 @@ export class ExecutionController {
     // older kernels, but current rat servers push rat/output notifications.
     let streamedOutput = "";
     let promptActive = false;
-    const poll = setInterval(() => {
+    let poll: ReturnType<typeof setInterval> | null = setInterval(() => {
       if (cancellation.cancelled || promptActive) return;
       promptActive = true;
       void this.pollInput(client, () => {
@@ -517,6 +671,13 @@ export class ExecutionController {
         promptActive = false;
       });
     }, 300);
+    cancellation.onCancel(() => {
+      if (poll) {
+        clearInterval(poll);
+        poll = null;
+      }
+      clearRunning(editor);
+    });
 
     try {
       const result = await client.run(code, (chunk) => {
@@ -540,7 +701,7 @@ export class ExecutionController {
         showResult(editor, lastLine, cleaned, isError);
       }
     } finally {
-      clearInterval(poll);
+      if (poll) clearInterval(poll);
       clearRunning(editor);
     }
   }
@@ -555,6 +716,7 @@ export class ExecutionController {
     try {
       client = await getClient(item.runtimeName, item.cwd, item.lang);
     } catch (err: unknown) {
+      if (cancellation.locallyFinalized) return;
       const msg = err instanceof Error ? err.message : String(err);
       await this.postWebviewDone(item, false, "", msg, { message: msg });
       item.onDidFinish?.();
@@ -564,21 +726,30 @@ export class ExecutionController {
     cancellation.setCancel(() => {
       client.abortCurrentRequest();
       void client.cancel();
+      void ratCancel(item.runtimeName).catch(() => {});
     });
     if (cancellation.cancelled) {
-      await this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+      if (!cancellation.locallyFinalized) {
+        await this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+      }
       item.onDidFinish?.();
       return;
     }
 
     let promptActive = false;
-    const poll = setInterval(() => {
+    let poll: ReturnType<typeof setInterval> | null = setInterval(() => {
       if (cancellation.cancelled || promptActive) return;
       promptActive = true;
       void this.pollInput(client).finally(() => {
         promptActive = false;
       });
     }, 300);
+    cancellation.onCancel(() => {
+      if (poll) {
+        clearInterval(poll);
+        poll = null;
+      }
+    });
 
     try {
       const result = await client.run(item.code, (chunk) => {
@@ -589,16 +760,20 @@ export class ExecutionController {
         });
       });
       if (cancellation.cancelled) {
-        await this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+        if (!cancellation.locallyFinalized) {
+          await this.postWebviewDone(item, false, "", "Cancelled", { message: "Cancelled" });
+        }
         return;
       }
 
       await this.postWebviewDone(item, !result.isError, toolResultDisplayText(result), "");
     } catch (err: unknown) {
-      const msg = cancellation.cancelled ? "Cancelled" : err instanceof Error ? err.message : String(err);
-      await this.postWebviewDone(item, false, "", msg, { message: msg });
+      if (!cancellation.locallyFinalized) {
+        const msg = cancellation.cancelled ? "Cancelled" : err instanceof Error ? err.message : String(err);
+        await this.postWebviewDone(item, false, "", msg, { message: msg });
+      }
     } finally {
-      clearInterval(poll);
+      if (poll) clearInterval(poll);
       item.onDidFinish?.();
     }
   }

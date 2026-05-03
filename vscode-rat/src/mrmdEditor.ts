@@ -623,7 +623,7 @@ function configurationTarget(): vscode.ConfigurationTarget {
 function ratMarkdownAppearance(): RatMarkdownAppearance {
   const cfg = vscode.workspace.getConfiguration("rat");
   return {
-    pageMode: cfg.get<string>("markdownPageMode", "auto"),
+    pageMode: cfg.get<string>("markdownPageMode", "never"),
     themeAssociations: cfg.get<Record<string, string>>("markdownThemeAssociations", {
       light: "vscode-host-light",
       dark: "vscode-host-dark",

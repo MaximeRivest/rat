@@ -135,6 +135,10 @@ export async function ratRemove(name: string): Promise<void> {
   await exec(["remove", name]);
 }
 
+export async function ratCancel(name: string): Promise<void> {
+  await exec(["cancel", name], undefined, 10_000);
+}
+
 /**
  * Run `rat install <lang>` in the given directory.
  * Creates venv if needed, installs language deps (e.g. IPython + jedi),
@@ -408,7 +412,7 @@ export class McpClient {
 
   /** Abort the in-flight run request (if any). */
   abortCurrentRequest(): void {
-    this.activeRunReq?.destroy();
+    this.activeRunReq?.destroy(new Error("MCP run request aborted"));
     this.activeRunReq = null;
   }
 
@@ -527,11 +531,28 @@ export class McpClient {
       if (this.sessionId) hdrs["Mcp-Session-Id"] = this.sessionId;
 
       let req: http.ClientRequest;
+      let settled = false;
       const cleanup = () => {
         this.requests.delete(req);
         if (track === "run" && this.activeRunReq === req) {
           this.activeRunReq = null;
         }
+      };
+      const finishReject = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const finishResolve = (value: {
+        statusCode: number;
+        headers: http.IncomingHttpHeaders;
+        body: string;
+      }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
       };
 
       req = http.request(
@@ -548,6 +569,7 @@ export class McpClient {
 
           let data = "";
           let sseBuffer = "";
+          let ended = false;
           const isEventStream = res.headers["content-type"]
             ?.toString()
             .includes("text/event-stream") ?? false;
@@ -560,15 +582,24 @@ export class McpClient {
             }
           });
           res.on("end", () => {
+            ended = true;
             if (isEventStream && onNotification && sseBuffer.trim()) {
               drainSseEvents(sseBuffer + "\n\n", onNotification);
             }
-            cleanup();
-            resolve({
+            finishResolve({
               statusCode: res.statusCode ?? 0,
               headers: res.headers,
               body: data,
             });
+          });
+          res.on("aborted", () => {
+            finishReject(new Error("MCP response aborted"));
+          });
+          res.on("error", (err) => {
+            finishReject(err instanceof Error ? err : new Error(String(err)));
+          });
+          res.on("close", () => {
+            if (!ended) finishReject(new Error("MCP response closed before end"));
           });
         },
       );
@@ -581,8 +612,7 @@ export class McpClient {
         });
       }
       req.on("error", (err) => {
-        cleanup();
-        reject(err);
+        finishReject(err instanceof Error ? err : new Error(String(err)));
       });
       req.write(body);
       req.end();

@@ -43,7 +43,11 @@ import {
   stopRuntimeCmd,
   restartRuntimeCmd,
   removeRuntimeCmd,
+  interruptRuntimeCmd,
+  clearRuntimeQueueCmd,
+  resumeRuntimeQueueCmd,
   interruptQueueItemCmd,
+  forceClearQueueItemCmd,
   removeQueuedItemCmd,
 } from "./runtimeView";
 import { showRuntimePicker } from "./runtimePicker";
@@ -363,8 +367,15 @@ export function activate(ctx: vscode.ExtensionContext): void {
     if (typeof n?.runtimeName === "string") queue.clearRuntime(n.runtimeName);
     return restartRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); });
   });
-  reg("rat.removeRuntime", (n: any) => removeRuntimeCmd(n).then(() => treeProvider.refresh()));
+  reg("rat.removeRuntime", (n: any) => {
+    if (typeof n?.runtimeName === "string") queue.clearRuntime(n.runtimeName);
+    return removeRuntimeCmd(n).then(() => { disposeAll(); treeProvider.refresh(); });
+  });
+  reg("rat.interruptRuntime", (n: any) => { interruptRuntimeCmd(queue, n); treeProvider.refresh(); });
+  reg("rat.clearRuntimeQueue", (n: any) => { clearRuntimeQueueCmd(queue, n); treeProvider.refresh(); });
+  reg("rat.resumeRuntimeQueue", (n: any) => { resumeRuntimeQueueCmd(queue, n); treeProvider.refresh(); });
   reg("rat.interruptQueueItem", (n: any) => { interruptQueueItemCmd(queue, n); treeProvider.refresh(); });
+  reg("rat.forceClearQueueItem", (n: any) => { forceClearQueueItemCmd(queue, n); treeProvider.refresh(); });
   reg("rat.removeQueuedItem", (n: any) => { removeQueuedItemCmd(queue, n); treeProvider.refresh(); });
   reg("rat.addRuntime", async () => { await showRuntimePicker(); treeProvider.refresh(); });
 }
@@ -963,6 +974,7 @@ async function stopKernelCmd(): Promise<void> {
     queue.clearRuntime(name);
     await ratStop(name);
     disposeAll();
+    treeProvider.refresh();
     vscode.window.showInformationMessage(`Rat: ${name} stopped`);
   } catch {
     /* swallow */
@@ -1017,6 +1029,7 @@ async function restartKernelCmd(): Promise<void> {
     queue.clearRuntime(name);
     disposeAll();
     await ratRestart(name, cwd);
+    treeProvider.refresh();
     vscode.window.showInformationMessage(`Rat: ${name} restarted`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -127,9 +127,29 @@
         "title": "Rat: Cancel Execution"
       },
       {
+        "command": "rat.interruptRuntime",
+        "title": "Rat: Interrupt Current Runtime Job",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "rat.clearRuntimeQueue",
+        "title": "Rat: Clear Runtime Queue",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "rat.resumeRuntimeQueue",
+        "title": "Rat: Resume Runtime Queue",
+        "icon": "$(debug-continue)"
+      },
+      {
         "command": "rat.interruptQueueItem",
         "title": "Rat: Interrupt Queue Item",
-        "icon": "$(debug-stop)"
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "rat.forceClearQueueItem",
+        "title": "Rat: Force Clear Queue Item",
+        "icon": "$(trash)"
       },
       {
         "command": "rat.removeQueuedItem",
@@ -295,18 +315,38 @@
           "group": "inline"
         },
         {
-          "command": "rat.stopRuntime",
+          "command": "rat.interruptRuntime",
           "when": "view == ratRuntimes && viewItem == runningKernel",
-          "group": "inline"
+          "group": "inline@1"
+        },
+        {
+          "command": "rat.stopRuntime",
+          "when": "view == ratRuntimes && (viewItem == runningKernel || viewItem == blockedRuntime)",
+          "group": "inline@2"
         },
         {
           "command": "rat.restartRuntime",
-          "when": "view == ratRuntimes && viewItem == runningKernel",
-          "group": "inline"
+          "when": "view == ratRuntimes && (viewItem == runningKernel || viewItem == blockedRuntime)",
+          "group": "inline@3"
+        },
+        {
+          "command": "rat.resumeRuntimeQueue",
+          "when": "view == ratRuntimes && viewItem == blockedRuntime",
+          "group": "inline@1"
+        },
+        {
+          "command": "rat.clearRuntimeQueue",
+          "when": "view == ratRuntimes && (viewItem == runningKernel || viewItem == savedRuntime || viewItem == queuedRuntime || viewItem == blockedRuntime)",
+          "group": "1_queue"
         },
         {
           "command": "rat.interruptQueueItem",
           "when": "view == ratRuntimes && viewItem == queueRunning",
+          "group": "inline"
+        },
+        {
+          "command": "rat.forceClearQueueItem",
+          "when": "view == ratRuntimes && viewItem == queueCancelling",
           "group": "inline"
         },
         {
@@ -316,7 +356,7 @@
         },
         {
           "command": "rat.removeRuntime",
-          "when": "view == ratRuntimes && viewItem == runningKernel",
+          "when": "view == ratRuntimes && (viewItem == runningKernel || viewItem == blockedRuntime)",
           "group": "2_modify"
         },
         {
@@ -413,8 +453,8 @@
             "always",
             "never"
           ],
-          "default": "auto",
-          "description": "Controls page-style presentation in the Rat Markdown editor. 'auto' centers content on a paper-like page when there is enough width, 'always' forces it, and 'never' keeps the continuous editor surface."
+          "default": "never",
+          "description": "Controls page-style presentation in the Rat Markdown editor. 'never' keeps a full-width continuous editor surface like VS Code's Markdown preview, 'auto' centers content on a paper-like page when there is enough width, and 'always' forces page mode."
         },
         "rat.markdownThemeAssociations": {
           "type": "object",
