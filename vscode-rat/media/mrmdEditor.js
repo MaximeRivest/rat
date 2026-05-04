@@ -11,7 +11,7 @@
   let editor = null;
   let unwatchTheme = null;
   let unwatchPageMode = null;
-  let pageModePreference = "auto";
+  let pageModePreference = "never";
   let themeAssociations = defaultThemeAssociations();
   let pageCanvasBackground = "auto";
   let markdownFontScale = 1;
@@ -40,7 +40,7 @@
   const HOST_THEME_OVERRIDES = {
     "--widget-font-mono": "var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace)",
     "--widget-font-sans": "var(--vscode-font-family, system-ui, sans-serif)",
-    "--editor-font-family": "var(--vscode-editor-font-family, var(--vscode-font-family, system-ui, sans-serif))",
+    "--editor-font-family": "var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, sans-serif)",
     "--editor-font-size": "var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px))",
     "--editor-background": "var(--vscode-editor-background)",
     "--editor-foreground": "var(--vscode-editor-foreground)",
@@ -178,7 +178,7 @@
   }
 
   function normalizePageMode(value) {
-    return value === "always" || value === "never" || value === "auto" ? value : "auto";
+    return value === "always" || value === "never" || value === "auto" ? value : "never";
   }
 
   function normalizeCanvasBackground(value) {
@@ -258,6 +258,58 @@
     return () => observer.disconnect();
   }
 
+  function createCodeCellGapExtension() {
+    const cm = window.mrmd && window.mrmd.codemirror;
+    if (!cm?.StateField || !cm?.EditorView || !cm?.Decoration || !cm?.WidgetType || !cm?.syntaxTree) return [];
+
+    class CodeCellGapWidget extends cm.WidgetType {
+      eq() {
+        return true;
+      }
+
+      toDOM() {
+        const el = document.createElement("div");
+        el.className = "rat-code-cell-gap";
+        el.setAttribute("aria-hidden", "true");
+        return el;
+      }
+
+      ignoreEvent() {
+        return false;
+      }
+    }
+
+    function build(state) {
+      const decorations = [];
+      const tree = cm.syntaxTree(state);
+      tree.iterate({
+        enter: (node) => {
+          if (node.name !== "FencedCode") return;
+          const line = state.doc.lineAt(node.to);
+          if (line.to >= state.doc.length) return false;
+          decorations.push(
+            cm.Decoration.widget({
+              widget: new CodeCellGapWidget(),
+              block: true,
+              side: 1,
+            }).range(line.to)
+          );
+          return false;
+        },
+      });
+      return cm.Decoration.set(decorations, true);
+    }
+
+    return cm.StateField.define({
+      create: build,
+      update(value, tr) {
+        if (tr.docChanged || tr.selection || tr.reconfigured) return build(tr.state);
+        return value;
+      },
+      provide: (field) => cm.EditorView.decorations.from(field),
+    });
+  }
+
   function createHostDocumentTemplate() {
     return {
       name: "VS Code",
@@ -274,7 +326,7 @@
       },
       body: {
         color: "var(--vscode-editor-foreground)",
-        fontFamily: "var(--vscode-editor-font-family, var(--vscode-font-family, system-ui, sans-serif))",
+        fontFamily: "var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, sans-serif)",
         fontSize: "var(--rat-markdown-font-size, var(--vscode-editor-font-size, 14px))",
         lineHeight: "1.6",
       },
@@ -313,6 +365,30 @@
           outputBorderColor: "var(--vscode-editorWidget-border, var(--vscode-panel-border))",
           outputFontFamily: "var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace)",
         },
+        highlight: {
+          keyword: "var(--syntax-keyword)",
+          controlKeyword: "var(--syntax-control)",
+          string: "var(--syntax-string)",
+          number: "var(--syntax-number)",
+          comment: "var(--syntax-comment)",
+          function: "var(--syntax-function)",
+          variable: "var(--syntax-variable)",
+          type: "var(--syntax-type)",
+          operator: "var(--syntax-operator)",
+          punctuation: "var(--syntax-punctuation)",
+          property: "var(--syntax-property)",
+          constant: "var(--syntax-constant)",
+          regexp: "var(--syntax-string)",
+          escape: "var(--syntax-string)",
+          tag: "var(--syntax-tag)",
+          attribute: "var(--syntax-attribute)",
+          attributeValue: "var(--syntax-string)",
+          meta: "var(--syntax-meta)",
+          inserted: "var(--widget-success)",
+          deleted: "var(--widget-error)",
+          changed: "var(--widget-warning)",
+          commentStyle: "italic",
+        },
       },
       table: {
         borderColor: "var(--vscode-editorWidget-border, var(--vscode-panel-border))",
@@ -337,13 +413,18 @@
   --rat-page-shadow: 0 18px 60px rgba(15, 23, 42, 0.14);
   --rat-markdown-font-size: var(--vscode-editor-font-size, 14px);
   --rat-markdown-code-font-size: calc(var(--rat-markdown-font-size) * 0.92);
+  --rat-code-cell-padding-x: 14px;
+  --rat-code-cell-gap-y: 0.75em;
+  --rat-output-inset-left: var(--rat-code-cell-padding-x);
+  --rat-output-padding-x: 14px;
   --editor-background: var(--vscode-editor-background);
   --editor-foreground: var(--vscode-editor-foreground);
   --editor-cursor: var(--vscode-editorCursor-foreground);
   --editor-selection: var(--vscode-editor-selectionBackground);
   --editor-active-line: var(--vscode-editor-lineHighlightBackground, transparent);
   --widget-font-mono: var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace);
-  --widget-font-sans: var(--vscode-font-family, system-ui, sans-serif);
+  --widget-font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, sans-serif);
+  --editor-font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, sans-serif);
   --widget-text: var(--vscode-editor-foreground);
   --widget-text-muted: var(--vscode-descriptionForeground);
   --widget-text-accent: var(--vscode-textLink-foreground);
@@ -363,6 +444,23 @@
   --mrmd-active-bg: var(--vscode-list-activeSelectionBackground, var(--widget-surface-hover));
   --mrmd-selection-bg: var(--vscode-editor-selectionBackground);
   --mrmd-accent: var(--vscode-focusBorder, var(--vscode-textLink-foreground));
+  --syntax-keyword: var(--vscode-symbolIcon-keywordForeground, var(--vscode-charts-purple, var(--vscode-editor-foreground)));
+  --syntax-control: var(--vscode-symbolIcon-keywordForeground, var(--vscode-charts-purple, var(--vscode-editor-foreground)));
+  --syntax-string: var(--vscode-symbolIcon-stringForeground, var(--vscode-charts-green, var(--vscode-editor-foreground)));
+  --syntax-number: var(--vscode-symbolIcon-numberForeground, var(--vscode-charts-orange, var(--vscode-editor-foreground)));
+  --syntax-comment: var(--vscode-editorCodeLens-foreground, var(--vscode-descriptionForeground));
+  --syntax-function: var(--vscode-symbolIcon-functionForeground, var(--vscode-charts-blue, var(--vscode-editor-foreground)));
+  --syntax-variable: var(--vscode-symbolIcon-variableForeground, var(--vscode-editor-foreground));
+  --syntax-variable-special: var(--vscode-symbolIcon-variableForeground, var(--vscode-editor-foreground));
+  --syntax-property: var(--vscode-symbolIcon-propertyForeground, var(--vscode-editor-foreground));
+  --syntax-operator: var(--vscode-symbolIcon-operatorForeground, var(--vscode-editor-foreground));
+  --syntax-punctuation: var(--vscode-editor-foreground);
+  --syntax-type: var(--vscode-symbolIcon-classForeground, var(--vscode-charts-blue, var(--vscode-editor-foreground)));
+  --syntax-class: var(--vscode-symbolIcon-classForeground, var(--vscode-charts-blue, var(--vscode-editor-foreground)));
+  --syntax-constant: var(--vscode-symbolIcon-constantForeground, var(--vscode-charts-orange, var(--vscode-editor-foreground)));
+  --syntax-tag: var(--vscode-symbolIcon-structForeground, var(--vscode-charts-blue, var(--vscode-editor-foreground)));
+  --syntax-attribute: var(--vscode-symbolIcon-propertyForeground, var(--vscode-editor-foreground));
+  --syntax-meta: var(--vscode-descriptionForeground);
   --md-heading-color: var(--vscode-editor-foreground);
   --md-link-color: var(--vscode-textLink-foreground);
   --md-code-background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent));
@@ -378,6 +476,53 @@
 #editor .cm-scroller {
   background: var(--vscode-editor-background) !important;
   color: var(--vscode-editor-foreground) !important;
+}
+
+#editor:not(.mrmd-presentation-page) .cm-content {
+  padding: 18px 32px 48px 32px;
+}
+
+#editor .cm-md-h1 {
+  font-size: 2em;
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+#editor .cm-md-h2 {
+  font-size: 1.5em;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+#editor .cm-line:has(.cm-md-h1),
+#editor .cm-line:has(.cm-md-h2) {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)));
+}
+
+#editor .cm-md-h3 {
+  font-size: 1.25em;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+#editor .cm-md-h4 {
+  font-size: 1em;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+#editor .cm-md-h5 {
+  font-size: 0.875em;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+#editor .cm-md-h6 {
+  font-size: 0.85em;
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
 }
 
 #editor.mrmd-presentation-page {
@@ -400,6 +545,7 @@
 }
 
 #editor .cm-content {
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, sans-serif);
   font-size: var(--rat-markdown-font-size);
 }
 
@@ -409,6 +555,244 @@
 #editor .cm-cell-output,
 #editor .mrmd-output {
   font-size: var(--rat-markdown-code-font-size);
+}
+
+#editor .cm-md-inline-code {
+  background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 16%, transparent)) !important;
+  padding: 0.12em 0.32em !important;
+  border-radius: 3px !important;
+}
+
+#editor .cm-codeblock-line .cm-dt-keyword,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-keyword { color: var(--syntax-keyword) !important; }
+#editor .cm-codeblock-line .cm-dt-control-keyword,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-control-keyword { color: var(--syntax-control) !important; }
+#editor .cm-codeblock-line .cm-dt-string,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-string,
+#editor .cm-codeblock-line .cm-dt-regexp,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-regexp,
+#editor .cm-codeblock-line .cm-dt-escape,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-escape,
+#editor .cm-codeblock-line .cm-dt-attribute-value,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-attribute-value { color: var(--syntax-string) !important; }
+#editor .cm-codeblock-line .cm-dt-number,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-number { color: var(--syntax-number) !important; }
+#editor .cm-codeblock-line .cm-dt-comment,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-comment { color: var(--syntax-comment) !important; font-style: italic !important; }
+#editor .cm-codeblock-line .cm-dt-function,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-function { color: var(--syntax-function) !important; }
+#editor .cm-codeblock-line .cm-dt-variable,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-variable { color: var(--syntax-variable) !important; }
+#editor .cm-codeblock-line .cm-dt-type,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-type { color: var(--syntax-type) !important; }
+#editor .cm-codeblock-line .cm-dt-operator,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-operator { color: var(--syntax-operator) !important; }
+#editor .cm-codeblock-line .cm-dt-punctuation,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-punctuation { color: var(--syntax-punctuation) !important; }
+#editor .cm-codeblock-line .cm-dt-property,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-property,
+#editor .cm-codeblock-line .cm-dt-attribute,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-attribute { color: var(--syntax-property) !important; }
+#editor .cm-codeblock-line .cm-dt-constant,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-constant { color: var(--syntax-constant) !important; }
+#editor .cm-codeblock-line .cm-dt-tag,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-tag { color: var(--syntax-tag) !important; }
+#editor .cm-codeblock-line .cm-dt-meta,
+#editor .cm-wysiwyg-code-fence-line .cm-dt-meta { color: var(--syntax-meta) !important; }
+
+#editor .cm-codeblock-line,
+#editor .cm-codeblock-fence,
+#editor .cm-wysiwyg-code-fence-line {
+  box-shadow: inset 0 0 0 9999px var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent)) !important;
+}
+
+#editor .cm-codeblock-line,
+#editor .cm-wysiwyg-code-fence-line:not(.cm-wysiwyg-code-fence-start):not(.cm-wysiwyg-code-fence-end) {
+  padding-left: var(--rat-code-cell-padding-x, 14px);
+  padding-right: var(--rat-code-cell-padding-x, 14px);
+  line-height: 1.45;
+}
+
+#editor .cm-codeblock-fence,
+#editor .cm-codeblock-line,
+#editor .cm-wysiwyg-code-fence-start,
+#editor .cm-wysiwyg-code-fence-line,
+#editor .cm-wysiwyg-code-fence-end {
+  border-left: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)));
+  border-right: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)));
+}
+
+#editor .cm-codeblock-fence-open:not(.cm-output-fence-line):not(.cm-output-fence-editing) {
+  position: relative;
+  min-height: 1.45em !important;
+  line-height: 1.45 !important;
+  overflow: hidden !important;
+  padding-right: 104px;
+  border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-bottom: 0 !important;
+  border-radius: 3px 3px 0 0;
+}
+
+#editor .cm-codeblock-fence-open:not(.cm-output-fence-line):not(.cm-output-fence-editing) .cm-cell-controls {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  margin-left: 0;
+}
+
+#editor .cm-codeblock-fence-close:not(.cm-output-fence-line):not(.cm-output-fence-editing) {
+  min-height: 1.45em !important;
+  line-height: 1.45 !important;
+  overflow: hidden !important;
+  border-top: 0 !important;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-radius: 0 0 3px 3px;
+}
+
+#editor .rat-code-cell-gap {
+  height: var(--rat-code-cell-gap-y, 0.75em);
+  background: var(--vscode-editor-background) !important;
+  pointer-events: none;
+  user-select: none;
+}
+
+#editor .cm-wysiwyg-code-header {
+  min-height: 0;
+  height: 6px;
+  padding: 0;
+  border-bottom: 0 !important;
+  background: transparent !important;
+  overflow: hidden;
+}
+
+#editor .cm-wysiwyg-code-header-lang {
+  padding: 0 4px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-size: 11px;
+}
+
+#editor .cm-wysiwyg-code-header-btn {
+  width: 20px;
+  height: 20px;
+  opacity: 0.45;
+}
+
+#editor .cm-wysiwyg-code-header:hover .cm-wysiwyg-code-header-btn {
+  opacity: 1;
+}
+
+#editor .cm-codeblock-fence:not(.cm-activeLine):not(.cm-output-fence-line):not(.cm-output-fence-editing) {
+  color: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent)) !important;
+}
+
+#editor .cm-codeblock-fence.cm-activeLine:not(.cm-output-fence-line):not(.cm-output-fence-editing) {
+  color: var(--vscode-descriptionForeground) !important;
+}
+
+#editor .cm-wysiwyg-code-fence-start .cm-wysiwyg-code-header-lang,
+#editor .cm-wysiwyg-code-fence-start .cm-wysiwyg-code-header-btn {
+  opacity: 0;
+}
+
+#editor .cm-output-fence-line {
+  height: 0 !important;
+  min-height: 0 !important;
+  line-height: 0 !important;
+  font-size: 1px !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: transparent !important;
+}
+
+#editor .cm-output-fence-rich-start {
+  height: auto !important;
+  min-height: 0 !important;
+  line-height: 0 !important;
+  overflow: visible !important;
+}
+
+#editor .cm-output-content-line:not(.cm-rich-output-hidden) {
+  margin-left: var(--rat-output-inset-left, 14px) !important;
+  margin-right: 0 !important;
+  padding-left: var(--rat-output-padding-x, 14px) !important;
+  padding-right: var(--rat-output-padding-x, 14px) !important;
+  background: transparent !important;
+  box-shadow: inset 0 0 0 9999px var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent)) !important;
+  border-left: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-right: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  color: var(--vscode-descriptionForeground, var(--vscode-editor-foreground)) !important;
+  opacity: 0.9;
+}
+
+#editor .cm-output-fence-start + .cm-output-content-line:not(.cm-rich-output-hidden) {
+  padding-top: 0.45em !important;
+  border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+
+#editor .cm-output-content-line:not(.cm-rich-output-hidden):has(+ .cm-output-fence-end) {
+  padding-bottom: 0.45em !important;
+  border-bottom: var(--rat-code-cell-gap-y, 0.75em) solid transparent !important;
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+
+#editor .cm-output-content-line.cm-rich-output-hidden {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+#editor .cm-output-fence-editing {
+  margin-left: var(--rat-output-inset-left, 14px) !important;
+  margin-right: 0 !important;
+  padding-left: var(--rat-output-padding-x, 14px) !important;
+  padding-right: var(--rat-output-padding-x, 14px) !important;
+  background: transparent !important;
+  box-shadow: inset 0 0 0 9999px var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent)) !important;
+  border-left: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-right: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  color: var(--vscode-descriptionForeground, var(--vscode-editor-foreground)) !important;
+  opacity: 0.72;
+}
+
+#editor .cm-output-fence-start-editing {
+  padding-top: 0.35em !important;
+  border-top: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent))) !important;
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+
+#editor .cm-output-fence-end-editing {
+  padding-bottom: 0.35em !important;
+  border-bottom: var(--rat-code-cell-gap-y, 0.75em) solid transparent !important;
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+
+#editor .cm-output-widget,
+#editor .cm-empty-output-widget {
+  left: var(--rat-output-inset-left, 14px) !important;
+  right: 0 !important;
+}
+
+#editor .cm-scroll-output-widget,
+#editor .cm-json-output-widget,
+#editor .cm-html-output-widget,
+#editor .cm-css-output-widget {
+  left: auto !important;
+  margin-left: var(--rat-output-inset-left, 14px) !important;
+  margin-right: 0 !important;
 }
 
 #editor .cm-cursor,
@@ -911,23 +1295,22 @@
       documentStylePreview: true,
       documentPresentationMode: "flow",
       themingMode: "hosted",
+      outputWidgets: false,
       projectRoot: message.projectRoot || null,
       documentPath: message.documentPath || null,
       userName: "VS Code",
     });
 
-    if (
-      message.docDirWebviewUri &&
-      window.mrmd.codemirror &&
-      window.mrmd.codemirror.StateEffect &&
-      window.mrmd.markdown &&
-      window.mrmd.markdown.assetResolverFacet
-    ) {
-      editor.view.dispatch({
-        effects: window.mrmd.codemirror.StateEffect.appendConfig.of(
-          window.mrmd.markdown.assetResolverFacet.of(createAssetResolver(message.docDirWebviewUri))
-        ),
-      });
+    if (window.mrmd.codemirror?.StateEffect) {
+      const extraExtensions = [createCodeCellGapExtension()].filter(Boolean);
+      if (message.docDirWebviewUri && window.mrmd.markdown?.assetResolverFacet) {
+        extraExtensions.push(window.mrmd.markdown.assetResolverFacet.of(createAssetResolver(message.docDirWebviewUri)));
+      }
+      if (extraExtensions.length) {
+        editor.view.dispatch({
+          effects: window.mrmd.codemirror.StateEffect.appendConfig.of(extraExtensions),
+        });
+      }
     }
 
     installHostThemeStyle();

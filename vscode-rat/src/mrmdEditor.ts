@@ -493,16 +493,7 @@ export class RatMrmdEditorProvider implements vscode.CustomTextEditorProvider {
     }
 
     #toolbar {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      min-height: 30px;
-      padding: 0 10px;
-      border-bottom: 1px solid var(--vscode-editorWidget-border, transparent);
-      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
-      color: var(--vscode-sideBar-foreground, var(--vscode-editor-foreground));
-      font-size: 12px;
-      user-select: none;
+      display: none;
     }
 
     #toolbar .spacer { flex: 1; }
