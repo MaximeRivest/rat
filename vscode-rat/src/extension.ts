@@ -57,6 +57,12 @@ import { applyDecorations, disposeDecorations } from "./decorations";
 import { RatVariablesViewProvider } from "./variablesView";
 import { initRatInstaller, installRatCliCommand, ratTerminalCommand } from "./installRat";
 import { RatSnippetProvider, CELL_SNIPPETS } from "./snippets";
+import {
+  installPiratToolsCommand,
+  openPiratFullscreen,
+  promptInstallPiratToolsIfNeeded,
+  registerPiratUriHandler,
+} from "./piratTools";
 import { detectFileLang, isRatFile } from "./langDetect";
 import { blockAtCursor, nextBlock, allBlocks } from "./blocks";
 import {
@@ -145,16 +151,21 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const treeView = vscode.window.createTreeView("ratRuntimes", {
     treeDataProvider: treeProvider,
   });
-  treeProvider.startAutoRefresh(4000);
-  ctx.subscriptions.push(treeView);
+  const syncRuntimeTreeRefresh = () => {
+    if (treeView.visible) treeProvider.startAutoRefresh(4000);
+    else treeProvider.stopAutoRefresh();
+  };
+  syncRuntimeTreeRefresh();
+  ctx.subscriptions.push(treeView, treeView.onDidChangeVisibility(syncRuntimeTreeRefresh));
 
   inspectorProvider = new RatInspectorViewProvider();
   variablesProvider = new RatVariablesViewProvider();
-  const piSessionProvider = new PiSessionMrmdEditor(ctx, queue);
+  const piSessionProvider = new PiSessionMrmdEditor(ctx, queue, () => promptInstallPiratToolsIfNeeded(ctx));
   ctx.subscriptions.push(
     inspectorProvider,
     variablesProvider,
     piSessionProvider,
+    registerPiratUriHandler(ctx, piSessionProvider),
     vscode.window.registerWebviewViewProvider("ratInspector", inspectorProvider),
     vscode.window.registerWebviewViewProvider("ratVariables", variablesProvider),
     vscode.window.registerWebviewViewProvider(PiSessionMrmdEditor.viewType, piSessionProvider, { webviewOptions: { retainContextWhenHidden: true } }),
@@ -345,6 +356,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
   reg("rat.insertCell", insertCellCmd);
   reg("rat.clearOutputs", clearOutputsCmd);
   reg("rat.installCli", installRatCliCommand);
+  reg("rat.installPiratTools", () => installPiratToolsCommand(ctx));
+  reg("rat.openPiratFullscreen", (uri?: vscode.Uri) => openPiratFullscreen(piSessionProvider, uri));
   reg("rat.openRenderedMarkdown", openRenderedMarkdownEditor);
   reg("rat.openMarkdownPreview", openRenderedMarkdownEditor);
   reg("rat.enableMarkdownPreviewReplacement", () => setMarkdownPreviewShortcutReplacement(true));

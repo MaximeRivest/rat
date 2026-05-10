@@ -112,6 +112,19 @@
     "--md-marker-color": "var(--vscode-descriptionForeground)",
     "--md-list-marker-color": "var(--vscode-descriptionForeground)",
     "--md-hr-color": "var(--vscode-panel-border, var(--widget-border))",
+    "--md-table-bg": "transparent",
+    "--md-table-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)))",
+    "--md-table-row-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)))",
+    "--md-table-header-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 24%, transparent)))",
+    "--md-table-header-bg": "var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent))",
+    "--md-table-stripe-bg": "color-mix(in srgb, var(--vscode-editor-foreground) 2.5%, transparent)",
+    "--md-table-hover-bg": "var(--vscode-list-hoverBackground, color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent))",
+    "--md-table-cell-padding": "0.42em 0.75em",
+    "--md-math-syntax-color": "var(--vscode-descriptionForeground)",
+    "--md-math-fallback-bg": "var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent))",
+    "--md-math-fallback-color": "var(--vscode-editor-foreground)",
+    "--md-math-inline-size": "1em",
+    "--md-math-display-size": "1.08em",
   };
 
   function setStatus(text) {
@@ -391,10 +404,21 @@
         },
       },
       table: {
-        borderColor: "var(--vscode-editorWidget-border, var(--vscode-panel-border))",
-        headerBackground: "var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent))",
+        borderColor: "var(--md-table-border)",
+        headerBackground: "var(--md-table-header-bg)",
         headerColor: "var(--vscode-editor-foreground)",
+        headerFontWeight: "600",
+        cellPadding: "var(--md-table-cell-padding)",
         color: "var(--vscode-editor-foreground)",
+        stripedRows: "even",
+        stripedColor: "var(--md-table-stripe-bg)",
+      },
+      math: {
+        color: "var(--vscode-editor-foreground)",
+        fontSize: "var(--md-math-inline-size, 1em)",
+        displayBackground: "var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent))",
+        displayPadding: "0.65em 0.85em",
+        displayBorderRadius: "4px",
       },
       hr: {
         color: "var(--vscode-panel-border, var(--vscode-editorWidget-border))",
@@ -470,6 +494,19 @@
   --md-marker-color: var(--vscode-descriptionForeground);
   --md-list-marker-color: var(--vscode-descriptionForeground);
   --md-hr-color: var(--vscode-panel-border, var(--widget-border));
+  --md-table-bg: transparent;
+  --md-table-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)));
+  --md-table-row-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)));
+  --md-table-header-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 24%, transparent)));
+  --md-table-header-bg: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent));
+  --md-table-stripe-bg: color-mix(in srgb, var(--vscode-editor-foreground) 2.5%, transparent);
+  --md-table-hover-bg: var(--vscode-list-hoverBackground, color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent));
+  --md-table-cell-padding: 0.42em 0.75em;
+  --md-math-syntax-color: var(--vscode-descriptionForeground);
+  --md-math-fallback-bg: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent));
+  --md-math-fallback-color: var(--vscode-editor-foreground);
+  --md-math-inline-size: 1em;
+  --md-math-display-size: 1.08em;
 }
 
 #editor .cm-editor,
@@ -561,6 +598,74 @@
   background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 16%, transparent)) !important;
   padding: 0.12em 0.32em !important;
   border-radius: 3px !important;
+}
+
+#editor .cm-table-widget,
+#editor .cm-linked-table-widget {
+  background: transparent !important;
+  color: var(--vscode-editor-foreground) !important;
+}
+
+#editor table,
+#editor .cm-table {
+  max-width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
+  color: var(--vscode-editor-foreground) !important;
+  background: transparent !important;
+}
+
+#editor th,
+#editor td,
+#editor .cm-table th,
+#editor .cm-table td {
+  border-color: var(--md-table-border) !important;
+  padding: var(--md-table-cell-padding) !important;
+  vertical-align: top;
+  color: var(--vscode-editor-foreground) !important;
+}
+
+#editor th,
+#editor .cm-table th {
+  font-weight: 600;
+  background: var(--md-table-header-bg) !important;
+  border-bottom-color: var(--md-table-header-border) !important;
+}
+
+#editor tr:nth-child(even) td,
+#editor .cm-table tbody tr:nth-child(even) td {
+  background: var(--md-table-stripe-bg) !important;
+}
+
+#editor .cm-table tbody tr:hover td {
+  background: var(--md-table-hover-bg) !important;
+}
+
+#editor .math-inline,
+#editor .math-block,
+#editor .cm-md-math,
+#editor .cm-md-math-block {
+  font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  color: var(--vscode-editor-foreground) !important;
+}
+
+#editor .math-inline,
+#editor .cm-md-math {
+  background: color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent);
+  border-radius: 4px;
+  padding: 0.02em 0.24em;
+}
+
+#editor .math-block,
+#editor .cm-md-math-block {
+  display: block;
+  margin: 0.75em 0;
+  padding: 0.65em 0.85em;
+  overflow-x: auto;
+  text-align: center;
+  background: color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent);
+  border-radius: 4px;
 }
 
 #editor details {

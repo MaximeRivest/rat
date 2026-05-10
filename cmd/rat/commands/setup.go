@@ -130,7 +130,7 @@ func runSetup() error {
 	}
 	if st.installPi {
 		step++
-		fmt.Printf("  %d. Install pi (coding agent)  %s\n", step, s.Dim("npm install -g @mariozechner/pi-coding-agent"))
+		fmt.Printf("  %d. Install pi (coding agent)  %s\n", step, s.Dim("npm install -g @earendil-works/pi-coding-agent"))
 	}
 	if st.installTmux {
 		step++
@@ -306,7 +306,7 @@ func detect() *setupState {
 	st.nodePath, _ = exec.LookPath("node")
 	st.npmPath, _ = exec.LookPath("npm")
 
-	// pi — the coding agent harness (@mariozechner/pi-coding-agent)
+	// pi — the coding agent harness (@earendil-works/pi-coding-agent)
 	st.piPath, _ = exec.LookPath("pi")
 
 	// Shell
@@ -535,7 +535,7 @@ func doInstallPi(npmPath string) error {
 	if npmPath == "" {
 		return fmt.Errorf("npm not found — install Node.js first")
 	}
-	return execCmd(npmPath, "install", "-g", "@mariozechner/pi-coding-agent")
+	return execCmd(npmPath, "install", "-g", "@earendil-works/pi-coding-agent")
 }
 
 func doInstallTmux() error {

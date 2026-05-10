@@ -31,6 +31,6 @@ install:
   check_commands: [tmux]
   runtime:
     manager: npm
-    deps: ["@mariozechner/pi-coding-agent"]
+    deps: ["@earendil-works/pi-coding-agent"]
   smoke:
     ctl: status

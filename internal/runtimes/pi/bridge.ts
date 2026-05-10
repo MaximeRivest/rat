@@ -12,7 +12,7 @@
 //      and appends <id>\t0 to control.log
 //   5. Go kernel reads the result and returns it via MCP
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   writeFileSync,
   readFileSync,

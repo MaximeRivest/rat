@@ -206,6 +206,9 @@ export interface RatState {
   runtimes: SavedRuntime[];
 }
 
+let stateCache: { path: string; mtimeMs: number; readAt: number; state: RatState } | null = null;
+const STATE_CACHE_TTL_MS = 500;
+
 export interface ResolvedRuntimeInfo {
   name: string;
   lang: string;
@@ -219,13 +222,27 @@ export interface ResolvedRuntimeInfo {
 
 /** Read the full state file (running kernels + saved runtimes). */
 export function readState(): RatState {
+  const file = stateFilePath();
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    stateCache = null;
+    return { kernels: [], runtimes: [] };
+  }
+
+  const now = Date.now();
+  if (stateCache && stateCache.path === file && stateCache.mtimeMs === stat.mtimeMs && now - stateCache.readAt < STATE_CACHE_TTL_MS) {
+    return stateCache.state;
+  }
+
   let content: string;
   try {
-    content = fs.readFileSync(stateFilePath(), "utf-8");
+    content = fs.readFileSync(file, "utf-8");
   } catch {
     return { kernels: [], runtimes: [] };
   }
-  return {
+  const state = {
     kernels: parseSection<KernelInfo>(content, "kernels", (entry) => {
       const name = yamlField(entry, "name");
       const port = Number(yamlField(entry, "port"));
@@ -253,6 +270,8 @@ export function readState(): RatState {
       };
     }),
   };
+  stateCache = { path: file, mtimeMs: stat.mtimeMs, readAt: now, state };
+  return state;
 }
 
 function parseSection<T>(

@@ -55,6 +55,9 @@
     "onCommand:rat.debugPythonCell",
     "onCommand:rat.debugPythonAbove",
     "onCommand:rat.installCli",
+    "onUri",
+    "onCommand:rat.openPiratFullscreen",
+    "onCommand:rat.installPiratTools",
     "onView:ratPiSessions",
     "onCommand:rat.openPiSessionMrmd"
   ],
@@ -198,7 +201,17 @@
       },
       {
         "command": "rat.openPiSessionMrmd",
-        "title": "Rat: Open PiRAT"
+        "title": "Rat: Open PiRAT Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "rat.installPiratTools",
+        "title": "Rat: Install PiRAT Tools"
+      },
+      {
+        "command": "rat.openPiratFullscreen",
+        "title": "Rat: Open PiRAT Full Screen",
+        "icon": "$(screen-full)"
       },
       {
         "command": "rat.openMarkdownPreview",
@@ -322,6 +335,21 @@
           "command": "rat.refreshRuntimes",
           "when": "view == ratRuntimes",
           "group": "navigation"
+        },
+        {
+          "command": "rat.openPiSessionMrmd",
+          "when": "view == ratRuntimes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "rat.openPiratFullscreen",
+          "when": "view == ratPiSessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rat.installPiratTools",
+          "when": "view == ratPiSessions",
+          "group": "navigation@9"
         }
       ],
       "editor/title": [

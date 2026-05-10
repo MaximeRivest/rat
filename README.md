@@ -386,7 +386,7 @@ Management
 | `py` | IPython | built-in (JSON) | ipython, jedi into venv |
 | `sh` | bash | built-in (PTY) | nothing |
 | `r` | R console | generic (JSON) | jsonlite |
-| `pi` | pi agent | generic (tmux) | @mariozechner/pi-coding-agent |
+| `pi` | pi agent | generic (tmux) | @earendil-works/pi-coding-agent |
 
 More via [custom runtimes](docs/custom-runtimes.md). Julia and Node.js are in progress.
 

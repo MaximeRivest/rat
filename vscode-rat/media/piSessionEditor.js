@@ -84,6 +84,13 @@ let composeDraft = persistedState.composeDraft || "";
 let composeHadFocus = false;
 let streamingEditor = null;
 let streamingText = "";
+let streamingRenderScheduled = false;
+let toolRenderScheduled = false;
+const pendingToolRenders = new Map();
+let messageNavigator = null;
+let navigatorItems = [];
+let navigatorUpdateScheduled = false;
+let activeNavigatorIndex = -1;
 let currentCwd = null;
 let activeEntryId = null;
 let currentMode = "";
@@ -148,7 +155,21 @@ const HOST_THEME_OVERRIDES = {
   "--md-blockquote-border": "var(--vscode-textBlockQuote-border, var(--vscode-focusBorder))",
   "--md-blockquote-color": "var(--vscode-descriptionForeground)",
   "--md-marker-color": "var(--vscode-descriptionForeground)",
+  "--md-list-marker-color": "var(--vscode-descriptionForeground)",
   "--md-hr-color": "var(--vscode-panel-border, var(--widget-border))",
+  "--md-table-bg": "transparent",
+  "--md-table-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)))",
+  "--md-table-row-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)))",
+  "--md-table-header-border": "var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 24%, transparent)))",
+  "--md-table-header-bg": "var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent))",
+  "--md-table-stripe-bg": "color-mix(in srgb, var(--vscode-editor-foreground) 2.5%, transparent)",
+  "--md-table-hover-bg": "var(--vscode-list-hoverBackground, color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent))",
+  "--md-table-cell-padding": "0.42em 0.75em",
+  "--md-math-syntax-color": "var(--vscode-descriptionForeground)",
+  "--md-math-fallback-bg": "var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent))",
+  "--md-math-fallback-color": "var(--vscode-editor-foreground)",
+  "--md-math-inline-size": "1em",
+  "--md-math-display-size": "1.08em",
 };
 
 function hostThemeKind() {
@@ -231,6 +252,23 @@ function createHostDocumentTemplate() {
         meta: "var(--syntax-meta)",
         commentStyle: "italic",
       },
+    },
+    table: {
+      borderColor: "var(--md-table-border)",
+      headerBackground: "var(--md-table-header-bg)",
+      headerColor: "var(--vscode-editor-foreground)",
+      headerFontWeight: "600",
+      cellPadding: "var(--md-table-cell-padding)",
+      color: "var(--vscode-editor-foreground)",
+      stripedRows: "even",
+      stripedColor: "var(--md-table-stripe-bg)",
+    },
+    math: {
+      color: "var(--vscode-editor-foreground)",
+      fontSize: "var(--md-math-inline-size, 1em)",
+      displayBackground: "var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent))",
+      displayPadding: "0.65em 0.85em",
+      displayBorderRadius: "4px",
     },
   };
 }
@@ -375,7 +413,7 @@ function saveSessionName() {
 }
 
 function updateModeUi(mode, enabled) {
-  if (typeof mode === "string" && mode) currentMode = mode;
+  if (typeof mode === "string") currentMode = mode;
   if (!modeSelect) return;
   if (currentMode && modeOptions.length && !modeOptions.some((option) => option.value === currentMode)) {
     const el = document.createElement("option");
@@ -776,7 +814,52 @@ async function loginOAuth() {
   setStatus("Login complete");
 }
 
+function showSessionLoading(session) {
+  installThemeStyle();
+  homeView.classList.remove("active");
+  editorView.classList.add("active");
+  goHomeButton.classList.remove("hidden");
+  viewTitle.textContent = "Pi";
+  updateSessionNameUi(session?.label || "", false);
+  updateModeUi(currentMode, false);
+  if (treeButton) treeButton.disabled = true;
+  if (allSessionsButton) allSessionsButton.classList.add("hidden");
+  root.textContent = "";
+  const card = document.createElement("section");
+  card.className = "card loading-card";
+  card.innerHTML = `
+    <div class="session-loading">
+      <h2>Opening session…</h2>
+      <p class="muted"></p>
+      <ol>
+        <li class="done" id="load-step-selected">Selected session</li>
+        <li id="load-step-read">Reading session file…</li>
+        <li id="load-step-render">Rendering messages…</li>
+        <li id="load-step-modes">Loading prompt modes…</li>
+      </ol>
+    </div>
+  `;
+  card.querySelector(".muted").textContent = session?.label || session?.path || "";
+  root.appendChild(card);
+  createCompose();
+  hideMessageNavigator();
+  setStatus("Opening session…");
+}
+
+function updateSessionLoading(step, text) {
+  setStatus(text || "Opening session…");
+  const order = ["read", "render", "modes"];
+  const activeIndex = Math.max(0, order.indexOf(step));
+  for (const [index, key] of order.entries()) {
+    const el = document.getElementById(`load-step-${key}`);
+    if (!el) continue;
+    el.classList.toggle("done", index < activeIndex);
+    el.classList.toggle("active", index === activeIndex);
+  }
+}
+
 function renderSessions() {
+  hideMessageNavigator();
   const q = (searchInput?.value || "").toLowerCase().trim();
   const filtered = !q ? allSessions : allSessions.filter((s) =>
     (s.label || "").toLowerCase().includes(q) ||
@@ -794,6 +877,7 @@ function renderSessions() {
     row.querySelector(".title").textContent = session.label || "Untitled session";
     row.querySelector(".meta").textContent = [session.time, session.cwd].filter(Boolean).join(" · ");
     row.addEventListener("click", () => {
+      showSessionLoading(session);
       vscode.postMessage({ type: "openSession", path: session.path });
     });
     sessionList.appendChild(row);
@@ -1030,8 +1114,22 @@ function renderSessions() {
         --md-blockquote-border: var(--vscode-textBlockQuote-border, var(--vscode-focusBorder));
         --md-blockquote-color: var(--vscode-descriptionForeground);
         --md-marker-color: var(--vscode-descriptionForeground);
+        --md-list-marker-color: var(--vscode-descriptionForeground);
         --md-hr-color: var(--vscode-panel-border, var(--widget-border));
-      }
+  --md-table-bg: transparent;
+          --md-table-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 18%, transparent)));
+          --md-table-row-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 14%, transparent)));
+          --md-table-header-border: var(--vscode-editorWidget-border, var(--vscode-panel-border, color-mix(in srgb, var(--vscode-editor-foreground) 24%, transparent)));
+          --md-table-header-bg: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent));
+          --md-table-stripe-bg: color-mix(in srgb, var(--vscode-editor-foreground) 2.5%, transparent);
+          --md-table-hover-bg: var(--vscode-list-hoverBackground, color-mix(in srgb, var(--vscode-editor-foreground) 6%, transparent));
+          --md-table-cell-padding: 0.42em 0.75em;
+          --md-math-syntax-color: var(--vscode-descriptionForeground);
+          --md-math-fallback-bg: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent));
+          --md-math-fallback-color: var(--vscode-editor-foreground);
+          --md-math-inline-size: 1em;
+          --md-math-display-size: 1.08em;
+              }
       .pi-mrmd .cm-editor,
       .pi-mrmd .cm-scroller { background: transparent !important; color: var(--vscode-editor-foreground) !important; }
       .pi-mrmd .cm-content,
@@ -1040,6 +1138,15 @@ function renderSessions() {
       .card .pi-mrmd .cm-content { padding: 10px 12px 12px; }
       #compose.pi-mrmd .cm-content { padding: 8px 10px 12px; }
       .pi-mrmd .cm-md-inline-code { background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 16%, transparent)) !important; padding: 0.12em 0.32em !important; border-radius: 3px !important; }
+      .pi-mrmd .cm-table-widget, .pi-mrmd .cm-linked-table-widget { background: transparent !important; color: var(--vscode-editor-foreground) !important; }
+      .pi-mrmd table, .pi-mrmd .cm-table { max-width: 100%; border-collapse: collapse; border-spacing: 0; color: var(--vscode-editor-foreground) !important; background: transparent !important; }
+      .pi-mrmd th, .pi-mrmd td, .pi-mrmd .cm-table th, .pi-mrmd .cm-table td { border-color: var(--md-table-border) !important; padding: var(--md-table-cell-padding) !important; vertical-align: top; color: var(--vscode-editor-foreground) !important; }
+      .pi-mrmd th, .pi-mrmd .cm-table th { font-weight: 600; background: var(--md-table-header-bg) !important; border-bottom-color: var(--md-table-header-border) !important; }
+      .pi-mrmd tr:nth-child(even) td, .pi-mrmd .cm-table tbody tr:nth-child(even) td { background: var(--md-table-stripe-bg) !important; }
+      .pi-mrmd .cm-table tbody tr:hover td { background: var(--md-table-hover-bg) !important; }
+      .pi-mrmd .math-inline, .pi-mrmd .math-block, .pi-mrmd .cm-md-math, .pi-mrmd .cm-md-math-block { font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif; color: var(--vscode-editor-foreground) !important; }
+      .pi-mrmd .math-inline, .pi-mrmd .cm-md-math { background: color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent); border-radius: 4px; padding: 0.02em 0.24em; }
+      .pi-mrmd .math-block, .pi-mrmd .cm-md-math-block { display: block; margin: 0.75em 0; padding: 0.65em 0.85em; overflow-x: auto; text-align: center; background: color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent); border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent); border-radius: 4px; }
       .pi-mrmd details {
         margin: 6px 0 10px var(--rat-output-inset-left, 14px);
         color: var(--vscode-editor-foreground);
@@ -1076,6 +1183,134 @@ function renderSessions() {
         font-size: 10px;
       }
       .pi-mrmd details[open] > summary::before { content: "▾"; }
+
+      .card > .pi-static-markdown,
+      .card.role-user > .pi-static-markdown,
+      .card.role-assistant > .pi-static-markdown,
+      .card[class*="role-tool"] > .pi-static-markdown {
+        padding: 10px 12px 12px;
+        color: var(--vscode-editor-foreground) !important;
+        background: transparent !important;
+        font-family: var(--vscode-font-family);
+        font-size: var(--vscode-editor-font-size);
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+      }
+      .pi-static-markdown * { color: inherit !important; }
+      .pi-static-markdown > :first-child { margin-top: 0; }
+      .pi-static-markdown > :last-child { margin-bottom: 0; }
+      .pi-static-markdown p { margin: 0.45em 0; }
+      .pi-static-markdown h1, .pi-static-markdown h2, .pi-static-markdown h3,
+      .pi-static-markdown h4, .pi-static-markdown h5, .pi-static-markdown h6 { color: var(--md-heading-color, var(--vscode-editor-foreground)) !important; line-height: 1.25; margin: 0.8em 0 0.35em; }
+      .pi-static-markdown a { color: var(--md-link-color) !important; }
+      .pi-static-markdown code {
+        font-family: var(--vscode-editor-font-family, 'SF Mono', Consolas, monospace);
+        background: var(--md-code-background, var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent)));
+        color: var(--md-code-color, var(--vscode-textPreformat-foreground, var(--vscode-editor-foreground))) !important;
+        border-radius: 3px;
+        padding: 0.12em 0.32em;
+      }
+      .pi-static-markdown pre {
+        margin: 0.6em 0;
+        padding: 9px 12px;
+        overflow: auto;
+        background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-editor-foreground) 12%, transparent));
+        border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, transparent));
+        border-radius: 3px;
+      }
+      .pi-static-markdown pre code { display: block; padding: 0; background: transparent; border-radius: 0; white-space: pre; color: var(--vscode-editor-foreground) !important; }
+      .pi-static-markdown blockquote { margin: 0.6em 0; padding-left: 12px; color: var(--md-blockquote-color, var(--vscode-descriptionForeground)) !important; border-left: 3px solid var(--md-blockquote-border, var(--vscode-focusBorder)); }
+      .pi-static-markdown ul, .pi-static-markdown ol { margin: 0.45em 0; padding-left: 1.6em; }
+      .pi-static-markdown .table-wrap { max-width: 100%; margin: 0.75em 0; overflow-x: auto; }
+      .pi-static-markdown table { width: max-content; min-width: min(100%, 360px); border-collapse: collapse; border-spacing: 0; }
+      .pi-static-markdown th, .pi-static-markdown td { border: 1px solid var(--mrmd-border); padding: 5px 9px; vertical-align: top; }
+      .pi-static-markdown th { font-weight: 600; background: var(--vscode-editorWidget-background, color-mix(in srgb, var(--vscode-editor-foreground) 7%, transparent)); }
+      .pi-static-markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--vscode-editor-foreground) 2.5%, transparent); }
+      .pi-static-markdown .math-inline,
+      .pi-static-markdown .math-block {
+        font-family: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+        color: var(--vscode-editor-foreground) !important;
+        background: color-mix(in srgb, var(--vscode-editor-foreground) 3.5%, transparent);
+        border: 1px solid color-mix(in srgb, var(--vscode-editor-foreground) 10%, transparent);
+        border-radius: 4px;
+      }
+      .pi-static-markdown .math-inline { display: inline-block; padding: 0.02em 0.28em; white-space: nowrap; }
+      .pi-static-markdown .math-block { display: block; margin: 0.75em 0; padding: 0.65em 0.85em; overflow-x: auto; text-align: center; font-size: 1.08em; }
+      .pi-static-markdown .math-frac { display: inline-grid; grid-template-rows: auto auto; vertical-align: middle; text-align: center; margin: 0 0.12em; line-height: 1.05; }
+      .pi-static-markdown .math-frac > span:first-child { border-bottom: 1px solid currentColor; padding: 0 0.18em 0.08em; }
+      .pi-static-markdown .math-frac > span:last-child { padding: 0.08em 0.18em 0; }
+      .pi-static-markdown .math-sqrt { text-decoration: overline; padding-left: 0.12em; }
+      .pi-static-markdown hr { border: 0; border-top: 1px solid var(--md-hr-color); margin: 1em 0; }
+      .pi-static-markdown img { max-width: 100%; height: auto; }
+      .pi-static-markdown details { margin: 0.6em 0; }
+      .pi-static-markdown summary { color: var(--vscode-descriptionForeground) !important; cursor: pointer; }
+      .pi-static-markdown details.rat-collapsible-result > summary {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        min-height: 20px;
+        padding: 1px 8px 1px 6px;
+        background: var(--vscode-button-secondaryBackground, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent));
+        border: 1px solid var(--vscode-button-border, var(--vscode-editorWidget-border, var(--vscode-panel-border, transparent)));
+        border-radius: 3px;
+        font-size: 11px;
+        line-height: 18px;
+        user-select: none;
+      }
+      .pi-static-markdown details.rat-collapsible-result > summary::marker { content: ""; }
+      .pi-static-markdown details.rat-collapsible-result > summary::-webkit-details-marker { display: none; }
+      .pi-static-markdown details.rat-collapsible-result > summary::before { content: "▸"; font-size: 10px; }
+      .pi-static-markdown details.rat-collapsible-result[open] > summary::before { content: "▾"; }
+
+      .session-loading { padding: 22px 24px; }
+      .session-loading h2 { margin: 0 0 8px; color: var(--vscode-editor-foreground); font-size: 15px; font-weight: 600; }
+      .session-loading ol { margin: 16px 0 0; padding-left: 22px; }
+      .session-loading li { margin: 8px 0; color: var(--vscode-descriptionForeground); }
+      .session-loading li.active { color: var(--vscode-editor-foreground); }
+      .session-loading li.active::marker { content: "◐ "; }
+      .session-loading li.done { color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+      .session-loading li.done::marker { content: "✓ "; }
+
+      .message-navigator {
+        position: fixed;
+        right: 14px;
+        top: 50%;
+        z-index: 75;
+        display: none;
+        align-items: center;
+        gap: 8px;
+        transform: translateY(-50%);
+        color: var(--vscode-descriptionForeground);
+        pointer-events: none;
+      }
+      .message-navigator.visible { display: flex; }
+      .message-navigator .nav-rail { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 4px 0; pointer-events: auto; }
+      .message-navigator button { pointer-events: auto; margin: 0; padding: 0; color: var(--vscode-descriptionForeground); background: transparent; border: 0; border-radius: 4px; cursor: pointer; }
+      .message-navigator .nav-arrow { width: 18px; height: 18px; line-height: 18px; font-size: 13px; opacity: 0.72; }
+      .message-navigator .nav-arrow:hover { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); opacity: 1; }
+      .message-navigator .nav-dots { display: flex; flex-direction: column; align-items: center; gap: 5px; max-height: 190px; overflow: hidden; }
+      .message-navigator .nav-dot { width: 16px; height: 5px; opacity: 0.62; }
+      .message-navigator .nav-dot::before { content: ""; display: block; width: 8px; height: 1px; margin: 2px auto; background: currentColor; border-radius: 999px; }
+      .message-navigator .nav-dot.role-user::before { width: 10px; background: var(--vscode-textLink-foreground); }
+      .message-navigator .nav-dot.role-assistant::before { width: 12px; }
+      .message-navigator .nav-dot[class*="role-tool"]::before { width: 9px; background: var(--vscode-charts-orange); }
+      .message-navigator .nav-dot.active { opacity: 1; color: var(--vscode-foreground); }
+      .message-navigator .nav-dot.active::before { height: 2px; width: 15px; }
+      .message-navigator .nav-popover {
+        max-width: 260px;
+        padding: 10px 12px;
+        color: var(--vscode-editor-foreground);
+        background: var(--vscode-editorWidget-background, var(--vscode-quickInput-background, var(--vscode-editor-background)));
+        border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, transparent));
+        border-radius: 10px;
+        box-shadow: 0 8px 26px color-mix(in srgb, #000 20%, transparent);
+        font-size: 12px;
+        line-height: 1.35;
+        pointer-events: auto;
+      }
+      .message-navigator .nav-popover .nav-role { margin-bottom: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; }
+      .message-navigator .nav-popover .nav-preview { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+      @media (max-width: 860px) { .message-navigator { display: none !important; } }
 
       .pi-mrmd .cm-codeblock,
       .pi-mrmd .cm-output,
@@ -1221,6 +1456,221 @@ function renderSessions() {
     document.head.appendChild(style);
   }
 
+  function escapeHtmlText(value) {
+    return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
+  }
+
+  function safeUrl(value) {
+    const url = String(value || "").trim();
+    if (/^(https?:|data:image\/|file:|vscode-resource:|vscode-webview-resource:)/i.test(url)) return escapeHtmlText(url);
+    if (/^[./#]/.test(url)) return escapeHtmlText(url);
+    return "#";
+  }
+
+  function unescapeHtmlText(value) {
+    return String(value || "").replace(/&quot;/g, '"').replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+  }
+
+  function protectInlineCode(html, placeholders) {
+    return html.replace(/`([^`]+)`/g, (_m, code) => {
+      const token = `RATCODEPLACEHOLDER${placeholders.length}END`;
+      placeholders.push(`<code>${code}</code>`);
+      return token;
+    });
+  }
+
+  function restorePlaceholders(html, placeholders) {
+    return placeholders.reduce((value, replacement, index) => value.replaceAll(`RATCODEPLACEHOLDER${index}END`, replacement), html);
+  }
+
+  const TEX_SYMBOLS = {
+    alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", theta: "θ", lambda: "λ", mu: "μ", pi: "π", rho: "ρ", sigma: "σ", tau: "τ", phi: "φ", omega: "ω",
+    Gamma: "Γ", Delta: "Δ", Theta: "Θ", Lambda: "Λ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Omega: "Ω",
+    times: "×", cdot: "·", pm: "±", le: "≤", ge: "≥", neq: "≠", approx: "≈", infty: "∞", sum: "∑", prod: "∏", int: "∫", partial: "∂", nabla: "∇", in: "∈", notin: "∉", to: "→", rightarrow: "→", leftarrow: "←", iff: "⇔", forall: "∀", exists: "∃",
+  };
+
+  function texAtomToHtml(value) {
+    const raw = String(value || "").trim();
+    const unwrapped = raw.startsWith("{") && raw.endsWith("}") ? raw.slice(1, -1) : raw;
+    return renderTex(unwrapped);
+  }
+
+  function renderTex(value) {
+    let html = escapeHtmlText(value).trim();
+    for (let i = 0; i < 4; i++) {
+      html = html.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, (_m, top, bottom) => `<span class="math-frac"><span>${texAtomToHtml(top)}</span><span>${texAtomToHtml(bottom)}</span></span>`);
+      html = html.replace(/\\sqrt\s*\{([^{}]*)\}/g, (_m, body) => `√<span class="math-sqrt">${texAtomToHtml(body)}</span>`);
+    }
+    html = html.replace(/\\([A-Za-z]+)/g, (m, name) => TEX_SYMBOLS[name] || m.slice(1));
+    html = html.replace(/([^\s])\^\{([^{}]+)\}/g, (_m, base, exp) => `${base}<sup>${renderTex(exp)}</sup>`);
+    html = html.replace(/([^\s])_\{([^{}]+)\}/g, (_m, base, sub) => `${base}<sub>${renderTex(sub)}</sub>`);
+    html = html.replace(/([^\s])\^([^\s{}])/g, "$1<sup>$2</sup>");
+    html = html.replace(/([^\s])_([^\s{}])/g, "$1<sub>$2</sub>");
+    return html.replace(/\s+/g, " ");
+  }
+
+  function renderMathInline(value) {
+    const source = String(value || "").trim();
+    return `<span class="math-inline" title="${escapeHtmlText(source)}">${renderTex(source)}</span>`;
+  }
+
+  function renderMathBlock(value) {
+    const source = String(value || "").trim();
+    return `<div class="math-block" title="${escapeHtmlText(source)}">${renderTex(source)}</div>`;
+  }
+
+  function renderInlineMarkdown(text) {
+    const placeholders = [];
+    let html = protectInlineCode(escapeHtmlText(text), placeholders);
+    html = html.replace(/\\\((.+?)\\\)/g, (_m, body) => renderMathInline(unescapeHtmlText(body)));
+    html = html.replace(/(^|[^$\\])\$([^\n$]+?)\$(?!\$)/g, (_m, prefix, body) => `${prefix}${renderMathInline(unescapeHtmlText(body))}`);
+    html = html.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+\"([^\"]*)\")?\)/g, (_m, alt, url, title) => `<img src="${safeUrl(url)}" alt="${escapeHtmlText(alt)}"${title ? ` title="${escapeHtmlText(title)}"` : ""}>`);
+    html = html.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+\"([^\"]*)\")?\)/g, (_m, label, url, title) => `<a href="${safeUrl(url)}"${title ? ` title="${escapeHtmlText(title)}"` : ""}>${label}</a>`);
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>").replace(/_([^_]+)_/g, "<em>$1</em>");
+    html = html.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+    return restorePlaceholders(html, placeholders);
+  }
+
+  function splitTableRow(line) {
+    let value = String(line || "").trim();
+    if (value.startsWith("|")) value = value.slice(1);
+    if (value.endsWith("|")) value = value.slice(0, -1);
+    const cells = [];
+    let cell = "";
+    let escaped = false;
+    for (const ch of value) {
+      if (escaped) { cell += ch; escaped = false; continue; }
+      if (ch === "\\") { escaped = true; cell += ch; continue; }
+      if (ch === "|") { cells.push(cell.trim().replace(/\\\|/g, "|")); cell = ""; continue; }
+      cell += ch;
+    }
+    cells.push(cell.trim().replace(/\\\|/g, "|"));
+    return cells;
+  }
+
+  function parseTableSeparator(line) {
+    const cells = splitTableRow(line);
+    if (cells.length < 2) return null;
+    const aligns = [];
+    for (const cell of cells) {
+      const value = cell.replace(/\s+/g, "");
+      if (!/^:?-{3,}:?$/.test(value)) return null;
+      aligns.push(value.startsWith(":") && value.endsWith(":") ? "center" : value.endsWith(":") ? "right" : value.startsWith(":") ? "left" : "");
+    }
+    return aligns;
+  }
+
+  function looksLikeTableStart(lines, index) {
+    return index + 1 < lines.length && lines[index].includes("|") && !!parseTableSeparator(lines[index + 1]);
+  }
+
+  function renderTable(headerLine, separatorLine, bodyLines) {
+    const headers = splitTableRow(headerLine);
+    const aligns = parseTableSeparator(separatorLine) || [];
+    const alignAttr = (index) => aligns[index] ? ` style="text-align:${aligns[index]}"` : "";
+    const head = headers.map((cell, index) => `<th${alignAttr(index)}>${renderInlineMarkdown(cell)}</th>`).join("");
+    const rows = bodyLines.map((line) => {
+      const cells = splitTableRow(line);
+      while (cells.length < headers.length) cells.push("");
+      return `<tr>${cells.slice(0, headers.length).map((cell, index) => `<td${alignAttr(index)}>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`;
+    }).join("\n");
+    return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead>${rows ? `<tbody>\n${rows}\n</tbody>` : ""}</table></div>`;
+  }
+
+  function renderMarkdownStatic(markdown) {
+    const text = String(markdown || "").replace(/\r\n?/g, "\n");
+    const renderBlocks = (chunk) => {
+      const lines = chunk.split("\n");
+      const out = [];
+      let paragraph = [];
+      let list = null;
+      const flushParagraph = () => {
+        if (!paragraph.length) return;
+        out.push(`<p>${renderInlineMarkdown(paragraph.join(" ").trim())}</p>`);
+        paragraph = [];
+      };
+      const closeList = () => {
+        if (!list) return;
+        out.push(`</${list}>`);
+        list = null;
+      };
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line.trim()) { flushParagraph(); closeList(); continue; }
+        const oneLineMath = line.match(/^\s*\$\$\s*(.+?)\s*\$\$\s*$/) || line.match(/^\s*\\\[\s*(.+?)\s*\\\]\s*$/);
+        if (oneLineMath) { flushParagraph(); closeList(); out.push(renderMathBlock(oneLineMath[1])); continue; }
+        if (/^\s*\$\$\s*$/.test(line) || /^\s*\\\[\s*$/.test(line)) {
+          const closeRe = /^\s*\$\$\s*$/.test(line) ? /^\s*\$\$\s*$/ : /^\s*\\\]\s*$/;
+          const mathLines = [];
+          i++;
+          while (i < lines.length && !closeRe.test(lines[i])) { mathLines.push(lines[i]); i++; }
+          flushParagraph(); closeList(); out.push(renderMathBlock(mathLines.join("\n")));
+          continue;
+        }
+        if (looksLikeTableStart(lines, i)) {
+          const body = [];
+          let j = i + 2;
+          while (j < lines.length && lines[j].trim() && lines[j].includes("|")) { body.push(lines[j]); j++; }
+          flushParagraph(); closeList(); out.push(renderTable(lines[i], lines[i + 1], body));
+          i = j - 1;
+          continue;
+        }
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) { flushParagraph(); closeList(); out.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2].trim())}</h${heading[1].length}>`); continue; }
+        if (/^\s*>\s?/.test(line)) { flushParagraph(); closeList(); out.push(`<blockquote>${renderInlineMarkdown(line.replace(/^\s*>\s?/, ""))}</blockquote>`); continue; }
+        if (/^\s*[-*+]\s+/.test(line)) {
+          flushParagraph();
+          if (list !== "ul") { closeList(); list = "ul"; out.push("<ul>"); }
+          out.push(`<li>${renderInlineMarkdown(line.replace(/^\s*[-*+]\s+/, ""))}</li>`);
+          continue;
+        }
+        if (/^\s*\d+[.)]\s+/.test(line)) {
+          flushParagraph();
+          if (list !== "ol") { closeList(); list = "ol"; out.push("<ol>"); }
+          out.push(`<li>${renderInlineMarkdown(line.replace(/^\s*\d+[.)]\s+/, ""))}</li>`);
+          continue;
+        }
+        if (/^\s*---+\s*$/.test(line)) { flushParagraph(); closeList(); out.push("<hr>"); continue; }
+        closeList();
+        paragraph.push(line);
+      }
+      flushParagraph(); closeList();
+      return out.join("\n");
+    };
+
+    const parts = [];
+    const blockRe = /(^|\n)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n\2(?=\n|$)|<details\b([^>]*)>\s*<summary>([\s\S]*?)<\/summary>\s*([\s\S]*?)<\/details>/gi;
+    let last = 0;
+    let match;
+    while ((match = blockRe.exec(text))) {
+      const prefix = match[1] || "";
+      const blockStart = match.index + prefix.length;
+      parts.push(renderBlocks(text.slice(last, blockStart)));
+      if (match[2]) {
+        const lang = String(match[3] || "").trim().split(/\s+/)[0].replace(/[^\w-]/g, "");
+        parts.push(`<pre><code${lang ? ` class="language-${lang}"` : ""}>${escapeHtmlText(match[4].replace(/\s+$/, ""))}</code></pre>`);
+      } else {
+        const attrs = String(match[5] || "");
+        const classMatch = attrs.match(/class\s*=\s*(["'])(.*?)\1/i);
+        const classes = classMatch ? classMatch[2].split(/\s+/).filter((name) => /^[-_a-zA-Z0-9]+$/.test(name)).join(" ") : "";
+        const summary = String(match[6] || "").replace(/<[^>]+>/g, "").trim() || "Details";
+        parts.push(`<details${classes ? ` class="${classes}"` : ""}><summary>${escapeHtmlText(summary)}</summary>${renderMarkdownStatic(match[7] || "")}</details>`);
+      }
+      last = blockRe.lastIndex;
+    }
+    parts.push(renderBlocks(text.slice(last)));
+    return parts.join("\n") || `<p class="muted">(empty)</p>`;
+  }
+
+  function debounce(fn, delay = 80) {
+    let timer = null;
+    return (...args) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { timer = null; fn(...args); }, delay);
+    };
+  }
+
   function scheduleEdit(entryId, editor) {
     if (editTimers.has(entryId)) clearTimeout(editTimers.get(entryId));
     editTimers.set(entryId, setTimeout(() => {
@@ -1247,11 +1697,28 @@ function renderSessions() {
     }, extra || {});
   }
 
-  function mountCardEditor(card, entry, text, interactive) {
-    const previous = editors.get(entry.id);
+  function unmountCardEditor(entryId) {
+    const previous = editors.get(entryId);
     previous?.destroy?.();
+    editors.delete(entryId);
+  }
+
+  function renderStaticCard(card, entry, text) {
+    unmountCardEditor(entry.id);
+    const mount = card.querySelector(".editor");
+    mount.classList.add("pi-mrmd", "pi-static-markdown");
+    mount.innerHTML = renderMarkdownStatic(text);
+    card.classList.remove("editable");
+    card.__entry = Object.assign({}, entry, { markdown: text });
+    const save = card.querySelector(".save");
+    if (save) save.textContent = "Edit";
+  }
+
+  function mountCardEditor(card, entry, text, interactive) {
+    unmountCardEditor(entry.id);
     const mount = card.querySelector(".editor");
     mount.textContent = "";
+    mount.classList.remove("pi-static-markdown");
     mount.classList.add("pi-mrmd");
     card.classList.toggle("editable", interactive);
     const save = card.querySelector(".save");
@@ -1261,7 +1728,7 @@ function renderSessions() {
       documentPath: entry.sessionPath || null,
     }));
     if (!interactive) makeReadOnly(editor);
-    mount.addEventListener("mouseup", () => requestAnimationFrame(() => blurInactiveEditor(mount)));
+    mount.addEventListener("mouseup", () => requestAnimationFrame(() => blurInactiveEditor(mount)), { once: false });
     editors.set(entry.id, editor);
     return editor;
   }
@@ -1273,8 +1740,12 @@ function renderSessions() {
     if (card && editor) {
       const entry = card.__entry;
       const text = editor.getContent();
+      if (editTimers.has(activeEntryId)) {
+        clearTimeout(editTimers.get(activeEntryId));
+        editTimers.delete(activeEntryId);
+      }
       vscode.postMessage({ type: "editEntry", entryId: activeEntryId, text });
-      mountCardEditor(card, entry, text, false);
+      renderStaticCard(card, entry, text);
     }
     activeEntryId = null;
   }
@@ -1288,7 +1759,7 @@ function renderSessions() {
     if (!entry || isToolRole(entry.role) || activeEntryId === entry.id) return;
     deactivateActiveCard();
     const current = editors.get(entry.id);
-    const text = current?.getContent?.() ?? entry.markdown ?? "";
+    const text = current?.getContent?.() ?? card.__entry?.markdown ?? entry.markdown ?? "";
     const editor = mountCardEditor(card, entry, text, true);
     activeEntryId = entry.id;
     editor.onChange(() => scheduleEdit(entry.id, editor));
@@ -1311,7 +1782,7 @@ function renderSessions() {
     `;
     root.appendChild(card);
 
-    mountCardEditor(card, entry, entry.markdown || "", false);
+    renderStaticCard(card, entry, entry.markdown || "");
     if (isTool) return;
     card.addEventListener("dblclick", () => activateCard(card));
     card.querySelector(".save")?.addEventListener("click", (event) => {
@@ -1320,8 +1791,7 @@ function renderSessions() {
         activateCard(card);
         return;
       }
-      const current = editors.get(entry.id);
-      vscode.postMessage({ type: "editEntry", entryId: entry.id, text: current?.getContent?.() || "" });
+      deactivateActiveCard();
     });
   }
 
@@ -1359,7 +1829,100 @@ function renderSessions() {
     if (composeHadFocus) queueMicrotask(() => composeEditor?.focus?.());
   }
 
-  const sessionContainer = document.getElementById("session-container");
+  const sessionContainer = document.getElementById("container");
+
+  function isNearScrollBottom() {
+    if (!sessionContainer) return false;
+    return sessionContainer.scrollHeight - sessionContainer.scrollTop - sessionContainer.clientHeight < 160;
+  }
+
+  function scrollToBottom() {
+    if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
+  }
+
+  function cardPreview(card) {
+    const entry = card.__entry || {};
+    const text = String(entry.markdown || card.textContent || "")
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return text || entry.role || "Message";
+  }
+
+  function ensureMessageNavigator() {
+    if (messageNavigator) return messageNavigator;
+    messageNavigator = document.createElement("aside");
+    messageNavigator.className = "message-navigator";
+    messageNavigator.innerHTML = `
+      <div class="nav-popover"><div class="nav-role"></div><div class="nav-preview"></div></div>
+      <div class="nav-rail">
+        <button class="nav-arrow nav-up" title="Previous message">⌃</button>
+        <div class="nav-dots" aria-label="Message navigator"></div>
+        <button class="nav-arrow nav-down" title="Next message">⌄</button>
+      </div>
+    `;
+    document.body.appendChild(messageNavigator);
+    messageNavigator.querySelector(".nav-up")?.addEventListener("click", () => jumpToNavigatorIndex(activeNavigatorIndex - 1));
+    messageNavigator.querySelector(".nav-down")?.addEventListener("click", () => jumpToNavigatorIndex(activeNavigatorIndex + 1));
+    return messageNavigator;
+  }
+
+  function hideMessageNavigator() {
+    messageNavigator?.classList.remove("visible");
+  }
+
+  function rebuildMessageNavigator() {
+    const nav = ensureMessageNavigator();
+    navigatorItems = Array.from(root.querySelectorAll(".card[data-entry-id]:not(.system-prompt-card)"));
+    const dots = nav.querySelector(".nav-dots");
+    dots.textContent = "";
+    navigatorItems.forEach((card, index) => {
+      const button = document.createElement("button");
+      button.className = `nav-dot ${Array.from(card.classList).filter((name) => name.startsWith("role-")).join(" ")}`;
+      button.title = cardPreview(card);
+      button.addEventListener("click", () => jumpToNavigatorIndex(index));
+      dots.appendChild(button);
+    });
+    nav.classList.toggle("visible", navigatorItems.length > 1 && editorView.classList.contains("active"));
+    scheduleNavigatorUpdate();
+  }
+
+  function scheduleNavigatorUpdate() {
+    if (navigatorUpdateScheduled) return;
+    navigatorUpdateScheduled = true;
+    requestAnimationFrame(() => {
+      navigatorUpdateScheduled = false;
+      updateMessageNavigator();
+    });
+  }
+
+  function updateMessageNavigator() {
+    if (!messageNavigator || !navigatorItems.length || !editorView.classList.contains("active")) return;
+    const containerRect = sessionContainer?.getBoundingClientRect?.() || document.body.getBoundingClientRect();
+    const targetY = containerRect.top + containerRect.height * 0.45;
+    let bestIndex = 0;
+    let bestDistance = Infinity;
+    navigatorItems.forEach((card, index) => {
+      const rect = card.getBoundingClientRect();
+      const distance = Math.abs((rect.top + rect.bottom) / 2 - targetY);
+      if (distance < bestDistance) { bestDistance = distance; bestIndex = index; }
+    });
+    if (bestIndex === activeNavigatorIndex) return;
+    activeNavigatorIndex = bestIndex;
+    const dots = Array.from(messageNavigator.querySelectorAll(".nav-dot"));
+    dots.forEach((dot, index) => dot.classList.toggle("active", index === bestIndex));
+    const card = navigatorItems[bestIndex];
+    const role = card.__entry?.role || Array.from(card.classList).find((name) => name.startsWith("role-"))?.replace(/^role-/, "") || "message";
+    messageNavigator.querySelector(".nav-role").textContent = `${bestIndex + 1} / ${navigatorItems.length} · ${role}`;
+    messageNavigator.querySelector(".nav-preview").textContent = cardPreview(card);
+  }
+
+  function jumpToNavigatorIndex(index) {
+    if (!navigatorItems.length) return;
+    const next = Math.max(0, Math.min(index, navigatorItems.length - 1));
+    navigatorItems[next]?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 
   function upsertSystemPrompt(text, loaded) {
     currentSystemPrompt = String(text || "");
@@ -1408,6 +1971,7 @@ function renderSessions() {
     upsertSystemPrompt(currentSystemPrompt, false);
     for (const entry of entries) createCard(entry);
     createCompose();
+    rebuildMessageNavigator();
     setStatus(entries.length ? `${entries.length} messages` : "ready");
     setTimeout(() => {
       if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
@@ -1433,8 +1997,37 @@ function renderSessions() {
     makeReadOnly(editor);
     mount.addEventListener("mouseup", () => requestAnimationFrame(() => blurInactiveEditor(mount)));
     editors.set(id, editor);
-    if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
+    rebuildMessageNavigator();
+    scrollToBottom();
     return editor;
+  }
+
+  function scheduleStreamingRender() {
+    if (streamingRenderScheduled) return;
+    streamingRenderScheduled = true;
+    const shouldScroll = isNearScrollBottom();
+    requestAnimationFrame(() => {
+      streamingRenderScheduled = false;
+      if (streamingEditor) streamingEditor.setContent(streamingText);
+      if (shouldScroll) scrollToBottom();
+    });
+  }
+
+  function scheduleToolRender(id, markdown) {
+    pendingToolRenders.set(id, markdown);
+    if (toolRenderScheduled) return;
+    const shouldScroll = isNearScrollBottom();
+    toolRenderScheduled = true;
+    requestAnimationFrame(() => {
+      toolRenderScheduled = false;
+      for (const [toolId, text] of pendingToolRenders) {
+        pendingToolRenders.delete(toolId);
+        let editor = editors.get(toolId);
+        if (!editor) editor = appendLiveCard("tool", toolId, "");
+        editor.setContent(text || "Working…");
+      }
+      if (shouldScroll) scrollToBottom();
+    });
   }
 
   function sendCompose() {
@@ -1443,7 +2036,13 @@ function renderSessions() {
     if (!text.trim()) return;
     composeDraft = "";
     vscode.setState?.({ ...(vscode.getState?.() || {}), composeDraft });
-    appendLiveCard("user", "pending-user", text);
+    const userCard = document.createElement("section");
+    userCard.className = "card role-user";
+    userCard.dataset.entryId = "pending-user";
+    userCard.innerHTML = `<header><span class="role-dot" title="user"></span></header><div class="editor"></div>`;
+    root.appendChild(userCard);
+    renderStaticCard(userCard, { id: "pending-user", role: "user", markdown: text }, text);
+    rebuildMessageNavigator();
     streamingText = "";
     streamingEditor = appendLiveCard("assistant", "streaming-assistant", "");
     composeEditor.setContent("");
@@ -1490,6 +2089,13 @@ function renderSessions() {
         }
         render(message.entries || [], message.title);
         if (composeHadFocus) queueMicrotask(() => composeEditor?.focus?.());
+        break;
+      case "sessionLoading":
+        updateSessionLoading(message.step || "read", message.text || "Opening session…");
+        break;
+      case "modesLoaded":
+        setModeOptions(message.modes || []);
+        updateModeUi(message.mode || currentMode || modeOptions[0]?.value || "", editorView.classList.contains("active"));
         break;
       case "sessions":
         allSessions = message.sessions || [];
@@ -1546,8 +2152,7 @@ function renderSessions() {
           streamingText += message.delta;
         }
         if (streamingEditor) {
-          streamingEditor.setContent(streamingText);
-          if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
+          scheduleStreamingRender();
         }
         setStatus("Pi is responding…");
         break;
@@ -1563,16 +2168,14 @@ function renderSessions() {
         const id = `tool-${message.toolCallId}`;
         let editor = editors.get(id);
         if (!editor) editor = appendLiveCard("tool", id, `**${message.toolName || "tool"}**`);
-        editor.setContent(message.markdown || "Working…");
-        if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
+        scheduleToolRender(id, message.markdown || "Working…");
         break;
       }
       case "piToolEnd": {
         const id = `tool-${message.toolCallId}`;
         let editor = editors.get(id);
         if (!editor) editor = appendLiveCard("tool", id, "");
-        editor.setContent(message.markdown || "Done");
-        if (sessionContainer) sessionContainer.scrollTop = sessionContainer.scrollHeight;
+        scheduleToolRender(id, message.markdown || "Done");
         break;
       }
       case "piStatus":
@@ -1619,7 +2222,7 @@ function renderSessions() {
   treeDialog?.addEventListener("click", (event) => {
     if (event.target === treeDialog) closeTreeDialog();
   });
-  treeSearchInput?.addEventListener("input", renderTreeView);
+  treeSearchInput?.addEventListener("input", debounce(renderTreeView));
   treeFilterSelect?.addEventListener("change", renderTreeView);
   treeSummarySelect?.addEventListener("change", () => {
     if (treeCustomSummaryInput) treeCustomSummaryInput.disabled = treeSummarySelect.value !== "custom";
@@ -1629,12 +2232,12 @@ function renderSessions() {
   treeClearLabelButton?.addEventListener("click", () => saveTreeLabel(true).catch((error) => setStatus(error.message || "Could not clear label")));
   modelCloseButton?.addEventListener("click", closeModelDialog);
   modelDialog?.addEventListener("click", (event) => { if (event.target === modelDialog) closeModelDialog(); });
-  modelSearchInput?.addEventListener("input", renderModelList);
+  modelSearchInput?.addEventListener("input", debounce(renderModelList));
   thinkingCloseButton?.addEventListener("click", closeThinkingDialog);
   thinkingDialog?.addEventListener("click", (event) => { if (event.target === thinkingDialog) closeThinkingDialog(); });
   authCloseButton?.addEventListener("click", closeAuthDialog);
   authDialog?.addEventListener("click", (event) => { if (event.target === authDialog) closeAuthDialog(); });
-  authSearchInput?.addEventListener("input", renderAuthList);
+  authSearchInput?.addEventListener("input", debounce(renderAuthList));
   authSaveKeyButton?.addEventListener("click", () => saveApiKey().catch((error) => setStatus(error.message || "Could not save API key")));
   authLoginOAuthButton?.addEventListener("click", () => loginOAuth().catch((error) => setStatus(error.message || "Login failed")));
   authLogoutButton?.addEventListener("click", () => logoutProvider().catch((error) => setStatus(error.message || "Logout failed")));
@@ -1714,7 +2317,9 @@ function renderSessions() {
     saveModeFromDialog().catch((error) => setStatus(error.message || "Could not save mode"));
   });
   goHomeButton?.addEventListener("click", showHome);
-  searchInput?.addEventListener("input", renderSessions);
+  searchInput?.addEventListener("input", debounce(renderSessions));
+  sessionContainer?.addEventListener("scroll", scheduleNavigatorUpdate, { passive: true });
+  window.addEventListener("resize", scheduleNavigatorUpdate);
   document.addEventListener("pointerdown", (event) => {
     if (!activeEntryId) return;
     const activeCard = root.querySelector(`[data-entry-id="${CSS.escape(activeEntryId)}"]`);

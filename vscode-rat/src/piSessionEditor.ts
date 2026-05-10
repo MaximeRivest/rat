@@ -110,6 +110,13 @@ interface EditableSessionEntry {
   sessionPath: string;
 }
 
+interface DisplaySession {
+  header: SessionHeader | null;
+  editable: EditableSessionEntry[];
+  mode: string;
+  sessionName: string;
+}
+
 interface SessionListItem {
   label: string;
   path: string;
@@ -137,6 +144,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   private readonly disposables: vscode.Disposable[] = [];
   private readonly sessionLeafOverrides = new Map<string, string | null>();
   private readonly authPromptResolvers = new Map<string, (value: string | undefined) => void>();
+  private readonly displaySessionCache = new Map<string, { mtimeMs: number; leafId: string | null | undefined; value: DisplaySession }>();
   private view?: vscode.WebviewView;
 
   static open(ctx: vscode.ExtensionContext, execution: ExecutionController, uri?: vscode.Uri): Promise<void> {
@@ -146,6 +154,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   constructor(
     private readonly ctx: vscode.ExtensionContext,
     private readonly execution: ExecutionController,
+    private readonly onOpen?: () => unknown,
   ) {}
 
   dispose(): void {
@@ -153,6 +162,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   }
 
   async show(uri?: vscode.Uri): Promise<void> {
+    await Promise.resolve(this.onOpen?.());
     if (this.view && !uri) {
       this.view.show?.(true);
       await this.postSessions(this.view, "workspace");
@@ -162,6 +172,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   }
 
   async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
+    await Promise.resolve(this.onOpen?.());
     this.view = webviewView;
     webviewView.webview.options = {
       enableScripts: true,
@@ -174,6 +185,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   }
 
   async open(uri?: vscode.Uri): Promise<void> {
+    await Promise.resolve(this.onOpen?.());
     const panel = vscode.window.createWebviewPanel(
       "rat.piSessionMrmdEditor",
       uri ? `Pi Session: ${path.basename(uri.fsPath)}` : "Pi Sessions",
@@ -345,30 +357,56 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
 
   private setLeafOverride(sessionPath: string, leafId: string | null): void {
     this.sessionLeafOverrides.set(sessionPath, leafId);
+    this.displaySessionCache.delete(sessionPath);
   }
 
   private async postSession(panel: WebviewHost, uri: vscode.Uri): Promise<void> {
-    const parsed = await this.readSession(uri);
+    await panel.webview.postMessage({ type: "sessionLoading", step: "read", text: "Opening session…" });
+    const parsed = await this.readSessionForDisplay(uri, (text) => panel.webview.postMessage({ type: "sessionLoading", step: "read", text }));
     const cwd = parsed.header?.cwd ?? path.dirname(uri.fsPath);
-    const modes = await loadPromptModeOptions(cwd);
+    await panel.webview.postMessage({ type: "sessionLoading", step: "render", text: `Rendering ${parsed.editable.length} messages…` });
     await panel.webview.postMessage({
       type: "init",
       entries: parsed.editable,
       title: path.basename(uri.fsPath),
       cwd,
-      mode: parsed.mode || modes[0]?.value || "",
-      modes,
+      mode: parsed.mode || "",
+      modes: [],
       sessionName: parsed.sessionName,
     });
+
+    await panel.webview.postMessage({ type: "sessionLoading", step: "modes", text: "Loading prompt modes…" });
+    const modes = await loadPromptModeOptions(cwd);
+    await panel.webview.postMessage({ type: "modesLoaded", modes, mode: parsed.mode || modes[0]?.value || "" });
   }
 
-  private async readSession(uri: vscode.Uri): Promise<{
-    header: SessionHeader | null;
-    lines: SessionLine[];
-    editable: EditableSessionEntry[];
-    mode: string;
-    sessionName: string;
-  }> {
+  private async readSessionForDisplay(uri: vscode.Uri, progress?: (text: string) => Thenable<boolean> | Promise<boolean>): Promise<DisplaySession> {
+    const stat = await fs.promises.stat(uri.fsPath).catch(() => null);
+    const overrideLeafId = this.sessionLeafOverrides.has(uri.fsPath) ? this.sessionLeafOverrides.get(uri.fsPath) : undefined;
+    const cached = this.displaySessionCache.get(uri.fsPath);
+    if (cached && cached.mtimeMs === (stat?.mtimeMs ?? 0) && cached.leafId === overrideLeafId) {
+      void progress?.("Using cached session…");
+      return cached.value;
+    }
+
+    void progress?.("Loading Pi session engine…");
+    const { SessionManager } = await loadPiSdk();
+    void progress?.("Opening session branch…");
+    const manager = SessionManager.open(uri.fsPath);
+    this.applyLeafOverride(manager, uri.fsPath);
+    const header = manager.getHeader() ?? null;
+    const cwd = manager.getCwd() || (typeof header?.cwd === "string" ? header.cwd : path.dirname(uri.fsPath));
+    const branch = manager.getBranch();
+    void progress?.(`Preparing ${branch.length} entries…`);
+    const editable = branch
+      .map((entry: SessionEntry) => this.toEditable(entry, cwd, uri.fsPath))
+      .filter((entry: EditableSessionEntry | null): entry is EditableSessionEntry => !!entry);
+    const value = { header, editable, mode: modeFromRawEntries(branch), sessionName: manager.getSessionName() ?? "" };
+    this.displaySessionCache.set(uri.fsPath, { mtimeMs: stat?.mtimeMs ?? 0, leafId: overrideLeafId, value });
+    return value;
+  }
+
+  private async readSessionLines(uri: vscode.Uri): Promise<{ header: SessionHeader | null; lines: SessionLine[] }> {
     const lines: SessionLine[] = [];
     let header: SessionHeader | null = null;
 
@@ -384,22 +422,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
       lines.push({ raw: line, entry });
     }
 
-    const hasEntries = lines.some((line) => line.entry.type !== "session");
-    if (!hasEntries) {
-      return { header, lines, editable: [], mode: modeFromRawEntries(lines.map((line) => line.entry)), sessionName: sessionNameFromRawEntries(lines.map((line) => line.entry)) };
-    }
-
-    const { SessionManager } = await loadPiSdk();
-    const manager = SessionManager.open(uri.fsPath);
-    this.applyLeafOverride(manager, uri.fsPath);
-    header = manager.getHeader() ?? header;
-    const cwd = manager.getCwd() || (typeof header?.cwd === "string" ? header.cwd : path.dirname(uri.fsPath));
-    const branch = manager.getBranch();
-    const editable = branch
-      .map((entry) => this.toEditable(entry, cwd, uri.fsPath))
-      .filter((entry): entry is EditableSessionEntry => !!entry);
-
-    return { header, lines, editable, mode: modeFromRawEntries(branch), sessionName: manager.getSessionName() ?? "" };
+    return { header, lines };
   }
 
   private toEditable(entry: SessionEntry, cwd: string, sessionPath: string): EditableSessionEntry | null {
@@ -644,7 +667,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
 
   private async updateEntry(panel: WebviewHost, uri: vscode.Uri, message: WebviewMessage): Promise<void> {
     if (!message.entryId || typeof message.text !== "string") return;
-    const parsed = await this.readSession(uri);
+    const parsed = await this.readSessionLines(uri);
     let changed = false;
 
     for (const line of parsed.lines) {
@@ -663,6 +686,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
 
     if (!changed) return;
     await fs.promises.writeFile(uri.fsPath, parsed.lines.map((line) => line.raw).join("\n") + "\n", "utf8");
+    this.displaySessionCache.delete(uri.fsPath);
     await panel.webview.postMessage({ type: "saved", entryId: message.entryId });
   }
 
@@ -676,6 +700,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
     await fs.promises.mkdir(dir, { recursive: true });
     await fs.promises.writeFile(file, `${JSON.stringify(header)}\n`, "utf8");
     this.sessionLeafOverrides.delete(file);
+    this.displaySessionCache.delete(file);
     await panel.webview.postMessage({ type: "piStatus", text: `Ready: ${shortPath(file)}` });
     return vscode.Uri.file(file);
   }
@@ -782,7 +807,8 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
       }
 
       this.setLeafOverride(sessionUri.fsPath, manager.getLeafId());
-      await panel.webview.postMessage({ type: "piDone", success: true, reload: true });
+      await panel.webview.postMessage({ type: "piDone", success: true, reload: false });
+      await this.postSession(panel, sessionUri);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       await panel.webview.postMessage({ type: "showError", message: msg });
@@ -899,8 +925,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   private async handleRatAsset(panel: WebviewHost, sessionUri: vscode.Uri, message: WebviewMessage): Promise<void> {
     if (typeof message.id !== "number") return;
     try {
-      const parsed = await this.readSession(sessionUri);
-      const cwd = typeof parsed.header?.cwd === "string" ? parsed.header.cwd : path.dirname(sessionUri.fsPath);
+      const cwd = await sessionCwd(sessionUri);
       const src = localPathFromAssetUrl(message.url ?? "");
       if (!src || !fs.existsSync(src)) throw new Error(`Asset not found: ${message.url ?? ""}`);
       const assetsAbs = path.join(cwd, "_assets");
@@ -916,8 +941,7 @@ export class PiSessionMrmdEditor implements vscode.WebviewViewProvider, vscode.D
   private async runtimeForMessage(sessionUri: vscode.Uri, language: string | undefined): Promise<{ name: string; cwd: string; lang: string } | null> {
     const ratLang = ratLangForFence(language);
     if (!ratLang) return null;
-    const parsed = await this.readSession(sessionUri);
-    const cwd = typeof parsed.header?.cwd === "string" ? parsed.header.cwd : path.dirname(sessionUri.fsPath);
+    const cwd = await sessionCwd(sessionUri);
     return { name: projectRuntimeName(ratLang, cwd), cwd, lang: ratLang };
   }
 
@@ -1796,12 +1820,16 @@ function terminalOutputFence(text: string): string {
 }
 
 const TOOL_PREVIEW_LINES = 10;
+const TOOL_FULL_DETAILS_CHAR_LIMIT = 80_000;
 
 function limitedCodeFence(text: string, language: string, mode: "head" | "tail", summary: string): string {
   const value = String(text ?? "").replace(/\s+$/, "");
   const lines = value.split(/\r?\n/);
-  if (lines.length <= TOOL_PREVIEW_LINES) return codeFence(value, language);
+  if (lines.length <= TOOL_PREVIEW_LINES && value.length <= TOOL_FULL_DETAILS_CHAR_LIMIT) return codeFence(value, language);
   const preview = mode === "head" ? lines.slice(0, TOOL_PREVIEW_LINES) : lines.slice(-TOOL_PREVIEW_LINES);
+  if (value.length > TOOL_FULL_DETAILS_CHAR_LIMIT) {
+    return `${codeFence(preview.join("\n"), language)}\n\n_Full output omitted from the session view for responsiveness (${value.length.toLocaleString()} characters)._`;
+  }
   return `${codeFence(preview.join("\n"), language)}\n\n<details class="rat-collapsible-result"><summary>${summary}</summary>\n\n${codeFence(value, language)}\n</details>`;
 }
 
@@ -1892,13 +1920,13 @@ async function sessionProjectDirs(): Promise<string[]> {
 
 async function findJsonlFiles(dir: string, limit: number): Promise<string[]> {
   const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
-  const files: Array<{ file: string; mtime: number }> = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-    const file = path.join(dir, entry.name);
+  const candidates = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+    .map((entry) => path.join(dir, entry.name));
+  const files = await Promise.all(candidates.map(async (file) => {
     const stat = await fs.promises.stat(file).catch(() => null);
-    files.push({ file, mtime: stat?.mtimeMs ?? 0 });
-  }
+    return { file, mtime: stat?.mtimeMs ?? 0 };
+  }));
   return files.sort((a, b) => b.mtime - a.mtime).slice(0, limit).map((item) => item.file);
 }
 

@@ -10,7 +10,7 @@ import (
 )
 
 func TestCanInstallMissingRuntime(t *testing.T) {
-	if !canInstallMissingRuntime(generic.InstallStep{Manager: "npm", Deps: []string{"@mariozechner/pi-coding-agent"}}) {
+	if !canInstallMissingRuntime(generic.InstallStep{Manager: "npm", Deps: []string{"@earendil-works/pi-coding-agent"}}) {
 		t.Fatal("npm runtime deps should be allowed to provision a missing runtime binary")
 	}
 	if canInstallMissingRuntime(generic.InstallStep{Manager: "pip", Deps: []string{"prompt-toolkit"}}) {
@@ -38,7 +38,7 @@ func TestInstallNPMPackagesUsesGlobalInstall(t *testing.T) {
 		t.Fatalf("detectNPM() = %q, want %q", npm, npmPath)
 	}
 
-	if err := installNPMPackages(npm, []string{"@mariozechner/pi-coding-agent"}); err != nil {
+	if err := installNPMPackages(npm, []string{"@earendil-works/pi-coding-agent"}); err != nil {
 		t.Fatalf("installNPMPackages: %v", err)
 	}
 
@@ -47,7 +47,7 @@ func TestInstallNPMPackagesUsesGlobalInstall(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	got := strings.TrimSpace(string(data))
-	want := "install -g @mariozechner/pi-coding-agent"
+	want := "install -g @earendil-works/pi-coding-agent"
 	if got != want {
 		t.Fatalf("npm args = %q, want %q", got, want)
 	}
