@@ -152,6 +152,18 @@ export async function ratInstall(
   await exec(["install", lang], cwd, 120_000, true);
 }
 
+/** Resolve a runtime using the rat CLI's canonical resolver. */
+export async function ratResolve(
+  input: string,
+  cwd: string,
+  includeEnv = false,
+): Promise<ResolvedRuntimeInfo> {
+  const args = ["resolve", input, "--json"];
+  if (includeEnv) args.push("--include-env");
+  const { stdout } = await exec(args, cwd, 10_000, true);
+  return JSON.parse(stdout) as ResolvedRuntimeInfo;
+}
+
 // ── State file ─────────────────────────────────────────────
 
 function stateFilePath(): string {
@@ -192,6 +204,17 @@ export interface SavedRuntime {
 export interface RatState {
   kernels: KernelInfo[];
   runtimes: SavedRuntime[];
+}
+
+export interface ResolvedRuntimeInfo {
+  name: string;
+  lang: string;
+  cwd: string;
+  venv?: string;
+  runtime_path?: string;
+  options?: Record<string, string>;
+  env?: Record<string, string>;
+  is_new?: boolean;
 }
 
 /** Read the full state file (running kernels + saved runtimes). */

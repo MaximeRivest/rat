@@ -48,12 +48,16 @@ export interface SourceItem {
   lang: string;
 }
 
+export interface WebviewHost {
+  webview: vscode.Webview;
+}
+
 export interface WebviewItem {
   kind: "webview";
   id: number;
   code: string;
   document: vscode.TextDocument;
-  webviewPanel: vscode.WebviewPanel;
+  webviewPanel: WebviewHost;
   runtimeName: string;
   cwd: string;
   lang: string;
@@ -303,7 +307,7 @@ export class ExecutionController {
     return true;
   }
 
-  cancelWebviewRun(webviewPanel: vscode.WebviewPanel, id: number): void {
+  cancelWebviewRun(webviewPanel: WebviewHost, id: number): void {
     const queuedIdx = this.items.findIndex(
       (item) => item.kind === "webview" && item.webviewPanel === webviewPanel && item.id === id,
     );

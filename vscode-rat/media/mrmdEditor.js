@@ -563,6 +563,56 @@
   border-radius: 3px !important;
 }
 
+#editor details {
+  margin: 6px 0 10px var(--rat-output-inset-left, 14px);
+  color: var(--vscode-editor-foreground);
+}
+
+#editor details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 20px;
+  padding: 1px 8px 1px 6px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-button-secondaryBackground, color-mix(in srgb, var(--vscode-editor-foreground) 5%, transparent));
+  border: 1px solid var(--vscode-button-border, var(--vscode-editorWidget-border, var(--vscode-panel-border, transparent)));
+  border-radius: 3px;
+  font-family: var(--vscode-font-family);
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#editor details > summary:hover {
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground, color-mix(in srgb, var(--vscode-editor-foreground) 9%, transparent)));
+}
+
+#editor details > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+#editor details > summary::marker {
+  content: "";
+}
+
+#editor details > summary::-webkit-details-marker {
+  display: none;
+}
+
+#editor details > summary::before {
+  content: "▸";
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+}
+
+#editor details[open] > summary::before {
+  content: "▾";
+}
+
 #editor .cm-codeblock-line .cm-dt-keyword,
 #editor .cm-wysiwyg-code-fence-line .cm-dt-keyword { color: var(--syntax-keyword) !important; }
 #editor .cm-codeblock-line .cm-dt-control-keyword,

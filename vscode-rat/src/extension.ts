@@ -29,6 +29,7 @@ import {
   RatReferenceProvider,
 } from "./navigation";
 import { clearAllOutputs } from "./output";
+import { debugPythonCellsAtLine } from "./pythonDebug";
 import { ExecutionController, type QueueState } from "./queue";
 import {
   initRuntimeState,
@@ -74,6 +75,7 @@ import {
   syncRatMarkdownThemes,
   useRatMarkdownAsDefaultEditor,
 } from "./mrmdEditor";
+import { PiSessionMrmdEditor } from "./piSessionEditor";
 
 // ── Globals ────────────────────────────────────────────────
 
@@ -83,11 +85,13 @@ let queue: ExecutionController;
 let treeProvider: RuntimeTreeProvider;
 let inspectorProvider: RatInspectorViewProvider;
 let variablesProvider: RatVariablesViewProvider;
+let extensionContext: vscode.ExtensionContext;
 let lastVariablesTargetKey = "";
 
 // ── Activate ───────────────────────────────────────────────
 
 export function activate(ctx: vscode.ExtensionContext): void {
+  extensionContext = ctx;
   initRuntimeState(ctx);
   initRatInstaller(ctx);
   registerFallbackDocumentProvider(ctx);
@@ -146,11 +150,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   inspectorProvider = new RatInspectorViewProvider();
   variablesProvider = new RatVariablesViewProvider();
+  const piSessionProvider = new PiSessionMrmdEditor(ctx, queue);
   ctx.subscriptions.push(
     inspectorProvider,
     variablesProvider,
+    piSessionProvider,
     vscode.window.registerWebviewViewProvider("ratInspector", inspectorProvider),
     vscode.window.registerWebviewViewProvider("ratVariables", variablesProvider),
+    vscode.window.registerWebviewViewProvider(PiSessionMrmdEditor.viewType, piSessionProvider, { webviewOptions: { retainContextWhenHidden: true } }),
   );
 
   ctx.subscriptions.push(RatMrmdEditorProvider.register(ctx, queue, {
@@ -321,13 +328,15 @@ export function activate(ctx: vscode.ExtensionContext): void {
     ctx.subscriptions.push(vscode.commands.registerCommand(id, fn));
 
   reg("rat.runCell", () => runCmd(false));
-
-
   reg("rat.runCellAndAdvance", () => runCmd(true));
   reg("rat.runAbove", runAboveCmd);
   reg("rat.runAll", runAllCmd);
   reg("rat.runCellAt", (line: number) => runCellAtCmd(line));
   reg("rat.runAboveAt", (line: number) => runAboveAtCmd(line));
+  reg("rat.debugPythonCell", () => debugPythonCellCmd());
+  reg("rat.debugPythonAbove", () => debugPythonAboveCmd());
+  reg("rat.debugPythonCellAt", (line: number) => debugPythonCellAtCmd(line));
+  reg("rat.debugPythonAboveAt", (line: number) => debugPythonAboveAtCmd(line));
 
   reg("rat.cancelExecution", () => queue.cancelAll());
   reg("rat.clearQueue", () => queue.clear());
@@ -343,6 +352,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   reg("rat.configureMarkdownAppearance", configureRatMarkdownAppearance);
   reg("rat.useMrmdAsDefaultMarkdownEditor", useRatMarkdownAsDefaultEditor);
   reg("rat.restoreDefaultMarkdownEditor", restoreDefaultMarkdownEditor);
+  reg("rat.openPiSessionMrmd", (uri?: vscode.Uri) => piSessionProvider.show(uri));
   reg("rat.showVariables", showVariablesCmd);
   reg("rat.stopKernel", stopKernelCmd);
   reg("rat.restartKernel", restartKernelCmd);
@@ -857,6 +867,34 @@ function runAboveAtCmd(line: number): void {
       if (c.executable) enqueueNotebook(editor, c);
     }
   }
+}
+
+async function debugPythonCellCmd(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isRatFile(editor.document)) return;
+  await debugPythonCellAtCmd(editor.selection.active.line);
+}
+
+async function debugPythonAboveCmd(): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || !isRatFile(editor.document)) return;
+  await debugPythonAboveAtCmd(editor.selection.active.line);
+}
+
+async function debugPythonCellAtCmd(line: number): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+  const fl = detectFileLang(editor.document);
+  if (fl.mode !== "notebook") return;
+  await debugPythonCellsAtLine(extensionContext, editor, line, "cell");
+}
+
+async function debugPythonAboveAtCmd(line: number): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+  const fl = detectFileLang(editor.document);
+  if (fl.mode !== "notebook") return;
+  await debugPythonCellsAtLine(extensionContext, editor, line, "above");
 }
 
 async function runAllCmd(): Promise<void> {

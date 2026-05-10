@@ -39,6 +39,26 @@ export class RatCodeLensProvider implements vscode.CodeLensProvider {
           tooltip: "Run all cells from the top through this one",
         }),
       );
+
+      if (cell.ratLang === "py") {
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: " Debug",
+            command: "rat.debugPythonCellAt",
+            arguments: [cell.openLine],
+            tooltip: "Run this Python cell in the VS Code debugger",
+          }),
+        );
+
+        lenses.push(
+          new vscode.CodeLens(range, {
+            title: " Debug Above",
+            command: "rat.debugPythonAboveAt",
+            arguments: [cell.openLine],
+            tooltip: "Run Python cells from the top through this one in the VS Code debugger",
+          }),
+        );
+      }
     }
 
     return lenses;

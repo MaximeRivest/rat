@@ -52,7 +52,11 @@
     "onCommand:rat.configureMarkdownAppearance",
     "onCommand:rat.useMrmdAsDefaultMarkdownEditor",
     "onCommand:rat.restoreDefaultMarkdownEditor",
-    "onCommand:rat.installCli"
+    "onCommand:rat.debugPythonCell",
+    "onCommand:rat.debugPythonAbove",
+    "onCommand:rat.installCli",
+    "onView:ratPiSessions",
+    "onCommand:rat.openPiSessionMrmd"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -61,6 +65,11 @@
         {
           "id": "rat",
           "title": "Rat Runtimes",
+          "icon": "icon.svg"
+        },
+        {
+          "id": "ratPiSessionsContainer",
+          "title": "PiRAT",
           "icon": "icon.svg"
         }
       ]
@@ -79,6 +88,13 @@
         {
           "id": "ratInspector",
           "name": "Inspector",
+          "type": "webview"
+        }
+      ],
+      "ratPiSessionsContainer": [
+        {
+          "id": "ratPiSessions",
+          "name": "Sessions",
           "type": "webview"
         }
       ]
@@ -117,6 +133,14 @@
       {
         "command": "rat.runAbove",
         "title": "Rat: Run Above"
+      },
+      {
+        "command": "rat.debugPythonCell",
+        "title": "Rat: Debug Python Cell"
+      },
+      {
+        "command": "rat.debugPythonAbove",
+        "title": "Rat: Debug Python Cells Above"
       },
       {
         "command": "rat.runAll",
@@ -171,6 +195,10 @@
       {
         "command": "rat.openRenderedMarkdown",
         "title": "Rat: Open Rat Markdown Editor"
+      },
+      {
+        "command": "rat.openPiSessionMrmd",
+        "title": "Rat: Open PiRAT"
       },
       {
         "command": "rat.openMarkdownPreview",
@@ -563,6 +591,7 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "web-tree-sitter": "^0.26.8"
+    "web-tree-sitter": "^0.26.8",
+    "@earendil-works/pi-coding-agent": "^0.74.0"
   }
 }
