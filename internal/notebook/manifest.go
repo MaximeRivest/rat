@@ -42,6 +42,11 @@ import (
 type Manifest struct {
 	Project string      `yaml:"project"`
 	Python  *PythonSpec `yaml:"python"`
+	// After lists notebooks (paths relative to this one) whose cells must
+	// have run in the same kernel before this notebook's cells make sense.
+	// A declared dependency, never an implicit one: `rat play` runs them
+	// first, once per kernel lifetime.
+	After []string `yaml:"after"`
 }
 
 // PythonSpec declares the Python environment a notebook needs.
@@ -146,6 +151,60 @@ func (nb *Notebook) ProjectRoot() (string, bool) {
 	return filepath.Clean(p), true
 }
 
+// AfterPaths returns the absolute paths of the notebooks this one
+// declares in `rat.after`, in declaration order.
+func (nb *Notebook) AfterPaths() []string {
+	out := make([]string, 0, len(nb.Manifest.After))
+	for _, a := range nb.Manifest.After {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if !filepath.IsAbs(a) {
+			a = filepath.Join(nb.Dir, a)
+		}
+		out = append(out, filepath.Clean(a))
+	}
+	return out
+}
+
+// Chain returns the notebooks that must run before nb, in run order
+// (dependencies of dependencies first), each once. nb itself is not
+// included. An unreadable or cyclic dependency is an error: a notebook
+// that cannot state its prerequisites cannot claim to be runnable.
+func (nb *Notebook) Chain() ([]*Notebook, error) {
+	var order []*Notebook
+	seen := map[string]bool{nb.Path: true}
+	onPath := map[string]bool{nb.Path: true}
+	var visit func(n *Notebook) error
+	visit = func(n *Notebook) error {
+		for _, p := range n.AfterPaths() {
+			if onPath[p] {
+				return fmt.Errorf("rat.after cycle: %s ← %s", p, n.Path)
+			}
+			if seen[p] {
+				continue
+			}
+			dep, err := Load(p)
+			if err != nil {
+				return fmt.Errorf("rat.after of %s: %w", n.Path, err)
+			}
+			onPath[p] = true
+			if err := visit(dep); err != nil {
+				return err
+			}
+			delete(onPath, p)
+			seen[p] = true
+			order = append(order, dep)
+		}
+		return nil
+	}
+	if err := visit(nb); err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
 // Languages returns the canonical languages used by the notebook's cells,
 // sorted, without duplicates.
 func (nb *Notebook) Languages() []string {
@@ -164,6 +223,11 @@ func (nb *Notebook) Languages() []string {
 func (m Manifest) validate() error {
 	if strings.ContainsAny(m.Project, "\n\r") {
 		return fmt.Errorf("rat.project must be a path")
+	}
+	for i, a := range m.After {
+		if strings.TrimSpace(a) == "" || strings.ContainsAny(a, "\n\r") {
+			return fmt.Errorf("rat.after[%d] must be a notebook path", i)
+		}
 	}
 	if m.Python != nil {
 		if m.Python.Requires != "" {

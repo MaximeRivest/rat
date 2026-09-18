@@ -37,6 +37,11 @@ type Kernel struct {
 	Status  string    `yaml:"status"`            // "running" or "stopped"
 	Started time.Time `yaml:"started"`           // when the kernel was started
 	Stopped time.Time `yaml:"stopped,omitempty"` // when the kernel was stopped (zero if running)
+	// Played lists notebooks whose cells ran to completion in this kernel
+	// process (rat play). A notebook's `rat.after` prerequisites are
+	// skipped when already played here; a restart starts a new entry, so
+	// the list dies with the namespace it describes.
+	Played []string `yaml:"played,omitempty"`
 }
 
 // Runtime is a saved named runtime configuration (from `rat add`).
@@ -202,6 +207,35 @@ func (s *Store) MarkStopped(name string) (bool, error) {
 			f.Kernels[i].Stopped = time.Now()
 			return true, s.writeLocked(f)
 		}
+	}
+	return false, nil
+}
+
+// MarkPlayed records that notebook ran to completion in the running
+// kernel named name. Returns false when no such running kernel exists.
+func (s *Store) MarkPlayed(name, notebook string) (bool, error) {
+	unlock, err := s.lock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	f, err := s.readLocked()
+	if err != nil {
+		return false, err
+	}
+	for i := range f.Kernels {
+		k := &f.Kernels[i]
+		if k.Name != name || k.Status != StatusRunning {
+			continue
+		}
+		for _, p := range k.Played {
+			if p == notebook {
+				return true, nil
+			}
+		}
+		k.Played = append(k.Played, notebook)
+		return true, s.writeLocked(f)
 	}
 	return false, nil
 }

@@ -108,6 +108,40 @@ What `ensure` will **not** do without being told:
 - install tools for other languages (tmux for shell cells, Rscript, julia,
   node). `doctor` reports them as missing; the Python plan still proceeds.
 
+## Notebooks that build on other notebooks
+
+A notebook may declare that other notebooks must have run first, in the
+same kernel:
+
+```yaml
+---
+rat:
+  after:
+    - ./01-load-data.md
+---
+```
+
+This is a **declared** dependency. A notebook must never rely on whatever
+the kernel happens to contain — that is what makes notebooks lie. With
+`after`, the dependency is visible in the file, `rat doctor` shows whether
+each prerequisite has already run, and `rat play` runs the chain first:
+
+```bash
+rat play docs/analysis.md                 # ensure → prerequisites (once per kernel) → this notebook's cells
+rat play docs/analysis.md --prerequisites # only the chain (a client that runs cells itself uses this)
+rat play docs/analysis.md --json
+```
+
+Rules the chain keeps:
+
+- prerequisites run once per kernel lifetime (the kernel remembers what it
+  played; `rat restart` forgets), depth first, each once;
+- every notebook in a chain must belong to the same project — state does
+  not flow between kernels — and cycles are refused;
+- a chain shares requirements: `ensure` installs the union.
+
+`rat play` prints outputs; it never writes them into the files.
+
 ## Run against the notebook
 
 Every rat command takes `--doc <notebook>`: language names then resolve

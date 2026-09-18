@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,6 +26,11 @@ var (
 	ensureForce    bool
 	ensureRecreate bool
 	doctorJSON     bool
+
+	playJSON          bool
+	playForce         bool
+	playPrerequisites bool
+	playTimeout       time.Duration
 )
 
 func init() {
@@ -38,6 +44,12 @@ func init() {
 	rootCmd.AddCommand(ensureCmd)
 
 	doctorCmd.Flags().BoolVar(&doctorJSON, "json", false, "Print a notebook report as JSON (notebook argument only)")
+
+	playCmd.Flags().BoolVar(&playJSON, "json", false, "Print the run report as JSON for integrations")
+	playCmd.Flags().BoolVar(&playForce, "force", false, "Replay prerequisites even when the kernel already ran them")
+	playCmd.Flags().BoolVar(&playPrerequisites, "prerequisites", false, "Run only the `rat.after` chain, not this notebook's cells")
+	playCmd.Flags().DurationVar(&playTimeout, "timeout", 0, "Maximum time for one cell (0 = no limit)")
+	rootCmd.AddCommand(playCmd)
 }
 
 // notebookForDoc loads the --doc notebook, or returns nil when unset.
@@ -154,6 +166,86 @@ Examples:
 	},
 }
 
+var playCmd = &cobra.Command{
+	Use:     "play <notebook.md>",
+	Short:   "Run a notebook's cells top to bottom (after its prerequisites)",
+	GroupID: "daily",
+	Long: `Run a notebook.
+
+First makes its environment true (as 'rat ensure' would), then runs the
+notebooks it declares in 'rat.after' — each once per kernel lifetime —
+and finally its own cells, top to bottom on the project's kernels,
+stopping at the first failing cell. Outputs are printed, not written
+into the files.
+
+A notebook declares prerequisites in its front matter:
+
+  ---
+  rat:
+    after: [./01-load-data.md]
+  ---
+
+The chain runs in the same kernel, so state carries over. The kernel
+remembers what it played; 'rat restart' forgets.
+
+Examples:
+  rat play docs/analysis.md
+  rat play docs/analysis.md --prerequisites   # only the chain
+  rat play docs/analysis.md --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		nb, err := loadNotebookArg(args[0])
+		if err != nil {
+			return err
+		}
+		opts := notebook.PlayOptions{PrerequisitesOnly: playPrerequisites, Force: playForce, Timeout: playTimeout}
+		if !playJSON {
+			opts.OnNotebook = func(run *notebook.NotebookRun) {
+				name := shortPath(run.Notebook)
+				switch {
+				case run.Skipped:
+					fmt.Fprintf(os.Stderr, "%s %s %s\n", s.Dim("↷"), name, s.Dim(run.Reason))
+				case run.Role == "prerequisite":
+					fmt.Fprintf(os.Stderr, "%s %s %s\n", s.Cyan("▶"), name, s.Dim("(prerequisite)"))
+				default:
+					fmt.Fprintf(os.Stderr, "%s %s\n", s.Cyan("▶"), name)
+				}
+			}
+			opts.OnCell = func(run *notebook.NotebookRun, c notebook.CellResult) {
+				mark := s.Green("✓")
+				if !c.OK {
+					mark = s.Red("✗")
+				}
+				fmt.Fprintf(os.Stderr, "  %s %s cell at line %d %s\n", mark, c.Lang, c.Line, s.Dim(fmt.Sprintf("%.1fs", c.Seconds)))
+				if c.Output != "" && (!c.OK || run.Role == "notebook") {
+					fmt.Println(indent(lastLines(c.Output, 40), "    "))
+				}
+			}
+			opts.Ensure.Progress = func(step notebook.Step) {
+				mark := s.Green("✓")
+				if !step.OK {
+					mark = s.Red("✗")
+				}
+				fmt.Fprintf(os.Stderr, "%s %s %s\n", mark, step.Action.Label, s.Dim(fmt.Sprintf("%.1fs", step.Seconds)))
+			}
+		}
+		report, err := notebook.Play(store(), nb, opts)
+		if err != nil {
+			return err
+		}
+		if playJSON {
+			return printJSON(report)
+		}
+		if report.Ensure != nil && report.Ensure.Blocked {
+			printReport(report.Ensure, true)
+		}
+		if !report.OK {
+			os.Exit(1)
+		}
+		return nil
+	},
+}
+
 // runNotebookDoctor handles `rat doctor <notebook.md>`.
 func runNotebookDoctor(path string) error {
 	nb, err := loadNotebookArg(path)
@@ -191,6 +283,15 @@ func printReport(r *notebook.Report, applied bool) {
 		if !c.OK && c.Hint != "" {
 			fmt.Printf("  %s %s\n", s.Dim("→"), c.Hint)
 		}
+	}
+	for _, a := range r.After {
+		mark := s.Green("✓")
+		note := "ran in this kernel"
+		if !a.Played {
+			mark = s.Dim("·")
+			note = "not yet run — rat play runs it first"
+		}
+		fmt.Printf("  %s %s %s\n", mark, shortPath(a.Path), s.Dim(note))
 	}
 	if r.Python != nil && len(r.Python.Requirements) > 0 {
 		fmt.Printf("  %s %s\n", s.Dim("requirements:"), s.Dim(strings.Join(r.Python.Requirements, ", ")))

@@ -26,6 +26,30 @@ import (
 // same one `rat install py` establishes.
 var RatRequirements = []string{"ipython", "jedi"}
 
+// ratRequirements honours RAT_NOTEBOOK_REQUIREMENTS (comma separated; empty
+// string for none) so offline tests and air-gapped machines can opt out.
+func ratRequirements(opts *Options) []string {
+	v, set := lookupEnv(opts, "RAT_NOTEBOOK_REQUIREMENTS")
+	if !set {
+		return RatRequirements
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func lookupEnv(opts *Options, key string) (string, bool) {
+	if opts.Getenv != nil {
+		v := opts.Getenv(key)
+		return v, v != ""
+	}
+	return os.LookupEnv(key)
+}
+
 // Report is the result of Doctor (a plan) or Ensure (a plan and what was
 // done about it). It is the JSON integrations consume.
 type Report struct {
@@ -37,6 +61,9 @@ type Report struct {
 	Languages      []string `json:"languages"`
 
 	Python *PythonState `json:"python,omitempty"`
+	// After lists the notebooks this one declares as prerequisites, in run
+	// order, with whether each has already run in the current kernels.
+	After []AfterState `json:"after"`
 
 	Checks  []Check  `json:"checks"`
 	Actions []Action `json:"actions"`
@@ -65,6 +92,12 @@ type PythonState struct {
 	KernelRunning bool     `json:"kernel_running"`
 	KernelVenv    string   `json:"kernel_venv,omitempty"` // live binding when running
 	PEP723        bool     `json:"pep723,omitempty"`
+}
+
+// AfterState is one prerequisite notebook of the chain.
+type AfterState struct {
+	Path   string `json:"path"`
+	Played bool   `json:"played"` // its cells ran to completion in the kernels it needs, which are still running
 }
 
 // Check is one verified fact about the environment.
@@ -129,7 +162,7 @@ func (o *Options) getenv(k string) string {
 // would execute. It changes nothing.
 func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	r := &Report{Notebook: nb.Path, Declared: nb.Declared, Languages: nb.Languages(),
-		Checks: []Check{}, Actions: []Action{}, Steps: []Step{}}
+		After: []AfterState{}, Checks: []Check{}, Actions: []Action{}, Steps: []Step{}}
 	if r.Languages == nil {
 		r.Languages = []string{}
 	}
@@ -152,6 +185,61 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	r.ProjectPackage = ProjectPackage(r.Project)
 	r.Checks = append(r.Checks, Check{ID: "project", Label: "project", OK: true,
 		Detail: fmt.Sprintf("%s (%s)", r.Project, r.ProjectSource)})
+
+	// Prerequisite chain (rat.after): must load, must not cycle, and must
+	// live in this project — a chain across projects would span kernels,
+	// and state does not flow between kernels.
+	chain, err := nb.Chain()
+	if err != nil {
+		r.Checks = append(r.Checks, Check{ID: "after", Label: "after", Detail: err.Error(),
+			Hint: "fix the `rat.after` paths in the notebook's front matter"})
+		r.Blocked = true
+		return r, nil
+	}
+	var chainPython []*PythonSpec
+	for _, dep := range chain {
+		depRoot, pinned := dep.ProjectRoot()
+		if !pinned {
+			depRoot, _ = project.FindRoot(dep.Dir)
+		}
+		if depRoot != r.Project {
+			r.Checks = append(r.Checks, Check{ID: "after", Label: "after",
+				Detail: fmt.Sprintf("%s belongs to project %s, not %s", rel(nb.Dir, dep.Path), depRoot, r.Project),
+				Hint:   "a chain must stay inside one project (one kernel); pin `rat.project` in both notebooks"})
+			r.Blocked = true
+			return r, nil
+		}
+		r.After = append(r.After, AfterState{Path: dep.Path, Played: playedIn(store, dep, depRoot)})
+		if dep.Python != nil {
+			chainPython = append(chainPython, dep.Python)
+		}
+		for _, l := range dep.Languages() {
+			if !containsString(r.Languages, l) {
+				r.Languages = append(r.Languages, l)
+			}
+		}
+	}
+	sort.Strings(r.Languages)
+	if len(chain) > 0 {
+		var names []string
+		pending := 0
+		for _, a := range r.After {
+			n := rel(nb.Dir, a.Path)
+			if !a.Played {
+				pending++
+				n += " (not yet run)"
+			}
+			names = append(names, n)
+		}
+		r.Checks = append(r.Checks, Check{ID: "after", Label: "after", OK: true,
+			Detail: strings.Join(names, ", ") + map[bool]string{true: " — rat play runs them first", false: ""}[pending > 0]})
+	}
+	// The chain's requirements are this notebook's too: they share a kernel.
+	effective := nb.Python
+	for i := len(chainPython) - 1; i >= 0; i-- {
+		effective = mergePython(chainPython[i], effective)
+	}
+	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723}
 
 	// Tools for non-Python cells. Rat does not install these yet: report
 	// them, but do not let a missing R or tmux stop the Python work.
@@ -261,7 +349,7 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 	if nb.Python != nil {
 		ps.Requirements = append(ps.Requirements, nb.Python.Dependencies...)
 	}
-	for _, rq := range RatRequirements {
+	for _, rq := range ratRequirements(opts) {
 		if !containsString(ps.Requirements, rq) {
 			ps.Requirements = append(ps.Requirements, rq)
 		}
@@ -494,6 +582,26 @@ func finish(store *state.Store, nb *Notebook, opts Options, steps []Step) (*Repo
 		}
 	}
 	return report, nil
+}
+
+// playedIn reports whether dep's cells ran to completion in every kernel
+// they need, and those kernels are still the same running processes.
+func playedIn(store *state.Store, dep *Notebook, root string) bool {
+	langs := dep.Languages()
+	if len(langs) == 0 {
+		return true
+	}
+	for _, l := range langs {
+		res, err := resolver.ResolveWith(store, l, resolver.Options{Cwd: dep.Dir, ProjectRoot: root})
+		if err != nil {
+			return false
+		}
+		k, _ := store.GetRunning(res.Name)
+		if k == nil || !containsString(k.Played, dep.Path) {
+			return false
+		}
+	}
+	return true
 }
 
 // ── helpers ──

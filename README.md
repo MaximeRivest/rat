@@ -196,7 +196,7 @@ rat ensure docs/tutorial.md          # create the venv, install, restart the ker
 rat run --doc docs/tutorial.md py 'import websockets'   # same kernel the notebook means
 ```
 
-Already-satisfied requirements are skipped, so a second `ensure` is a no-op. PEP 723 blocks in python cells are understood too. Details: [docs/notebooks.md](docs/notebooks.md).
+Already-satisfied requirements are skipped, so a second `ensure` is a no-op. PEP 723 blocks in python cells are understood too. A notebook that builds on another declares it (`rat.after: [./01-load.md]`); `rat play notebook.md` runs the chain first, once per kernel, then the notebook's cells. Details: [docs/notebooks.md](docs/notebooks.md).
 
 ### Named runtimes
 
@@ -390,6 +390,7 @@ Daily use
   rat reset <runtime>             Clear namespace
   rat restart <runtime>           Fresh start
   rat ensure <notebook.md>        Make a notebook's environment match its front matter
+  rat play <notebook.md>          Run a notebook's cells (after its rat.after prerequisites)
   --doc <notebook.md>             (any command) resolve language names for that notebook
 
 Setup

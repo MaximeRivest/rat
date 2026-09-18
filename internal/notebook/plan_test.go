@@ -1,9 +1,13 @@
 package notebook
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/maximerivest/rat/internal/state"
@@ -185,5 +189,179 @@ func TestDoctorReportsMissingRequirement(t *testing.T) {
 	}
 	if r.OK || len(r.Actions) != 1 || r.Actions[0].ID != "install" || len(r.Python.Missing) != 1 {
 		t.Fatalf("expected one install action: %+v missing=%v", r.Actions, r.Python.Missing)
+	}
+}
+
+func TestChainOrderAndCycle(t *testing.T) {
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0755)
+	writeNotebook(t, repo, "nb/00-base.md", "---\nrat:\n  python:\n    dependencies: [rich]\n---\n```python\nbase = 1\n```\n")
+	writeNotebook(t, repo, "nb/01-load.md", "---\nrat:\n  after: [./00-base.md]\n  python:\n    dependencies: [httpx]\n---\n```python\nloaded = base + 1\n```\n")
+	nb := writeNotebook(t, repo, "nb/02-analyse.md", "---\nrat:\n  after:\n    - ./01-load.md\n    - ./00-base.md\n---\n```python\nprint(loaded)\n```\n")
+	chain, err := nb.Chain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range chain {
+		names = append(names, filepath.Base(c.Path))
+	}
+	if len(names) != 2 || names[0] != "00-base.md" || names[1] != "01-load.md" {
+		t.Fatalf("chain order: %v", names)
+	}
+	offlineRatRequirements(t)
+	r, err := Doctor(tempStore(t), nb, Options{LookPath: func(string) (string, error) { return "", os.ErrNotExist }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.After) != 2 || r.After[0].Played {
+		t.Fatalf("after state: %+v", r.After)
+	}
+	// The chain's requirements are merged in, dependencies first.
+	if got := r.Python.Requirements; len(got) != 2 || got[0] != "rich" || got[1] != "httpx" {
+		t.Fatalf("merged requirements: %v", got)
+	}
+
+	// A cycle is refused with a clear message.
+	writeNotebook(t, repo, "nb/00-base.md", "---\nrat:\n  after: [./02-analyse.md]\n---\n```python\n1\n```\n")
+	if _, err := nb.Chain(); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected a cycle error, got %v", err)
+	}
+	rc, err := Doctor(tempStore(t), nb, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rc.Blocked || rc.Checks[len(rc.Checks)-1].ID != "after" {
+		t.Fatalf("cycle must block with an `after` check: %+v", rc.Checks)
+	}
+}
+
+func TestChainAcrossProjectsIsRefused(t *testing.T) {
+	base := t.TempDir()
+	a := filepath.Join(base, "a")
+	b := filepath.Join(base, "b")
+	os.MkdirAll(filepath.Join(a, ".git"), 0755)
+	os.MkdirAll(filepath.Join(b, ".git"), 0755)
+	writeNotebook(t, a, "setup.md", "```python\nx = 1\n```\n")
+	nb := writeNotebook(t, b, "use.md", "---\nrat:\n  after: [../a/setup.md]\n---\n```python\nprint(x)\n```\n")
+	r, err := Doctor(tempStore(t), nb, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Blocked || !strings.Contains(r.Checks[len(r.Checks)-1].Detail, "belongs to project") {
+		t.Fatalf("cross-project chain must block: %+v", r.Checks)
+	}
+}
+
+// buildRat compiles the CLI once per test binary: Play starts kernels
+// through os.Executable(), which inside `go test` is the test binary.
+var ratBinary struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+func buildRat(t *testing.T) string {
+	t.Helper()
+	ratBinary.once.Do(func() {
+		goBin, err := exec.LookPath("go")
+		if err != nil {
+			ratBinary.err = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "rat-bin-")
+		if err != nil {
+			ratBinary.err = err
+			return
+		}
+		out := filepath.Join(dir, "rat")
+		cmd := exec.Command(goBin, "build", "-o", out, "./cmd/rat")
+		cmd.Dir = moduleRoot(t)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			ratBinary.err = fmt.Errorf("go build: %v\n%s", err, b)
+			return
+		}
+		ratBinary.path = out
+	})
+	if ratBinary.err != nil {
+		t.Skip("cannot build rat: " + ratBinary.err.Error())
+	}
+	return ratBinary.path
+}
+
+func moduleRoot(t *testing.T) string {
+	dir, _ := os.Getwd()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
+	}
+}
+
+// isolatedEnv points rat's state, cache and home into a temp dir so the
+// test never touches the developer's kernels.
+func isolatedEnv(t *testing.T) []string {
+	home := t.TempDir()
+	return append(os.Environ(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
+	)
+}
+
+func TestPlayRunsChainOncePerKernel(t *testing.T) {
+	offlineRatRequirements(t)
+	requireVenvTooling(t)
+	rat := buildRat(t)
+	env := isolatedEnv(t)
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0755)
+	writeNotebook(t, repo, "nb/00-base.md", "```python\nbase = 40\n```\n")
+	nb := writeNotebook(t, repo, "nb/01-use.md", "---\nrat:\n  after: [./00-base.md]\n---\n```python\nprint(base + 2)\n```\n")
+	bad := writeNotebook(t, repo, "nb/02-bad.md", "---\nrat:\n  after: [./00-base.md]\n---\n```python\nraise ValueError('boom')\n```\n\n```python\nprint('never')\n```\n")
+	t.Cleanup(func() {
+		stop := exec.Command(rat, "stop", "--all")
+		stop.Env = env
+		_ = stop.Run()
+	})
+	// ipython/jedi are rat's own requirements; this test stays offline.
+	play := func(path string) *PlayReport {
+		t.Helper()
+		cmd := exec.Command(rat, "play", path, "--json", "--timeout", "2m")
+		cmd.Env = append(env, "RAT_NOTEBOOK_REQUIREMENTS=")
+		out, _ := cmd.Output()
+		var r PlayReport
+		if err := json.Unmarshal(out, &r); err != nil {
+			t.Fatalf("rat play %s: %v\n%s", path, err, out)
+		}
+		return &r
+	}
+	report := play(nb.Path)
+	if !report.OK {
+		t.Fatalf("play failed: %+v ensure=%+v", report.Runs, report.Ensure.Checks)
+	}
+	if len(report.Runs) != 2 || report.Runs[0].Skipped || report.Runs[0].Role != "prerequisite" {
+		t.Fatalf("first play must run the prerequisite: %+v", report.Runs)
+	}
+	if out := report.Runs[1].Cells[0].Output; !strings.Contains(out, "42") {
+		t.Fatalf("state did not carry over: %q", out)
+	}
+	again := play(nb.Path)
+	if !again.OK || !again.Runs[0].Skipped {
+		t.Fatalf("second play must skip the prerequisite: %+v", again.Runs)
+	}
+	if !again.Ensure.After[0].Played {
+		t.Fatalf("doctor must see the prerequisite as played: %+v", again.Ensure.After)
+	}
+	br := play(bad.Path)
+	if br.OK || len(br.Runs[1].Cells) != 1 || br.Runs[1].Cells[0].OK || !strings.Contains(br.Runs[1].Cells[0].Output, "boom") {
+		t.Fatalf("failure reporting: %+v", br.Runs[1])
 	}
 }
