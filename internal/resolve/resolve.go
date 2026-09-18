@@ -38,11 +38,29 @@ type Result struct {
 	IsNew       bool              // true if no existing kernel/runtime matches
 }
 
+// Options refine how language aliases expand.
+type Options struct {
+	// Cwd is the directory the request is made from. Language aliases
+	// expand relative to it (lang@<project of Cwd>).
+	Cwd string
+	// ProjectRoot, when set, replaces marker-based project detection: the
+	// language alias expands to lang@<ProjectRoot> and the environment is
+	// looked up between Cwd and ProjectRoot. A notebook pins its project
+	// this way.
+	ProjectRoot string
+}
+
 // Resolve maps user input + cwd to a concrete kernel identity.
 //
 // It checks running kernels, saved runtimes, language aliases (with
 // project-aware expansion), and prefix matches — in that order.
 func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
+	return ResolveWith(s, input, Options{Cwd: cwd})
+}
+
+// ResolveWith is Resolve with explicit options.
+func ResolveWith(s *state.Store, input string, opts Options) (*Result, error) {
+	cwd := opts.Cwd
 	// Gather all known names: running/stopped kernels + saved runtimes.
 	kernels, err := s.ListKnown()
 	if err != nil {
@@ -64,7 +82,7 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 				Name: k.Name,
 				Lang: k.Lang,
 				Cwd:  k.Cwd,
-				Venv: k.Venv,
+				Venv: currentVenv(k, runtimes),
 			}
 			for _, rt := range runtimes {
 				if rt.Name == k.Name {
@@ -103,7 +121,7 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 	// (e.g. "py@rat.2" already in state) are found directly.
 
 	if base, n, ok := parseInstance(input); ok {
-		result, err := Resolve(s, base, cwd)
+		result, err := ResolveWith(s, base, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +133,7 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 					Name: k.Name,
 					Lang: k.Lang,
 					Cwd:  k.Cwd,
-					Venv: k.Venv,
+					Venv: currentVenv(k, runtimes),
 				}, nil
 			}
 		}
@@ -128,7 +146,7 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 
 	if lang.IsAlias(input) {
 		canonical, _ := lang.Resolve(input)
-		return resolveLanguage(canonical, cwd, kernels, runtimes)
+		return resolveLanguage(canonical, opts, kernels, runtimes)
 	}
 
 	// ── Step 3: Prefix match ─────────────────────────────────────
@@ -141,7 +159,7 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 				Name: k.Name,
 				Lang: k.Lang,
 				Cwd:  k.Cwd,
-				Venv: k.Venv,
+				Venv: currentVenv(k, runtimes),
 			})
 		}
 	}
@@ -203,11 +221,17 @@ func Resolve(s *state.Store, input string, cwd string) (*Result, error) {
 // returns it. If it doesn't exist, returns it as new (caller creates).
 func resolveLanguage(
 	canonical string,
-	cwd string,
+	opts Options,
 	kernels []state.Kernel,
 	runtimes []state.Runtime,
 ) (*Result, error) {
-	root, _ := project.FindRoot(cwd)
+	cwd := opts.Cwd
+	root := opts.ProjectRoot
+	if root == "" {
+		root, _ = project.FindRoot(cwd)
+	} else {
+		root, _ = filepath.Abs(root)
+	}
 	projName := runtimeid.SlugPart(project.Name(root))
 
 	// Build the canonical kernel name: lang@project
@@ -220,7 +244,7 @@ func resolveLanguage(
 				Name: k.Name,
 				Lang: k.Lang,
 				Cwd:  k.Cwd,
-				Venv: k.Venv,
+				Venv: currentVenv(k, runtimes),
 			}, nil
 		}
 	}
@@ -245,7 +269,7 @@ func resolveLanguage(
 	// Doesn't exist — return as new. Caller decides whether to create.
 	venv := ""
 	if canonical == "py" {
-		venv = project.FindVenv(cwd)
+		venv = project.FindVenvWithin(cwd, root)
 	}
 
 	return &Result{
@@ -285,6 +309,29 @@ func computeCanonicalName(
 	}
 
 	return name
+}
+
+// currentVenv returns the environment a kernel entry should run in.
+//
+// A running kernel is bound to the venv it started with; that binding is
+// the truth until it restarts. A stopped auto-named kernel (py@project,
+// not registered with `rat add`) has no binding of its own: its venv is
+// whatever the project has now. Without this, a kernel first started
+// before the project had a .venv would keep resolving to the system
+// interpreter forever, even after `rat restart`.
+func currentVenv(k state.Kernel, runtimes []state.Runtime) string {
+	if k.Lang != "py" || k.Status == state.StatusRunning {
+		return k.Venv
+	}
+	for _, rt := range runtimes {
+		if rt.Name == k.Name {
+			return k.Venv // explicit registration owns its binding
+		}
+	}
+	if k.Cwd == "" {
+		return k.Venv
+	}
+	return project.FindVenvWithin(k.Cwd, k.Cwd)
 }
 
 // parseInstance checks if input ends with ".N" where N is an integer >= 2.

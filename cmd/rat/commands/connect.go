@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -22,14 +21,14 @@ const (
 	ensureRestarted ensureAction = "restarted"
 )
 
-// resolveInput applies rat's unified resolution algorithm for the current cwd.
+// resolveInput applies rat's unified resolution algorithm for the current
+// cwd, or for the notebook named by --doc.
 func resolveInput(input string) (*resolver.Result, error) {
-	cwd, err := os.Getwd()
+	opts, err := resolveOptions()
 	if err != nil {
 		return nil, err
 	}
-	cwd, _ = filepath.Abs(cwd)
-	return resolver.Resolve(store(), input, cwd)
+	return resolver.ResolveWith(store(), input, opts)
 }
 
 // ensureResolvedKernel makes sure the resolved kernel is running.

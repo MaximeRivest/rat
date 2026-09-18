@@ -3,6 +3,7 @@ package resolve
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -265,4 +266,112 @@ func searchString(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func makeVenv(t *testing.T, dir string) string {
+	t.Helper()
+	venv := filepath.Join(dir, ".venv")
+	binDir := filepath.Join(venv, "bin")
+	if runtime.GOOS == "windows" {
+		binDir = filepath.Join(venv, "Scripts")
+	}
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	py := filepath.Join(binDir, "python")
+	if runtime.GOOS == "windows" {
+		py = filepath.Join(binDir, "python.exe")
+	}
+	if err := os.WriteFile(py, []byte(""), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return venv
+}
+
+func TestStoppedKernelPicksUpNewVenv(t *testing.T) {
+	// A kernel started before the project had a venv is stopped; the
+	// project now has one. Resolving must bind to the new venv, not the
+	// stale (empty) binding in state.
+	s := tempStore(t)
+	proj := t.TempDir()
+	os.MkdirAll(filepath.Join(proj, ".git"), 0755)
+	name := "py@" + filepath.Base(proj)
+	s.Put(state.Kernel{Name: name, Lang: "py", Port: 8717, PID: 999999, Cwd: proj, Started: time.Now()})
+	s.MarkStopped(name)
+	venv := makeVenv(t, proj)
+
+	r, err := Resolve(s, "py", proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Name != name || r.Venv != venv {
+		t.Fatalf("expected %s bound to %s, got %s bound to %q", name, venv, r.Name, r.Venv)
+	}
+	r, err = Resolve(s, name, "/elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Venv != venv {
+		t.Fatalf("exact match: expected %s, got %q", venv, r.Venv)
+	}
+}
+
+func TestRunningKernelKeepsItsBinding(t *testing.T) {
+	// A running kernel is bound to what it started with even if the
+	// project gained a venv since — restarting is a separate, visible act.
+	s := tempStore(t)
+	proj := t.TempDir()
+	os.MkdirAll(filepath.Join(proj, ".git"), 0755)
+	name := "py@" + filepath.Base(proj)
+	s.Put(state.Kernel{Name: name, Lang: "py", Port: 8717, PID: os.Getpid(), Cwd: proj, Started: time.Now()})
+	makeVenv(t, proj)
+
+	r, err := Resolve(s, "py", proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Venv != "" {
+		t.Fatalf("running kernel must keep its live binding, got %q", r.Venv)
+	}
+}
+
+func TestRegisteredRuntimeKeepsExplicitVenv(t *testing.T) {
+	s := tempStore(t)
+	proj := t.TempDir()
+	explicit := filepath.Join(proj, "custom-env")
+	s.PutRuntime(state.Runtime{Name: "py-ml", Lang: "py", Cwd: proj, Venv: explicit})
+	s.Put(state.Kernel{Name: "py-ml", Lang: "py", Port: 8717, PID: 999999, Cwd: proj, Venv: explicit, Started: time.Now()})
+	s.MarkStopped("py-ml")
+	makeVenv(t, proj)
+
+	r, err := Resolve(s, "py-ml", proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Venv != explicit {
+		t.Fatalf("explicit registration must keep %s, got %q", explicit, r.Venv)
+	}
+}
+
+func TestExplicitProjectRoot(t *testing.T) {
+	// A notebook deep inside repo/docs pins its project to the repo:
+	// the kernel is py@repo and the venv is the repo's, even though
+	// docs/ carries a requirements.txt.
+	s := tempStore(t)
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0755)
+	venv := makeVenv(t, repo)
+	docs := filepath.Join(repo, "docs")
+	deep := filepath.Join(docs, "tutorials")
+	os.MkdirAll(deep, 0755)
+	os.WriteFile(filepath.Join(docs, "requirements.txt"), []byte(""), 0644)
+
+	r, err := ResolveWith(s, "py", Options{Cwd: deep, ProjectRoot: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "py@" + filepath.Base(repo)
+	if r.Name != want || r.Cwd != repo || r.Venv != venv {
+		t.Fatalf("got name=%s cwd=%s venv=%q, want %s %s %s", r.Name, r.Cwd, r.Venv, want, repo, venv)
+	}
 }

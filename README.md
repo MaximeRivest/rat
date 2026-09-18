@@ -169,6 +169,35 @@ rat status -v
 #   Clients: rat, rat-vscode (6)
 ```
 
+### Which folder is the project?
+
+rat walks up from where you are and picks the project by ranked evidence: a folder with its own `.venv` first, then a repository root or package manifest (`.git`, `pyproject.toml`, `package.json`, …), and only when nothing stronger exists above it, a weak hint such as `requirements.txt` or `Makefile`. So `repo/docs/x.md` belongs to `repo`, not to `docs/`. The environment is the project's `.venv` (or the nearest one below it), never one above the project.
+
+## Notebooks that just run
+
+A Markdown notebook declares what it needs in its front matter; `rat ensure` makes it true, on any machine:
+
+```markdown
+---
+rat:
+  project: ../..            # optional: pin the project (relative to the notebook)
+  python:
+    requires: ">=3.11"
+    dependencies:           # requirements.txt lines
+      - -e .                # this checkout, editable
+      - websockets
+      - lm15 @ git+https://github.com/example/lm15@main
+---
+```
+
+```bash
+rat doctor docs/tutorial.md          # what is missing and what ensure would do
+rat ensure docs/tutorial.md          # create the venv, install, restart the kernel only if needed
+rat run --doc docs/tutorial.md py 'import websockets'   # same kernel the notebook means
+```
+
+Already-satisfied requirements are skipped, so a second `ensure` is a no-op. PEP 723 blocks in python cells are understood too. Details: [docs/notebooks.md](docs/notebooks.md).
+
 ### Named runtimes
 
 For multiple environments in the same language:
@@ -360,6 +389,8 @@ Daily use
   rat cancel <runtime>            Interrupt execution
   rat reset <runtime>             Clear namespace
   rat restart <runtime>           Fresh start
+  rat ensure <notebook.md>        Make a notebook's environment match its front matter
+  --doc <notebook.md>             (any command) resolve language names for that notebook
 
 Setup
   rat install <lang> [<lang>...]  Set up runtimes + deps
@@ -372,7 +403,7 @@ Management
   rat start <runtime>             Start a kernel
   rat stop <runtime> [--all]      Stop a kernel
   rat serve <name> [--http]       MCP server (for app builders)
-  rat doctor [<lang>]             Diagnostics
+  rat doctor [<lang>|<notebook>]  Diagnostics; for a notebook: the plan ensure would run
   rat version                     Version info
   rat update                      Update rat
 ```

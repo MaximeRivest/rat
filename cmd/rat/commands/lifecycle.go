@@ -529,14 +529,26 @@ Example:
 }
 
 var doctorCmd = &cobra.Command{
-	Use:     "doctor [<lang>]",
+	Use:     "doctor [<lang> | <notebook.md>]",
 	Short:   "Diagnostics",
 	GroupID: "setup",
 	Long: `Run diagnostics.
 
 Checks runtime detection, environment/tooling, writable directories,
 and the health of running kernels when applicable. Use an optional
-language argument to focus the report.`,
+language argument to focus the report.
+
+Given a notebook file, reports whether that notebook can run as-is —
+its project, environment, declared requirements and kernel — and what
+'rat ensure' would do about it. Nothing is changed. Exit status is 1
+when something is missing. --json prints the same report for
+integrations.
+
+Examples:
+  rat doctor
+  rat doctor py
+  rat doctor docs/tutorial.md
+  rat doctor docs/tutorial.md --json`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
@@ -544,6 +556,9 @@ language argument to focus the report.`,
 			fmt.Println("")
 			printPythonDoctor(inspectPythonEnv())
 			return nil
+		}
+		if st, err := os.Stat(args[0]); err == nil && !st.IsDir() {
+			return runNotebookDoctor(args[0])
 		}
 		lang, err := resolveLang(args[0])
 		if err != nil {
