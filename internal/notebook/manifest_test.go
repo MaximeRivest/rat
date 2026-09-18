@@ -223,29 +223,74 @@ func TestVersionSpecifiers(t *testing.T) {
 	}
 }
 
-func TestRequirementSatisfied(t *testing.T) {
-	proj := t.TempDir()
-	os.WriteFile(filepath.Join(proj, "pyproject.toml"), []byte("[project]\nname = \"dspy\"\n"), 0644)
-	installed := map[string]bool{"websockets": true, "dspy": true, "numpy": true}
-	rec := receipt{Satisfied: map[string]string{"-e .": "t", "-r extra.txt": "t", "numpy==1.0": "t"}}
-	cases := map[string]bool{
-		"websockets":   true,  // plain, installed
-		"rich":         false, // plain, not installed
-		"-e .":         true,  // editable, installed and recorded
-		"numpy==1.0":   true,  // pinned, installed and recorded
-		"numpy==2.0":   false, // pinned, line changed since the receipt
-		"websockets>1": false, // constrained but never recorded
-		"-r extra.txt": true,  // unverifiable, recorded
-		"-r other.txt": false, // unverifiable, not recorded
+func TestRequirementStatus(t *testing.T) {
+	repo := t.TempDir()
+	pyDir := filepath.Join(repo, "python")
+	os.MkdirAll(pyDir, 0755)
+	os.WriteFile(filepath.Join(pyDir, "pyproject.toml"), []byte("[project]\nname = \"lmcc\"\n"), 0644)
+	other := t.TempDir()
+	os.WriteFile(filepath.Join(other, "pyproject.toml"), []byte("[project]\nname = \"lmcc\"\n"), 0644)
+	installed := map[string]distribution{
+		"websockets": {Name: "websockets", Version: "16.1.1"},
+		"numpy":      {Name: "numpy", Version: "2.1.0"},
+		"lmcc":       {Name: "lmcc", Version: "0.1.0", URL: "file://" + pyDir, Editable: true},
+		"lm15":       {Name: "lm15", Version: "0.3", URL: "https://github.com/x/lm15", VCS: "git", RequestedRevision: "main", CommitID: "abc"},
+		"pinned":     {Name: "pinned", Version: "1.0.0"},
 	}
-	for line, want := range cases {
-		if got := requirementSatisfied(line, proj, installed, rec); got != want {
-			t.Errorf("requirementSatisfied(%q) = %v, want %v", line, got, want)
+	rec := receipt{Satisfied: map[string]string{"-r extra.txt": "t", "websockets>1": "t"}}
+	type want struct {
+		ok      bool
+		problem bool
+	}
+	cases := map[string]want{
+		"websockets":   {ok: true},      // plain, installed
+		"rich":         {ok: false},     // plain, not installed
+		"numpy==2.1.0": {ok: true},      // exact version matches
+		"numpy==2.1":   {ok: true},      // 2.1 == 2.1.0
+		"numpy==2.0.0": {ok: false},     // wrong version
+		"websockets>1": {ok: true},      // constrained: installed + recorded
+		"numpy>=1":     {ok: false},     // constrained: installed, never recorded
+		"-e ./python":  {ok: true},      // editable from exactly that folder (no receipt needed)
+		"./python":     {ok: true},      // non-editable line satisfied by an editable install too
+		"-e .":         {problem: true}, // root has no project file: cannot be installed as written
+		"-e ./nope":    {problem: true},
+		"-e " + other:  {ok: false}, // same name, installed from a different folder
+		"lm15 @ git+https://github.com/x/lm15@main": {ok: true},
+		"lm15 @ git+https://github.com/x/lm15.git":  {ok: true},
+		"lm15 @ git+https://github.com/x/lm15@dev":  {ok: false},
+		"lm15 @ git+https://github.com/y/lm15":      {ok: false},
+		"-r extra.txt":                              {ok: true},  // unverifiable, recorded
+		"-r other.txt":                              {ok: false}, // unverifiable, not recorded
+		"https://x/y/pkg.whl":                       {ok: false},
+	}
+	for line, w := range cases {
+		ok, problem := requirementStatus(line, repo, installed, rec)
+		if (problem != "") != w.problem || (!w.problem && ok != w.ok) {
+			t.Errorf("requirementStatus(%q) = ok=%v problem=%q, want ok=%v problem=%v", line, ok, problem, w.ok, w.problem)
 		}
 	}
-	empty := receipt{Satisfied: map[string]string{}}
-	if requirementSatisfied("-e .", proj, installed, empty) {
-		t.Error("editable without a receipt must install once, so the path is verified")
+	// The editable list names the lines a notebook here should declare.
+	ed := editableInstalls(installed, repo)
+	if len(ed) != 1 || ed[0].Line != "-e ./python" || ed[0].Name != "lmcc" {
+		t.Fatalf("editable installs: %+v", ed)
+	}
+}
+
+func TestRelRequirementPath(t *testing.T) {
+	cases := map[string]string{"/p": ".", "/p/python": "./python", "/lib/x": "../lib/x"}
+	for dir, want := range cases {
+		if got := relRequirementPath("/p", dir); got != want {
+			t.Errorf("relRequirementPath(/p, %s) = %s, want %s", dir, got, want)
+		}
+	}
+	if u := fileURLPath("file:///home/u/proj/python"); u != "/home/u/proj/python" {
+		t.Fatalf("fileURLPath: %q", u)
+	}
+	if u, r := splitRevision("https://h/x/y@main"); u != "https://h/x/y" || r != "main" {
+		t.Fatalf("splitRevision: %q %q", u, r)
+	}
+	if u, r := splitRevision("https://h/x/y"); u != "https://h/x/y" || r != "" {
+		t.Fatalf("splitRevision no rev: %q %q", u, r)
 	}
 }
 

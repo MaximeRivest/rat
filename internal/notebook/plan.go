@@ -79,19 +79,31 @@ type Report struct {
 
 // PythonState describes the Python environment the notebook resolves to.
 type PythonState struct {
-	Kernel        string   `json:"kernel"`
-	Venv          string   `json:"venv"`
-	VenvExists    bool     `json:"venv_exists"`
-	Python        string   `json:"python,omitempty"`
-	Version       string   `json:"version,omitempty"`
-	Requires      string   `json:"requires,omitempty"`
-	RequiresOK    bool     `json:"requires_ok"`
-	Requirements  []string `json:"requirements"` // effective requirement lines
-	Missing       []string `json:"missing,omitempty"`
-	UV            string   `json:"uv,omitempty"`
-	KernelRunning bool     `json:"kernel_running"`
-	KernelVenv    string   `json:"kernel_venv,omitempty"` // live binding when running
-	PEP723        bool     `json:"pep723,omitempty"`
+	Kernel       string   `json:"kernel"`
+	Venv         string   `json:"venv"`
+	VenvExists   bool     `json:"venv_exists"`
+	Python       string   `json:"python,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	Requires     string   `json:"requires,omitempty"`
+	RequiresOK   bool     `json:"requires_ok"`
+	Requirements []string `json:"requirements"` // effective requirement lines
+	Missing      []string `json:"missing,omitempty"`
+	// Editable lists the packages installed editable (from a local
+	// checkout) in the environment, as the requirement lines that would
+	// reproduce them relative to the project root — what a notebook in
+	// this project should declare for the project's own code.
+	Editable      []EditableInstall `json:"editable,omitempty"`
+	UV            string            `json:"uv,omitempty"`
+	KernelRunning bool              `json:"kernel_running"`
+	KernelVenv    string            `json:"kernel_venv,omitempty"` // live binding when running
+	PEP723        bool              `json:"pep723,omitempty"`
+}
+
+// EditableInstall is one local package installed editable in the venv.
+type EditableInstall struct {
+	Name string `json:"name"`
+	Path string `json:"path"` // absolute source directory
+	Line string `json:"line"` // "-e ./python" relative to the project root
 }
 
 // AfterState is one prerequisite notebook of the chain.
@@ -423,10 +435,33 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 			if err != nil {
 				return fmt.Errorf("inspect %s: %w", ps.Python, err)
 			}
+			ps.Editable = editableInstalls(installed, r.Project)
+			var problems []string
 			for _, line := range ps.Requirements {
-				if !requirementSatisfied(line, r.Project, installed, receipt) {
+				ok, problem := requirementStatus(line, r.Project, installed, receipt)
+				if problem != "" {
+					problems = append(problems, problem)
+					continue
+				}
+				if !ok {
 					missing = append(missing, line)
 				}
+			}
+			if len(problems) > 0 {
+				// A line that cannot be installed as written: report it, do not
+				// try (uv would fail, and the kernel would restart for nothing).
+				hint := "fix the line in the notebook's front matter"
+				if len(ps.Editable) > 0 {
+					var lines []string
+					for _, e := range ps.Editable {
+						lines = append(lines, e.Line+" ("+e.Name+")")
+					}
+					hint += "; this project's own packages are installed from: " + strings.Join(lines, ", ")
+				}
+				r.Checks = append(r.Checks, Check{ID: "requirements", Label: "requirements", OK: false,
+					Detail: strings.Join(problems, "; "), Hint: hint})
+				r.Blocked = true
+				return nil
 			}
 		}
 		ps.Missing = missing
@@ -743,66 +778,265 @@ func pythonVersion(python string) (Version, error) {
 	return ParseVersion(string(out))
 }
 
-// installedDistributions lists the normalized names of every distribution
-// the interpreter can see. One subprocess, ~50 ms; the receipt alone would
-// happily report a package the user has since uninstalled.
-func installedDistributions(python string) (map[string]bool, error) {
-	const script = `import importlib.metadata as m
+// distribution is what the interpreter knows about one installed package,
+// including where it came from (PEP 610 direct_url.json: a local path and
+// whether it is editable, or a VCS URL and the requested revision).
+type distribution struct {
+	Name              string `json:"name"`
+	Version           string `json:"version"`
+	URL               string `json:"url"`
+	Editable          bool   `json:"editable"`
+	VCS               string `json:"vcs"`
+	RequestedRevision string `json:"requested_revision"`
+	CommitID          string `json:"commit_id"`
+}
+
+// installedDistributions lists every distribution the interpreter can see,
+// keyed by normalized name. One subprocess, ~50 ms. This is the authority
+// on what is installed and from where; a receipt rat wrote is not.
+func installedDistributions(python string) (map[string]distribution, error) {
+	const script = `import importlib.metadata as m, json
+out = []
 for d in m.distributions():
     n = d.metadata['Name']
-    if n: print(n)`
+    if not n: continue
+    rec = {"name": n, "version": d.version or ""}
+    try:
+        raw = d.read_text("direct_url.json")
+        if raw:
+            du = json.loads(raw)
+            rec["url"] = du.get("url", "")
+            rec["editable"] = bool(du.get("dir_info", {}).get("editable"))
+            vcs = du.get("vcs_info") or {}
+            rec["vcs"] = vcs.get("vcs", "")
+            rec["requested_revision"] = vcs.get("requested_revision", "")
+            rec["commit_id"] = vcs.get("commit_id", "")
+    except Exception:
+        pass
+    out.append(rec)
+print(json.dumps(out))`
 	out, err := exec.Command(python, "-c", script).Output()
 	if err != nil {
 		return nil, err
 	}
-	names := map[string]bool{}
-	for _, l := range strings.Split(string(out), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			names[normalizeName(l)] = true
+	var list []distribution
+	if err := json.Unmarshal(bytes.TrimSpace(out), &list); err != nil {
+		return nil, fmt.Errorf("parse distributions: %w", err)
+	}
+	dists := map[string]distribution{}
+	for _, d := range list {
+		dists[normalizeName(d.Name)] = d
+	}
+	return dists, nil
+}
+
+// editableInstalls returns the venv's editable local packages as the
+// requirement lines a notebook in projectDir should use.
+func editableInstalls(installed map[string]distribution, projectDir string) []EditableInstall {
+	var out []EditableInstall
+	for _, d := range installed {
+		if !d.Editable {
+			continue
+		}
+		dir := fileURLPath(d.URL)
+		if dir == "" {
+			continue
+		}
+		line := "-e " + relRequirementPath(projectDir, dir)
+		out = append(out, EditableInstall{Name: d.Name, Path: dir, Line: line})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Line < out[j].Line })
+	return out
+}
+
+// relRequirementPath writes dir relative to base in requirements syntax:
+// ".", "./python", "../lib"; absolute when it is not under a sensible
+// relative form.
+func relRequirementPath(base, dir string) string {
+	rel, err := filepath.Rel(base, dir)
+	if err != nil {
+		return dir
+	}
+	rel = filepath.ToSlash(rel)
+	switch {
+	case rel == ".":
+		return "."
+	case strings.HasPrefix(rel, "../"):
+		return rel
+	default:
+		return "./" + rel
+	}
+}
+
+// fileURLPath turns "file:///home/u/proj/python" into a clean path, or "".
+func fileURLPath(u string) string {
+	if !strings.HasPrefix(u, "file://") {
+		return ""
+	}
+	p := strings.TrimPrefix(u, "file://")
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	if runtime.GOOS == "windows" {
+		p = strings.TrimPrefix(p, "/")
+	}
+	return filepath.Clean(p)
+}
+
+// requirementStatus decides whether one requirement line needs installing
+// (ok=false), is satisfied (ok=true), or cannot be installed as written
+// (problem != ""). The interpreter's own install records are the truth:
+//
+//   - "name": satisfied when installed.
+//   - "name==1.2": satisfied when that version is installed.
+//   - "-e path" / "path": the folder must hold a project file; satisfied
+//     when a distribution from exactly that folder is installed (editable
+//     when -e). No receipt needed: a venv the person set up by hand counts.
+//   - "name @ git+url[@rev]": satisfied when installed from that URL (and
+//     that revision, when one is written).
+//   - other constrained lines ("x>=1"): installed AND recorded verbatim in
+//     the receipt (only the receipt knows the constraint was honoured).
+//   - unverifiable lines ("-r file", bare URLs): the receipt alone.
+func requirementStatus(line, projectDir string, installed map[string]distribution, rec receipt) (ok bool, problem string) {
+	t := strings.TrimSpace(line)
+	_, recorded := rec.Satisfied[t]
+	editable := false
+	if strings.HasPrefix(t, "-e ") || strings.HasPrefix(t, "--editable ") {
+		editable = true
+		t = strings.TrimSpace(t[strings.Index(t, " ")+1:])
+	} else if strings.HasPrefix(t, "-") {
+		return recorded, ""
+	}
+
+	// Local path.
+	if t == "." || strings.HasPrefix(t, "./") || strings.HasPrefix(t, "../") || filepath.IsAbs(t) {
+		dir := t
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(projectDir, dir)
+		}
+		dir = filepath.Clean(dir)
+		if !hasProjectFile(dir) {
+			return false, fmt.Sprintf("%q points to %s, which has no pyproject.toml or setup.py", line, dir)
+		}
+		name := ProjectPackage(dir)
+		if name == "" {
+			return recorded, "" // setup.py-only project: name unknown without running it
+		}
+		d, found := installed[normalizeName(name)]
+		if !found {
+			return false, ""
+		}
+		if src := fileURLPath(d.URL); src != "" {
+			if !samePath(src, dir) {
+				return false, "" // installed from somewhere else
+			}
+			return !editable || d.Editable, ""
+		}
+		return false, "" // installed, but not from a local path
+	}
+
+	// name @ url
+	if i := strings.Index(t, " @ "); i > 0 {
+		name := strings.TrimSpace(t[:i])
+		url := strings.TrimSpace(t[i+3:])
+		if m := nameRe.FindStringSubmatch(name); m != nil {
+			name = m[1]
+		}
+		d, found := installed[normalizeName(name)]
+		if !found {
+			return false, ""
+		}
+		if d.URL == "" {
+			return recorded, ""
+		}
+		wantURL, wantRev := splitRevision(strings.TrimPrefix(url, "git+"))
+		if strings.TrimSuffix(d.URL, ".git") != strings.TrimSuffix(wantURL, ".git") {
+			return false, ""
+		}
+		if wantRev != "" && d.RequestedRevision != wantRev && d.CommitID != wantRev {
+			return false, ""
+		}
+		return true, ""
+	}
+
+	if strings.Contains(t, "://") {
+		return recorded, ""
+	}
+
+	m := nameRe.FindStringSubmatch(t)
+	if m == nil {
+		return recorded, ""
+	}
+	d, found := installed[normalizeName(m[1])]
+	if !found {
+		return false, ""
+	}
+	if isPlainName(t) {
+		return true, ""
+	}
+	if v := exactVersion(t); v != "" {
+		return normalizeVersion(d.Version) == normalizeVersion(v), ""
+	}
+	return recorded, ""
+}
+
+func hasProjectFile(dir string) bool {
+	for _, f := range []string{"pyproject.toml", "setup.py", "setup.cfg"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			return true
 		}
 	}
-	return names, nil
+	return false
+}
+
+func samePath(a, b string) bool {
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	if err1 != nil || err2 != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return ra == rb
+}
+
+// splitRevision splits "https://host/repo@branch" into URL and revision.
+// The scheme's "://" is not an "@"; only a trailing @rev counts.
+func splitRevision(url string) (string, string) {
+	if i := strings.LastIndex(url, "@"); i > strings.Index(url, "://")+3 {
+		return url[:i], url[i+1:]
+	}
+	return url, ""
+}
+
+var exactVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?\s*==\s*([A-Za-z0-9.!+*-]+)\s*$`)
+
+// exactVersion returns V for "name==V" (no wildcard), else "".
+func exactVersion(line string) string {
+	m := exactVersionRe.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil || strings.Contains(m[1], "*") {
+		return ""
+	}
+	return m[1]
+}
+
+// normalizeVersion trims trailing ".0" segments so 1.2 == 1.2.0.
+func normalizeVersion(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	for strings.HasSuffix(v, ".0") && strings.Count(v, ".") > 0 {
+		v = strings.TrimSuffix(v, ".0")
+	}
+	return v
 }
 
 var (
 	nameRe      = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)`)
 	normalizeRe = regexp.MustCompile(`[-_.]+`)
+	plainNameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 )
 
 // normalizeName applies PEP 503 normalization.
 func normalizeName(n string) string {
 	return strings.ToLower(normalizeRe.ReplaceAllString(strings.TrimSpace(n), "-"))
 }
-
-// requirementSatisfied decides whether one requirement line needs
-// installing. Two sources of truth: the interpreter (what is installed)
-// and the receipt (which exact lines rat installed before).
-//
-//   - A plain name ("websockets") is satisfied when installed: the
-//     interpreter alone answers, so a venv rat never touched is not
-//     reinstalled needlessly.
-//   - A constrained line ("x==1.2", "x @ git+…", "-e .") must be installed
-//     AND recorded verbatim in the receipt: only the receipt knows whether
-//     the installed copy came from this exact line. Change the line and it
-//     installs again.
-//   - A line whose distribution cannot be derived ("-r file", bare URL) is
-//     satisfied by the receipt alone.
-func requirementSatisfied(line, projectDir string, installed map[string]bool, rec receipt) bool {
-	name := distributionName(line, projectDir)
-	_, recorded := rec.Satisfied[strings.TrimSpace(line)]
-	if name == "" {
-		return recorded
-	}
-	if !installed[normalizeName(name)] {
-		return false
-	}
-	if isPlainName(line) {
-		return true
-	}
-	return recorded
-}
-
-var plainNameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 
 func isPlainName(line string) bool {
 	return plainNameRe.MatchString(strings.TrimSpace(line))
