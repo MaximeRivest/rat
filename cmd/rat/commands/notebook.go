@@ -1,14 +1,17 @@
 package commands
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/maximerivest/rat/internal/notebook"
 	resolver "github.com/maximerivest/rat/internal/resolve"
@@ -50,6 +53,66 @@ func init() {
 	playCmd.Flags().BoolVar(&playPrerequisites, "prerequisites", false, "Run only the `rat.after` chain, not this notebook's cells")
 	playCmd.Flags().DurationVar(&playTimeout, "timeout", 0, "Maximum time for one cell (0 = no limit)")
 	rootCmd.AddCommand(playCmd)
+}
+
+// indentWriter prints streamed text with a prefix at every line start and
+// remembers what it printed for the cell in progress.
+type indentWriter struct {
+	mu      sync.Mutex
+	prefix  string
+	midLine bool
+	printed strings.Builder
+	echo    echoFilter
+}
+
+// expectEcho: the next output repeats an answer typed at the terminal.
+func (w *indentWriter) expectEcho(answer string, secret bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.echo.expect(answer, secret)
+	w.midLine = false // the person's Enter ended the line
+}
+
+func (w *indentWriter) write(text string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.printed.WriteString(text)
+	text = w.echo.filter(text)
+	var b strings.Builder
+	for _, r := range text {
+		if !w.midLine && r != '\n' {
+			b.WriteString(w.prefix)
+			w.midLine = true
+		}
+		b.WriteRune(r)
+		if r == '\n' {
+			w.midLine = false
+		}
+	}
+	fmt.Print(b.String())
+}
+
+// filterEcho applies the pending echo to text the result brought.
+func (w *indentWriter) filterEcho(text string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := w.echo.filter(text)
+	w.echo.pending = ""
+	return out
+}
+
+// take ends the cell in progress: finishes its last line and returns all
+// it printed.
+func (w *indentWriter) take() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.midLine {
+		fmt.Println()
+		w.midLine = false
+	}
+	out := w.printed.String()
+	w.printed.Reset()
+	return out
 }
 
 // notebookForDoc loads the --doc notebook, or returns nil when unset.
@@ -211,15 +274,47 @@ Examples:
 					fmt.Fprintf(os.Stderr, "%s %s\n", s.Cyan("▶"), name)
 				}
 			}
+			// The notebook's own cells print their output as it arrives,
+			// so a cell that waits on a person (a sign-in code, a prompt)
+			// shows what it waits for. Prerequisites stay quiet unless
+			// they fail.
+			live := &indentWriter{prefix: "    "}
+			opts.OnOutput = func(run *notebook.NotebookRun, text string) {
+				if run.Role == "notebook" {
+					live.write(text)
+				}
+			}
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				in := bufio.NewReader(os.Stdin)
+				opts.OnInput = func(_ *notebook.NotebookRun, _ string, secret bool) (string, bool) {
+					if secret {
+						b, err := term.ReadPassword(int(os.Stdin.Fd()))
+						fmt.Fprintln(os.Stderr)
+						live.expectEcho("", true)
+						return string(b), err == nil
+					}
+					line, err := in.ReadString('\n')
+					live.expectEcho(line, false)
+					return line, err == nil || line != ""
+				}
+			}
 			opts.OnCell = func(run *notebook.NotebookRun, c notebook.CellResult) {
+				// Output first (streamed, then what the result adds), the
+				// verdict under it — as it happened.
+				printed := live.take()
+				rest := c.Output
+				if printed != "" {
+					rest = trimAlreadyPrinted(c.Output, printed)
+				}
+				rest = strings.TrimLeft(live.filterEcho(rest), "\n")
+				if rest != "" && (!c.OK || run.Role == "notebook") {
+					fmt.Println(indent(lastLines(rest, 40), "    "))
+				}
 				mark := s.Green("✓")
 				if !c.OK {
 					mark = s.Red("✗")
 				}
 				fmt.Fprintf(os.Stderr, "  %s %s cell at line %d %s\n", mark, c.Lang, c.Line, s.Dim(fmt.Sprintf("%.1fs", c.Seconds)))
-				if c.Output != "" && (!c.OK || run.Role == "notebook") {
-					fmt.Println(indent(lastLines(c.Output, 40), "    "))
-				}
 			}
 			opts.Ensure.Progress = func(step notebook.Step) {
 				mark := s.Green("✓")

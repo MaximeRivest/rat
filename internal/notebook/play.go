@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -25,6 +26,12 @@ type PlayOptions struct {
 	Timeout time.Duration
 	// OnCell is called after each cell finishes.
 	OnCell func(run *NotebookRun, cell CellResult)
+	// OnOutput receives a cell's output as it arrives, before OnCell.
+	OnOutput func(run *NotebookRun, text string)
+	// OnInput answers a cell that asks for input (input(), getpass):
+	// return the text and true, or false to cancel the read. Nil cancels
+	// every read — a batch run has nobody to ask.
+	OnInput func(run *NotebookRun, prompt string, secret bool) (string, bool)
 	// OnNotebook is called when a notebook is about to run or was skipped.
 	OnNotebook func(run *NotebookRun)
 	// Ensure options for the environment step that precedes the run.
@@ -130,7 +137,7 @@ func playNotebook(store *state.Store, n *Notebook, root string, run *NotebookRun
 			run.Cells = append(run.Cells, CellResult{Line: cell.Line, Lang: cell.Lang, Output: err.Error()})
 			return false
 		}
-		result := runCell(store, res, cell, opts.Timeout)
+		result := runCell(store, res, cell, opts, run)
 		if opts.OnCell != nil {
 			opts.OnCell(run, result)
 		}
@@ -147,9 +154,10 @@ func playNotebook(store *state.Store, n *Notebook, root string, run *NotebookRun
 	return true
 }
 
-func runCell(store *state.Store, res *resolver.Result, cell Cell, timeout time.Duration) CellResult {
+func runCell(store *state.Store, res *resolver.Result, cell Cell, opts PlayOptions, run *NotebookRun) (out CellResult) {
+	timeout := opts.Timeout
 	t0 := time.Now()
-	out := CellResult{Line: cell.Line, Lang: cell.Lang, Kernel: res.Name}
+	out = CellResult{Line: cell.Line, Lang: cell.Lang, Kernel: res.Name}
 	defer func() { out.Seconds = time.Since(t0).Seconds() }()
 	k, err := daemon.Start(store, daemon.StartOpts{Name: res.Name, Lang: res.Lang, Cwd: res.Cwd, Venv: res.Venv,
 		RuntimePath: res.RuntimePath, Options: res.Options, Env: res.Env})
@@ -164,21 +172,43 @@ func runCell(store *state.Store, res *resolver.Result, cell Cell, timeout time.D
 		defer cancel()
 	}
 	var streamed strings.Builder
-	session, err := mcpclient.Connect(ctx, k.Port, mcpclient.ConnectOpts{
+	var streamMu sync.Mutex
+	var session *mcpclient.Session
+	ready := make(chan struct{})
+	session, err = mcpclient.Connect(ctx, k.Port, mcpclient.ConnectOpts{
 		OnNotification: func(n mcp.JSONRPCNotification) {
-			if n.Method == "rat/output" {
+			switch n.Method {
+			case "rat/output":
 				if text, ok := n.Params.AdditionalFields["text"].(string); ok {
+					streamMu.Lock()
 					streamed.WriteString(text)
+					streamMu.Unlock()
+					if opts.OnOutput != nil {
+						opts.OnOutput(run, text)
+					}
 				}
+			case "rat/input_request":
+				prompt, _ := n.Params.AdditionalFields["prompt"].(string)
+				secret, _ := n.Params.AdditionalFields["secret"].(bool)
+				// Answering makes another call: never on the reader goroutine.
+				go func() {
+					<-ready
+					if opts.OnInput != nil {
+						if text, ok := opts.OnInput(run, prompt, secret); ok {
+							_, _ = session.SendInput(ctx, text)
+							return
+						}
+					}
+					_, _ = session.Ctl(ctx, "cancel")
+				}()
 			}
 		},
-		// A cell that asks for input cannot be answered by a batch run.
-		Elicitation: cancelElicitor{},
 	})
 	if err != nil {
 		out.Output = err.Error()
 		return out
 	}
+	close(ready)
 	defer session.Close()
 	result, err := session.Run(ctx, cell.Code)
 	if err != nil {
@@ -186,7 +216,10 @@ func runCell(store *state.Store, res *resolver.Result, cell Cell, timeout time.D
 		return out
 	}
 	text := mcpclient.ExtractText(result)
-	if s := streamed.String(); s != "" && !strings.HasPrefix(strings.TrimSpace(text), strings.TrimSpace(s)) {
+	streamMu.Lock()
+	s := streamed.String()
+	streamMu.Unlock()
+	if s != "" && !strings.HasPrefix(strings.TrimSpace(text), strings.TrimSpace(s)) {
 		text = s + text
 	}
 	out.Output = strings.TrimSpace(statusTail.ReplaceAllString(text, ""))
@@ -197,12 +230,6 @@ func runCell(store *state.Store, res *resolver.Result, cell Cell, timeout time.D
 // statusTail is the kernel's own "✓ 21ms | 1 var" line appended to every
 // result. Play reports program output, not that chrome.
 var statusTail = regexp.MustCompile(`\n?[✓✗] \d+(?:\.\d+)?m?s( \| \d+ vars?)?\s*$`)
-
-type cancelElicitor struct{}
-
-func (cancelElicitor) Elicit(context.Context, mcp.ElicitationRequest) (*mcp.ElicitationResult, error) {
-	return &mcp.ElicitationResult{ElicitationResponse: mcp.ElicitationResponse{Action: mcp.ElicitationResponseActionCancel}}, nil
-}
 
 // Rel is a display helper for paths relative to a notebook.
 func Rel(base, p string) string { return rel(base, p) }

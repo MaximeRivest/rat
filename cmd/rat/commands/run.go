@@ -167,6 +167,36 @@ type terminalHost struct {
 	out     io.Writer
 	mu      sync.Mutex
 	printed strings.Builder
+	echo    echoFilter
+}
+
+// echoFilter drops the kernel's echo of an answer typed at a terminal:
+// the terminal already showed it. (The kernel echoes so that a notebook's
+// output reads "Your name: Alice"; a person at a terminal would see it
+// twice.) The next output that starts with the answer loses that prefix.
+type echoFilter struct{ pending string }
+
+func (f *echoFilter) expect(answer string, secret bool) {
+	if secret {
+		f.pending = "\n" // getpass prints only the newline
+		return
+	}
+	f.pending = strings.TrimRight(strings.ReplaceAll(answer, "\r\n", "\n"), "\n") + "\n"
+}
+
+func (f *echoFilter) filter(text string) string {
+	if f.pending == "" {
+		return text
+	}
+	switch {
+	case strings.HasPrefix(text, f.pending):
+		text, f.pending = text[len(f.pending):], ""
+	case strings.HasPrefix(f.pending, text):
+		f.pending, text = f.pending[len(text):], ""
+	default:
+		f.pending = ""
+	}
+	return text
 }
 
 func newTerminalHost(in *os.File, out io.Writer) *terminalHost {
@@ -178,8 +208,8 @@ func (h *terminalHost) start(context.Context, inputSender) {}
 func (h *terminalHost) output(text string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	fmt.Fprint(h.out, text)
-	h.printed.WriteString(text)
+	h.printed.WriteString(text) // the whole text: the result repeats the echo too
+	fmt.Fprint(h.out, h.echo.filter(text))
 }
 
 // The prompt itself reaches the terminal through the output stream (the
@@ -187,7 +217,8 @@ func (h *terminalHost) output(text string) {
 func (h *terminalHost) inputRequest(ctx context.Context, s inputSender, _ string, secret bool) {
 	var line string
 	var err error
-	if secret && h.inFile != nil && term.IsTerminal(int(h.inFile.Fd())) {
+	typed := h.inFile != nil && term.IsTerminal(int(h.inFile.Fd()))
+	if secret && typed {
 		var b []byte
 		b, err = term.ReadPassword(int(h.inFile.Fd()))
 		line = string(b) + "\n"
@@ -204,6 +235,11 @@ func (h *terminalHost) inputRequest(ctx context.Context, s inputSender, _ string
 		_, _ = s.Ctl(ctx, "cancel")
 		return
 	}
+	if typed {
+		h.mu.Lock()
+		h.echo.expect(line, secret)
+		h.mu.Unlock()
+	}
 	if _, err := s.SendInput(ctx, line); err != nil {
 		fmt.Fprintf(os.Stderr, "rat: could not deliver input: %v\n", err)
 	}
@@ -214,7 +250,9 @@ func (h *terminalHost) inputDone() {}
 func (h *terminalHost) result(r *mcp.CallToolResult) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	text := trimAlreadyPrinted(mcpclient.ExtractText(r), h.printed.String())
+	// What the stream did not bring comes with the result — possibly the
+	// echo of a typed answer, when the run ended between two ticks.
+	text := strings.TrimLeft(h.echo.filter(trimAlreadyPrinted(mcpclient.ExtractText(r), h.printed.String())), "\n")
 	if text != "" {
 		fmt.Fprintln(h.out, text)
 	}

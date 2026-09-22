@@ -158,3 +158,22 @@ func TestEventsHostCancelsAPromptOnceStdinIsClosed(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestEchoFilterDropsTheTypedAnswerOnce(t *testing.T) {
+	var f echoFilter
+	f.expect("Alice\n", false)
+	if got := f.filter("Alice\nhello Alice\n"); got != "hello Alice\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := f.filter("Alice\n"); got != "Alice\n" {
+		t.Fatalf("second Alice was dropped too: %q", got)
+	}
+	f.expect("Bob", false)
+	if a, b := f.filter("Bo"), f.filter("b\nnext\n"); a != "" || b != "next\n" {
+		t.Fatalf("split echo: %q %q", a, b)
+	}
+	f.expect("", true)
+	if got := f.filter("\nok\n"); got != "ok\n" {
+		t.Fatalf("secret: %q", got)
+	}
+}
