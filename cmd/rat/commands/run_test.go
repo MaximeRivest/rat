@@ -1,12 +1,14 @@
 package commands
 
 import (
-	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -38,31 +40,121 @@ func TestTrimAlreadyPrinted(t *testing.T) {
 	}
 }
 
-func TestStdinElicitorAcceptsInput(t *testing.T) {
-	e := &stdinElicitor{reader: bufio.NewReader(strings.NewReader("hello\n"))}
-	result, err := e.Elicit(context.Background(), mcp.ElicitationRequest{})
-	if err != nil {
-		t.Fatalf("Elicit: %v", err)
+// fakeSender records what a host sends to the kernel.
+type fakeSender struct {
+	mu     sync.Mutex
+	inputs []string
+	ctl    []string
+}
+
+func (f *fakeSender) SendInput(_ context.Context, text string) (*mcp.CallToolResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inputs = append(f.inputs, text)
+	return mcp.NewToolResultText("input sent"), nil
+}
+
+func (f *fakeSender) Ctl(_ context.Context, op string) (*mcp.CallToolResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ctl = append(f.ctl, op)
+	return mcp.NewToolResultText("CANCELLED"), nil
+}
+
+func (f *fakeSender) snapshot() ([]string, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.inputs...), append([]string(nil), f.ctl...)
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if result.Action != mcp.ElicitationResponseActionAccept {
-		t.Fatalf("action = %q, want accept", result.Action)
-	}
-	content, ok := result.Content.(map[string]any)
-	if !ok {
-		t.Fatalf("content type = %T, want map[string]any", result.Content)
-	}
-	if got, _ := content["text"].(string); got != "hello\n" {
-		t.Fatalf("content.text = %q, want %q", got, "hello\n")
+	t.Fatal("condition not met")
+}
+
+func TestTerminalHostSendsTheLine(t *testing.T) {
+	r, w, _ := os.Pipe()
+	defer r.Close()
+	w.WriteString("Alice\n")
+	w.Close()
+	h := newTerminalHost(r, io.Discard)
+	s := &fakeSender{}
+	h.inputRequest(context.Background(), s, "name: ", false)
+	inputs, ctl := s.snapshot()
+	if len(inputs) != 1 || inputs[0] != "Alice\n" || len(ctl) != 0 {
+		t.Fatalf("inputs=%q ctl=%q", inputs, ctl)
 	}
 }
 
-func TestStdinElicitorCancelsOnEOF(t *testing.T) {
-	e := &stdinElicitor{reader: bufio.NewReader(strings.NewReader(""))}
-	result, err := e.Elicit(context.Background(), mcp.ElicitationRequest{})
-	if err != nil {
-		t.Fatalf("Elicit: %v", err)
-	}
-	if result.Action != mcp.ElicitationResponseActionCancel {
-		t.Fatalf("action = %q, want cancel", result.Action)
+func TestTerminalHostCancelsWhenStdinIsClosed(t *testing.T) {
+	r, w, _ := os.Pipe()
+	defer r.Close()
+	w.Close()
+	h := newTerminalHost(r, io.Discard)
+	s := &fakeSender{}
+	h.inputRequest(context.Background(), s, "name: ", false)
+	inputs, ctl := s.snapshot()
+	if len(inputs) != 0 || len(ctl) != 1 || ctl[0] != "cancel" {
+		t.Fatalf("inputs=%q ctl=%q, want a cancel and no input", inputs, ctl)
 	}
 }
+
+func TestEventsHostSpeaksJSONLines(t *testing.T) {
+	inR, inW := io.Pipe()
+	var out strings.Builder
+	var outMu sync.Mutex
+	h := newEventsHost(inR, writerFunc(func(p []byte) (int, error) { outMu.Lock(); defer outMu.Unlock(); return out.Write(p) }))
+	s := &fakeSender{}
+	h.start(context.Background(), s)
+
+	h.output("Your name: ")
+	h.inputRequest(context.Background(), s, "Your name: ", false)
+	inW.Write([]byte(`{"input":"Alice"}` + "\n"))
+	waitFor(t, func() bool { in, _ := s.snapshot(); return len(in) == 1 })
+	h.inputDone()
+	inW.Write([]byte("not json\n"))
+	inW.Write([]byte(`{"cancel":true}` + "\n"))
+	waitFor(t, func() bool { _, c := s.snapshot(); return len(c) == 1 })
+	h.result(mcp.NewToolResultText("hi Alice"))
+
+	inputs, ctl := s.snapshot()
+	if inputs[0] != "Alice" || ctl[0] != "cancel" {
+		t.Fatalf("inputs=%q ctl=%q", inputs, ctl)
+	}
+	outMu.Lock()
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	outMu.Unlock()
+	var kinds []string
+	for _, l := range lines {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(l), &ev); err != nil {
+			t.Fatalf("stdout line is not JSON: %q", l)
+		}
+		kinds = append(kinds, ev["event"].(string))
+	}
+	want := "output input_request input_done warning result"
+	if strings.Join(kinds, " ") != want {
+		t.Fatalf("events = %v, want %s", kinds, want)
+	}
+}
+
+func TestEventsHostCancelsAPromptOnceStdinIsClosed(t *testing.T) {
+	h := newEventsHost(strings.NewReader(""), io.Discard)
+	s := &fakeSender{}
+	h.start(context.Background(), s)
+	waitFor(t, func() bool { h.stdinMu.Lock(); defer h.stdinMu.Unlock(); return h.stdinClosed })
+	h.inputRequest(context.Background(), s, "name: ", false)
+	if _, ctl := s.snapshot(); len(ctl) != 1 {
+		t.Fatalf("ctl=%q, want one cancel", ctl)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

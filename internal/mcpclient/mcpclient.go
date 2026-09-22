@@ -80,6 +80,14 @@ func Connect(ctx context.Context, port int, opts ...ConnectOpts) (*Session, erro
 		c.OnNotification(opt.OnNotification)
 	}
 
+	// Start wires the transport to the client: without it, notifications
+	// (rat/output, rat/input_request) and server requests are dropped on
+	// the floor and a run only shows its output at the end.
+	if err := c.Start(ctx); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("start MCP client for %s: %w", url, err)
+	}
+
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initReq.Params.ClientInfo = mcp.Implementation{

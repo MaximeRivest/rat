@@ -244,10 +244,21 @@ Signal that the code is blocked waiting for stdin.
 
 ```json
 {"op": "input_request", "prompt": "Enter your name: "}
+{"op": "input_request", "prompt": "Password: ", "secret": true}
 ```
 
-The Go server relays this to the client, which sends back an `input`
-message.
+`secret` marks a password-style read (Python's `getpass`): clients use a
+field that does not echo, and never write the answer into output or a
+document.
+
+The Go server numbers each request and relays it to every client of the
+run as an MCP notification, `rat/input_request` with `{prompt, secret}`
+(and `rat/input_done` when the program stops waiting). Whoever holds the
+answer sends it with `run(input=...)`, which reaches the kernel as an
+`input` message. Only a client that declared the MCP elicitation
+capability is also asked through elicitation. `rat run` answers from its
+own stdin; `rat run --events` hands the request to the program hosting
+the run (see `rat run --help`).
 
 ### `input_delivered`
 

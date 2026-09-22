@@ -10,6 +10,7 @@ import os
 import pkgutil
 import queue
 import rlcompleter
+import signal
 import socket
 import sys
 import threading
@@ -767,7 +768,8 @@ def run_code(code, allow_stdin):
             raise RuntimeError("stdin is only supported when the client handles input")
         sys.stdout.write(prompt)
         sys.stdout.flush()
-        send({"op": "input_request", "prompt": prompt})
+        # secret: clients use a password field and never store the answer.
+        send({"op": "input_request", "prompt": prompt, "secret": True})
         state.set_waiting(True)
         mailbox.begin()
         try:
@@ -848,7 +850,22 @@ def reader_loop():
     commands.put({"op": "shutdown"})
 
 
+def _on_interrupt(signum, frame):
+    # `rat cancel` is SIGINT. It interrupts user code (running, or blocked
+    # on input()) and nothing else: an interrupt between requests, or while
+    # a reply is being written, would otherwise produce a reply nobody
+    # asked for, and every later reply would answer the wrong request.
+    # Read the flag without the state lock: a signal handler must not
+    # wait on a lock the interrupted code may hold.
+    if state._executing:
+        raise KeyboardInterrupt
+
+
 def main():
+    # Installed explicitly, never inherited: a kernel started from a
+    # background job gets SIGINT *ignored* from its parent, and every
+    # cancel would then be silently lost.
+    signal.signal(signal.SIGINT, _on_interrupt)
     threading.Thread(target=reader_loop, daemon=True).start()
 
     while True:
@@ -862,9 +879,12 @@ def main():
             elif op == "run":
                 state.set_executing(True)
                 try:
-                    send(run_code(req.get("code", ""), bool(req.get("allow_stdin", True))))
+                    result = run_code(req.get("code", ""), bool(req.get("allow_stdin", True)))
                 finally:
                     state.set_executing(False)
+                # Sent only once interrupts are off (see _on_interrupt), so
+                # a late cancel cannot cut the reply in half.
+                send(result)
             elif op == "look_overview":
                 send({"text": look_overview()})
             elif op == "look_at":

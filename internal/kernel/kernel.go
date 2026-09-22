@@ -34,6 +34,23 @@ type Kernel interface {
 	Shutdown() error
 }
 
+// InputPrompt describes what a program blocked on input asked for.
+type InputPrompt struct {
+	Text   string // the prompt the program printed ("Your name: "); may be empty
+	Secret bool   // true for password-style reads (getpass): clients must not echo or store the answer
+	// Seq numbers the reads of a kernel's lifetime (1, 2, ...). Two
+	// prompts in a row can look like one long wait to a poller; a new
+	// Seq is a new question.
+	Seq uint64
+}
+
+// InputPrompter is implemented by kernels that know the prompt of the
+// read they are blocked on. Optional: kernels without it still report
+// IsWaitingForInput, and clients show a generic prompt.
+type InputPrompter interface {
+	InputPrompt() InputPrompt
+}
+
 // RunResult is what comes back from executing code.
 type RunResult struct {
 	Success   bool   // did it exit cleanly?

@@ -57,6 +57,8 @@ type response struct {
 	Text    string `json:"text,omitempty"`
 	OK      bool   `json:"ok,omitempty"`
 	Vars    int    `json:"vars,omitempty"`
+	Prompt  string `json:"prompt,omitempty"` // input_request: what the program asked
+	Secret  bool   `json:"secret,omitempty"` // input_request: a password-style read
 }
 
 // partialBuf accumulates live output during execution so Ctl("output") can
@@ -108,6 +110,8 @@ type Python struct {
 	executionCount  int
 	executing       atomic.Bool
 	waitingForInput atomic.Bool
+	inputPrompt     atomic.Value // kernel.InputPrompt of the read in progress
+	inputSeq        atomic.Uint64
 	writeMu         sync.Mutex
 	partial         partialBuf // live output during execution
 	externalOutput  partialBuf // process stdout/stderr captured for final output
@@ -197,6 +201,9 @@ func (p *Python) Run(code string) kernel.RunResult {
 			p.partial.Append(resp.Text)
 			continue
 		case "input_request":
+			// Store the prompt before the flag: a reader that sees the
+			// flag must also see what the program asked.
+			p.inputPrompt.Store(kernel.InputPrompt{Text: resp.Prompt, Secret: resp.Secret, Seq: p.inputSeq.Add(1)})
 			p.waitingForInput.Store(true)
 			continue
 		case "input_delivered":
@@ -262,6 +269,14 @@ func (p *Python) SendInput(text string) error {
 // IsWaitingForInput returns true when the running code is blocked on input().
 func (p *Python) IsWaitingForInput() bool {
 	return p.waitingForInput.Load()
+}
+
+// InputPrompt returns the prompt of the read the program is blocked on.
+func (p *Python) InputPrompt() kernel.InputPrompt {
+	if v, ok := p.inputPrompt.Load().(kernel.InputPrompt); ok {
+		return v
+	}
+	return kernel.InputPrompt{}
 }
 
 // Look inspects the Python runtime.

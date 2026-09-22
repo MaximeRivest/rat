@@ -3,9 +3,12 @@ package python
 import (
 	"encoding/json"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/maximerivest/rat/internal/kernel"
 )
@@ -570,5 +573,78 @@ func TestDetectPythonCommandWithVenv(t *testing.T) {
 	}
 	if got != fakePy {
 		t.Fatalf("got %q, want %q", got, fakePy)
+	}
+}
+
+// A cancel that lands between runs must leave the kernel alive, its
+// variables intact, and its replies in step with its requests.
+func TestPythonCancelWhileIdleIsHarmless(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+	if r := p.Run("x = 41"); !r.Success {
+		t.Fatalf("setup: %+v", r)
+	}
+	for i := 0; i < 3; i++ {
+		if res := p.Ctl("cancel"); res.Text != "CANCELLED" {
+			t.Fatalf("cancel: %q", res.Text)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if r := p.Run("print(x + 1)"); !r.Success || strings.TrimSpace(r.Output) != "42" {
+		t.Fatalf("after idle cancels: %+v, want 42 from the same kernel", r)
+	}
+	if r := p.Run("print('next')"); strings.TrimSpace(r.Output) != "next" {
+		t.Fatalf("replies out of step: %+v", r)
+	}
+}
+
+// Cancel interrupts running code even when the kernel was started by a
+// process that ignores SIGINT (a background job does).
+func TestPythonCancelInterruptsRunningCode(t *testing.T) {
+	signal.Ignore(syscall.SIGINT)
+	defer signal.Reset(syscall.SIGINT)
+	p := newPlainTestKernel(t, t.TempDir())
+	go func() { time.Sleep(700 * time.Millisecond); p.Ctl("cancel") }()
+	start := time.Now()
+	r := p.Run("import time\ntime.sleep(10)")
+	if r.Success || !strings.Contains(r.Error, "KeyboardInterrupt") || time.Since(start) > 5*time.Second {
+		t.Fatalf("run = %+v after %s, want a prompt KeyboardInterrupt", r, time.Since(start))
+	}
+}
+
+// Each read gets its own number, so two prompts in a row are two
+// questions; getpass is marked secret and its answer never reaches output.
+func TestPythonInputPrompts(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+	answers := map[string]string{"Name: ": "Alice", "Password: ": "hunter2"}
+	var asked []kernel.InputPrompt
+	done := make(chan kernel.RunResult, 1)
+	go func() {
+		done <- p.Run("import getpass\nn = input('Name: ')\npw = getpass.getpass('Password: ')\nprint('hi', n, len(pw))")
+	}()
+	var last uint64
+	for {
+		select {
+		case r := <-done:
+			if !r.Success || !strings.Contains(r.Output, "hi Alice 7") || strings.Contains(r.Output, "hunter2") {
+				t.Fatalf("run = %+v", r)
+			}
+			if len(asked) != 2 || asked[0].Secret || !asked[1].Secret || asked[1].Seq != asked[0].Seq+1 {
+				t.Fatalf("prompts = %+v", asked)
+			}
+			return
+		case <-time.After(5 * time.Millisecond):
+		}
+		if !p.IsWaitingForInput() {
+			continue
+		}
+		ip := p.InputPrompt()
+		if ip.Seq == last {
+			continue
+		}
+		last = ip.Seq
+		asked = append(asked, ip)
+		if err := p.SendInput(answers[ip.Text]); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

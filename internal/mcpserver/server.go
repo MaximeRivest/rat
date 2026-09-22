@@ -608,6 +608,7 @@ func relayRunNotifications(
 
 	lastOutput := ""
 	waiting := false
+	var askedSeq uint64 // Seq of the prompt last announced (0: kernel does not number them)
 	for {
 		select {
 		case <-stop:
@@ -635,22 +636,66 @@ func relayRunNotifications(
 				}
 			}
 
-			// Handle input requests via MCP elicitation.
+			// The program blocked on input (or stopped waiting). Every
+			// client learns it through a notification carrying the
+			// prompt; whoever holds the answer delivers it with
+			// run(input=...) — the caller itself (rat run), or another
+			// client polling status (the VS Code extension). Only a
+			// caller that declared the MCP elicitation capability is
+			// also asked through elicitation.
 			nowWaiting := k.IsWaitingForInput()
+			var prompt kernel.InputPrompt
+			if nowWaiting {
+				prompt = inputPromptOf(k)
+			}
+			// A prompt answered and the next one asked between two ticks
+			// looks like one long wait: the Seq tells them apart.
+			if nowWaiting && waiting && prompt.Seq != 0 && prompt.Seq != askedSeq {
+				sendNotification(ch, "rat/input_done", nil)
+				waiting = false
+			}
 			if nowWaiting && !waiting {
+				askedSeq = prompt.Seq
+				sendNotification(ch, "rat/input_request", map[string]any{"prompt": prompt.Text, "secret": prompt.Secret})
 				if bus != nil {
 					bus.Publish(map[string]any{
 						"kind":      "run_waiting",
 						"caller":    caller,
 						"caller_id": callerID,
 						"run_id":    runID,
+						"prompt":    prompt.Text,
+						"secret":    prompt.Secret,
 					})
 				}
-				go requestInputViaElicitation(ctx, s, k)
+				if clientDeclaresElicitation(session) {
+					go requestInputViaElicitation(ctx, s, k)
+				}
+			} else if !nowWaiting && waiting {
+				sendNotification(ch, "rat/input_done", nil)
 			}
 			waiting = nowWaiting
 		}
 	}
+}
+
+// inputPromptOf returns what the blocked program asked, when the kernel knows.
+func inputPromptOf(k kernel.Kernel) kernel.InputPrompt {
+	if p, ok := k.(kernel.InputPrompter); ok {
+		return p.InputPrompt()
+	}
+	return kernel.InputPrompt{}
+}
+
+// clientDeclaresElicitation reports whether the caller said, at
+// initialize, that it answers elicitation requests. Asking a client that
+// did not is worse than useless: the request is queued for a listening
+// stream the client never opened, and the run waits on it forever.
+func clientDeclaresElicitation(session server.ClientSession) bool {
+	withCaps, ok := session.(server.SessionWithClientInfo)
+	if !ok {
+		return false
+	}
+	return withCaps.GetClientCapabilities().Elicitation != nil
 }
 
 // requestInputViaElicitation asks the client for input using MCP elicitation.
@@ -661,7 +706,7 @@ func requestInputViaElicitation(ctx context.Context, s *server.MCPServer, k kern
 			Method: string(mcp.MethodElicitationCreate),
 		},
 		Params: mcp.ElicitationParams{
-			Message: "The program is waiting for input.",
+			Message: elicitationMessage(inputPromptOf(k)),
 			RequestedSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -677,17 +722,21 @@ func requestInputViaElicitation(ctx context.Context, s *server.MCPServer, k kern
 
 	result, err := s.RequestElicitation(ctx, req)
 	if err != nil {
-		// Client doesn't support elicitation — send a notification as fallback,
-		// then cancel the blocked runtime so input() doesn't hang forever.
-		session := server.ClientSessionFromContext(ctx)
-		if session != nil {
-			sendNotification(session.NotificationChannel(), "rat/input_request", nil)
-		}
+		// The client declared elicitation but could not answer (the
+		// rat/input_request notification already went out): cancel the
+		// blocked read rather than leave it waiting on nobody.
 		cancelKernelInput(k)
 		return
 	}
 
 	handleElicitationResult(k, result)
+}
+
+func elicitationMessage(p kernel.InputPrompt) string {
+	if strings.TrimSpace(p.Text) == "" {
+		return "The program is waiting for input."
+	}
+	return "The program is waiting for input: " + strings.TrimSpace(p.Text)
 }
 
 func handleElicitationResult(k kernel.Kernel, result *mcp.ElicitationResult) {
