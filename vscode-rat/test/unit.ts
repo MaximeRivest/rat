@@ -103,6 +103,24 @@ async function main(): Promise<void> {
   assert.equal(model.cells[0].output?.startLine, 4);
   assert.equal(model.outputs[0].pairedCellOpenLine, 0);
 
+  // A result owns only the images a run made: a person's image right
+  // under it is not part of it, and a rerun must not replace it.
+  const personImageDoc = fakeDoc([
+    "```python",
+    "plot()",
+    "```",
+    "",
+    "```output",
+    "done",
+    "```",
+    "",
+    "![plot](../_assets/generated/3f9a1c2b7d4e.png)",
+    "",
+    "![my chart](figures/mine.png)",
+  ].join("\n"));
+  assert.deepEqual(findOutputBlock(personImageDoc as any, 2), { startLine: 4, endLine: 6, imageEndLine: 8 });
+  assert.equal(parseRatNotebookDocument(personImageDoc as any).outputs[0].range.end.line, 8, "the model's result ends at the plot, before the person's image");
+
   const nestedFenceOutputDoc = fakeDoc([
     "```python",
     "print('fence')",

@@ -495,7 +495,7 @@
         "rat.assetsDir": {
           "type": "string",
           "default": "_assets",
-          "description": "Directory for plot images, relative to workspace root"
+          "description": "Directory for plot images, relative to workspace root. Plots go in its generated/ folder, named by content. A rerun replaces only plots under an _assets folder, so keep _assets in this path."
         },
         "rat.replaceMarkdownPreviewShortcut": {
           "type": "boolean",

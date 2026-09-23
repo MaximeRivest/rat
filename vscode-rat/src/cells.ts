@@ -12,6 +12,8 @@
  */
 
 import * as vscode from "vscode";
+// A result owns only the images a run made (shared with Chattering).
+import { isOwnedImageLine } from "../vendor/mrmd-rat-notebook/0.16.0/rat-notebook.js";
 import { ratLangForFence } from "./languages";
 
 export { ratLangForFence } from "./languages";
@@ -152,7 +154,7 @@ export function findOutputBlock(
   let imageEndLine = endLine;
   while (i < lineCount) {
     const t = document.lineAt(i).text;
-    if (/^!\[.*\]\(.*\)\s*$/.test(t)) {
+    if (isOwnedImageLine(t)) {
       imageEndLine = i;
       i++;
     } else if (t.trim() === "") {

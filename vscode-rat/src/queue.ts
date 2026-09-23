@@ -13,6 +13,8 @@
  */
 
 import * as fs from "fs";
+import { splitPlots } from "../vendor/mrmd-rat-notebook/0.16.0/rat-notebook.js";
+import * as crypto from "crypto";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -894,8 +896,10 @@ export { ExecutionController as ExecutionQueue };
 
 // ── Plot extraction ────────────────────────────────────────
 
-const PLOT_RE = /^__RAT_PLOT__:(.+)$/;
-
+// Plots follow mrmd's rat-notebook (shared with Chattering): rat prints
+// "__RAT_PLOT__:<path>"; the plot is kept in <assetsDir>/generated/ under
+// a name made from its content (the same plot is one file, however often
+// the cell reruns) and linked as ![plot](…) — the form a rerun replaces.
 function extractPlots(
   output: string,
   editor: vscode.TextEditor,
@@ -905,29 +909,28 @@ function extractPlots(
     .getConfiguration("rat")
     .get("assetsDir", "_assets");
 
-  const assetsAbs = path.join(cwd, assetsRel);
+  const generated = path.join(cwd, assetsRel, "generated");
   const fileDir = path.dirname(editor.document.uri.fsPath);
 
   const textLines: string[] = [];
   const images: string[] = [];
 
   for (const line of output.split("\n")) {
-    const m = line.match(PLOT_RE);
-    if (m) {
-      const src = m[1];
-      try {
-        fs.mkdirSync(assetsAbs, { recursive: true });
-        const fname = path.basename(src);
-        const dest = path.join(assetsAbs, fname);
-        fs.copyFileSync(src, dest);
-        const rel = path.relative(fileDir, dest);
-        images.push(`![plot](${rel})`);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        textLines.push(`[plot error: ${msg}]`);
-      }
-    } else {
+    const src = splitPlots(line).plots[0];
+    if (src === undefined) {
       textLines.push(line);
+      continue;
+    }
+    try {
+      const bytes = fs.readFileSync(src);
+      const name = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 12) + ".png";
+      const dest = path.join(generated, name);
+      fs.mkdirSync(generated, { recursive: true });
+      if (!fs.existsSync(dest)) fs.writeFileSync(dest, bytes);
+      images.push(`![plot](${path.relative(fileDir, dest).split(path.sep).join("/")})`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      textLines.push(`[plot error: ${msg}]`);
     }
   }
 

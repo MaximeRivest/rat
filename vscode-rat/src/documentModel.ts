@@ -7,6 +7,7 @@
  */
 
 import * as vscode from "vscode";
+import { isOwnedImageLine } from "../vendor/mrmd-rat-notebook/0.16.0/rat-notebook.js";
 import {
   findOutputBlock,
   parseCells,
@@ -42,7 +43,6 @@ export interface RatNotebookOutputBlock extends OutputBlock {
 
 const OUTPUT_OPEN_RE = /^(\s{0,3})(`{3,})output(?::\S+)?(\s*$|\s*\|)/;
 const OUTPUT_CLOSE_RE = /^(\s{0,3})(`{3,})\s*$/;
-const IMAGE_LINK_RE = /^!\[.*\]\(.*\)\s*$/;
 
 export function parseRatNotebookDocument(
   document: vscode.TextDocument,
@@ -106,7 +106,7 @@ export function parseOutputBlocks(
     let imageEndLine = endLine;
     while (i < lineCount) {
       const text = document.lineAt(i).text;
-      if (IMAGE_LINK_RE.test(text)) {
+      if (isOwnedImageLine(text)) {
         imageEndLine = i;
         i++;
       } else if (text.trim() === "") {
