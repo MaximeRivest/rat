@@ -648,3 +648,27 @@ func TestPythonInputPrompts(t *testing.T) {
 		}
 	}
 }
+
+// Completion answers the name to insert at the cursor's token, with or
+// without Jedi: never the whole dotted expression, never a trailing "(".
+func TestPythonCompletionNamesTheToken(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+	if r := p.Run("class Thing:\n    colour = 'green'\n    def paint(self): pass\nthing = Thing()"); !r.Success {
+		t.Fatalf("setup: %+v", r)
+	}
+	text := p.Look(kernel.LookRequest{Code: "thing.", Cursor: 6}).Text
+	for _, want := range []string{"colour", "paint"} {
+		found := false
+		for _, line := range strings.Split(text, "\n") {
+			if f := strings.Fields(line); len(f) > 0 && f[0] == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("completions for thing. = %q, want a line naming %q", text, want)
+		}
+	}
+	if strings.Contains(text, "thing.colour") || strings.Contains(text, "paint(") {
+		t.Fatalf("completions carry the expression, not the name: %q", text)
+	}
+}

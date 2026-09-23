@@ -602,7 +602,14 @@ def fallback_complete(code, cursor):
                 kind = "keyword"
         except Exception:
             pass
-        add(match, kind)
+        # One contract with Jedi: the name to insert at the cursor's token,
+        # not rlcompleter's whole expression ("thing.colour", "f(", "g()").
+        name = match
+        if name.endswith("()"):
+            name, kind = name[:-2], "function"
+        elif name.endswith("("):
+            name, kind = name[:-1], "function"
+        add(name.rsplit(".", 1)[-1], kind)
         state_idx += 1
 
     if "." not in token:
