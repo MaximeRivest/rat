@@ -672,3 +672,30 @@ func TestPythonCompletionNamesTheToken(t *testing.T) {
 		t.Fatalf("completions carry the expression, not the name: %q", text)
 	}
 }
+
+// Output streams while a cell runs, without flush=True: whole lines at
+// once, a partial line (a progress bar) within a moment.
+func TestPythonOutputStreamsWithoutFlush(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+	done := make(chan kernel.RunResult, 1)
+	go func() {
+		done <- p.Run("import sys, time\nprint('line one')\ntime.sleep(1.5)\nsys.stdout.write('50%')\ntime.sleep(1.5)\nprint(' done')")
+	}()
+	waitOutput := func(want string, within time.Duration) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for time.Now().Before(deadline) {
+			if strings.Contains(p.Ctl("output").Text, want) {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("after %s the live output is %q, want it to contain %q", within, p.Ctl("output").Text, want)
+	}
+	waitOutput("line one", time.Second)
+	time.Sleep(1 * time.Second) // now inside the second sleep, after the partial write
+	waitOutput("50%", 700*time.Millisecond)
+	if r := <-done; !r.Success || !strings.Contains(r.Output, "line one\n50% done") {
+		t.Fatalf("run = %+v", r)
+	}
+}

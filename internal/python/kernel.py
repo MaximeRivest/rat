@@ -95,6 +95,40 @@ def _open_protocol():
 
 
 _proto_in, _proto_out = _open_protocol()
+
+
+def _stream_user_output():
+    """Let a cell's output reach its readers while the cell runs.
+
+    User stdout/stderr are pipes, which Python block-buffers: a plain
+    print() stayed in memory until the buffer filled or the cell ended.
+    Now whatever a running cell wrote goes out at least every 0.1 s — as
+    Jupyter's kernel does — and the end of every run flushes the rest
+    (run_code). Timed, not per line: 200k prints take 0.14 s (0.10 s
+    block-buffered); flushing at every line end took 0.37 s, for no
+    visible gain (rat relays output every 50 ms). The flush acts on the
+    binary layer, which carries its own lock; the text layer is not
+    thread-safe, so it writes straight through to it.
+    """
+    streams = [s for s in (sys.stdout, sys.stderr) if s is not _proto_out and hasattr(s, "reconfigure")]
+    for s in streams:
+        try:
+            s.reconfigure(write_through=True)
+        except Exception:
+            pass
+
+    def flush_while_running():
+        while True:
+            time.sleep(0.1)
+            if not state.running():
+                continue
+            for s in streams:
+                try:
+                    s.buffer.flush()
+                except Exception:
+                    pass
+
+    threading.Thread(target=flush_while_running, name="rat-output-flush", daemon=True).start()
 _write_lock = threading.Lock()
 
 
@@ -158,6 +192,10 @@ class KernelState:
     def set_waiting(self, value):
         with self._lock:
             self._waiting = value
+
+    def running(self):
+        with self._lock:
+            return self._executing
 
     def status(self):
         with self._lock:
@@ -869,6 +907,7 @@ def _on_interrupt(signum, frame):
 
 
 def main():
+    _stream_user_output()
     # Installed explicitly, never inherited: a kernel started from a
     # background job gets SIGINT *ignored* from its parent, and every
     # cancel would then be silently lost.
