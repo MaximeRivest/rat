@@ -64,6 +64,7 @@ connecting, runs already in progress are reported first (marked
       ends right after the answer: run_ended also ends any wait.
   {"event":"ctl_called","op":"reset",…}    {"event":"look_called",…}
   {"event":"gap"}   events were missed: resynchronise (the kernel's state is still true)
+  {"event":"unsupported","message":"…"}   a kernel started by an older rat: restart it
 
 Callers are named by RAT_CALLER in the environment of the process
 that runs code ("Maxime (Chattering)", "Lilly's agent"); unnamed
@@ -148,7 +149,17 @@ func pollKernel(ctx context.Context, session *mcpclient.Session, out eventSink, 
 			return // the process went away; the caller re-checks the kernel
 		}
 		var view mcpserver.EventsView
-		if err := json.Unmarshal([]byte(raw), &view); err != nil {
+		if err := json.Unmarshal([]byte(raw), &view); err != nil || view.Boot == "" {
+			// A kernel started by an older rat answers tail without the
+			// event stream. Say so once, then wait for it to be restarted
+			// (the caller sees the new process and follows it).
+			out.emit(map[string]any{"event": "unsupported", "message": "this kernel was started by an older rat and cannot be followed; restart it (rat restart) to follow it"})
+			for ctx.Err() == nil {
+				sleepCtx(ctx, 2*time.Second)
+				if _, err := session.Events(ctx, 0, false); err != nil {
+					return // gone (restarted or stopped): the caller follows what comes next
+				}
+			}
 			return
 		}
 		if boot != "" && view.Boot != boot {
@@ -337,6 +348,9 @@ func (h *humanEventSink) emit(ev map[string]any) {
 	case "gap":
 		endLine()
 		fmt.Fprintf(h.w, "%s %s\n", s.Dim(clock), s.Yellow("… some events were missed"))
+	case "unsupported":
+		endLine()
+		fmt.Fprintf(h.w, "%s %s\n", s.Dim(clock), s.Yellow(str("message")))
 	}
 }
 
