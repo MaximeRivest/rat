@@ -260,6 +260,23 @@ capability is also asked through elicitation. `rat run` answers from its
 own stdin; `rat run --events` hands the request to the program hosting
 the run (see `rat run --help`).
 
+### Following a kernel (events)
+
+Every run is also published on the kernel's event bus, with the caller's
+name (the MCP client name — `rat` sets it from `RAT_CALLER`), a sequence
+number and a run id: `run_started` (with the code), `run_output` (live
+chunks, every 50 ms — a quick run has none), `run_waiting` (prompt,
+secret), `run_input_done`, `run_ended` (the whole output and error — it
+also ends any wait), `look_called`, `ctl_called`. Connected sessions
+receive them as `rat/event` notifications. A follower that must not miss
+any polls the `tail` tool instead: `tail(format="events", since=N,
+active=true)` returns every event after `N`, the runs in progress (with
+their output so far and whether they wait), the server's `boot` id (a new
+process starts over at seq 1) and `gap: true` when events after `N` have
+already left the buffer. `rat events <runtime> --json` does exactly this
+and prints one event per line; it never starts a kernel and follows it
+across stops and restarts.
+
 ### `input_delivered`
 
 Confirm that the input was received and execution resumed.

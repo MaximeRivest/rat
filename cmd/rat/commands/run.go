@@ -52,6 +52,7 @@ is closed, the read is cancelled instead of waiting forever.
 --events is for programs that host a run (editors, notebook views).
 stdout carries one JSON object per line:
 
+  {"event":"started","run_id":"..."}               this run's id in "rat events"
   {"event":"output","text":"..."}                  output as it arrives
   {"event":"input_request","prompt":"...","secret":false}
   {"event":"input_done"}                           the program stopped waiting
@@ -116,6 +117,17 @@ Examples:
 					}()
 				case "rat/input_done":
 					host.inputDone()
+				case "rat/event":
+					// The kernel's broadcast of this very run carries the
+					// id every other follower sees: hand it to the host so
+					// it can tell its own run from the others.
+					f := n.Params.AdditionalFields
+					if f["kind"] == "run_started" {
+						<-sessionReady
+						if id, _ := f["run_id"].(string); id != "" && f["caller_id"] == session.SessionID() {
+							host.started(id)
+						}
+					}
 				}
 			},
 		})
@@ -145,6 +157,7 @@ Examples:
 // speaking --events.
 type runHost interface {
 	start(ctx context.Context, s inputSender)
+	started(runID string)
 	output(text string)
 	inputRequest(ctx context.Context, s inputSender, prompt string, secret bool)
 	inputDone()
@@ -204,6 +217,8 @@ func newTerminalHost(in *os.File, out io.Writer) *terminalHost {
 }
 
 func (h *terminalHost) start(context.Context, inputSender) {}
+
+func (h *terminalHost) started(string) {}
 
 func (h *terminalHost) output(text string) {
 	h.mu.Lock()
@@ -311,6 +326,10 @@ func (h *eventsHost) start(ctx context.Context, s inputSender) {
 			case m.Cancel:
 				_, _ = s.Ctl(ctx, "cancel")
 			case m.Input != nil:
+				// Answered: closing stdin now must not cancel this prompt.
+				h.stdinMu.Lock()
+				h.waiting = false
+				h.stdinMu.Unlock()
 				if _, err := s.SendInput(ctx, *m.Input); err != nil {
 					h.emit(map[string]any{"event": "warning", "message": "could not deliver input: " + err.Error()})
 				}
@@ -324,6 +343,10 @@ func (h *eventsHost) start(ctx context.Context, s inputSender) {
 			_, _ = s.Ctl(ctx, "cancel")
 		}
 	}()
+}
+
+func (h *eventsHost) started(runID string) {
+	h.emit(map[string]any{"event": "started", "run_id": runID})
 }
 
 func (h *eventsHost) output(text string) {

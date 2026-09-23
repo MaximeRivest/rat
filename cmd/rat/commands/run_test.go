@@ -177,3 +177,18 @@ func TestEchoFilterDropsTheTypedAnswerOnce(t *testing.T) {
 		t.Fatalf("secret: %q", got)
 	}
 }
+
+func TestEventsHostAnswerThenCloseDoesNotCancel(t *testing.T) {
+	inR, inW := io.Pipe()
+	h := newEventsHost(inR, io.Discard)
+	s := &fakeSender{}
+	h.start(context.Background(), s)
+	h.inputRequest(context.Background(), s, "Name: ", false)
+	inW.Write([]byte(`{"input":"Ada"}` + "\n"))
+	inW.Close() // the host has nothing more to say — before the kernel confirms
+	waitFor(t, func() bool { h.stdinMu.Lock(); defer h.stdinMu.Unlock(); return h.stdinClosed })
+	inputs, ctl := s.snapshot()
+	if len(inputs) != 1 || len(ctl) != 0 {
+		t.Fatalf("inputs=%q ctl=%q: an answered prompt was cancelled", inputs, ctl)
+	}
+}

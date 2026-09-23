@@ -193,7 +193,9 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 				"Returns recent runs with code, output, success, time, and client when available.",
 		),
 		mcp.WithNumber("n", mcp.Description("How many recent entries to return (default 10).")),
-		mcp.WithString("format", mcp.Description("Output format: text (default) or json.")),
+		mcp.WithString("format", mcp.Description("Output format: text (default), json, or events (the live event stream: every event after `since`, as JSON).")),
+		mcp.WithNumber("since", mcp.Description("format=events: return events with seq greater than this (0: the whole buffer).")),
+		mcp.WithBoolean("active", mcp.Description("format=events: also return the runs in progress.")),
 	)
 
 	s.AddTool(tailTool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -208,6 +210,23 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 		format, _ := args["format"].(string)
 		if format == "" {
 			format = "text"
+		}
+		if format == "events" {
+			// A reader following the kernel: it observes, so it does not
+			// count as activity (the idle clock stays true).
+			var since int64
+			switch v := args["since"].(type) {
+			case float64:
+				since = int64(v)
+			case int:
+				since = int64(v)
+			}
+			withActive, _ := args["active"].(bool)
+			data, err := json.Marshal(bus.View(since, withActive))
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultText(string(data)), nil
 		}
 		if caller := callerName(ctx); caller != "" {
 			tracker.TouchFrom(caller)
@@ -652,6 +671,9 @@ func relayRunNotifications(
 			// looks like one long wait: the Seq tells them apart.
 			if nowWaiting && waiting && prompt.Seq != 0 && prompt.Seq != askedSeq {
 				sendNotification(ch, "rat/input_done", nil)
+				if bus != nil {
+					bus.Publish(map[string]any{"kind": "run_input_done", "caller": caller, "caller_id": callerID, "run_id": runID})
+				}
 				waiting = false
 			}
 			if nowWaiting && !waiting {
@@ -672,6 +694,9 @@ func relayRunNotifications(
 				}
 			} else if !nowWaiting && waiting {
 				sendNotification(ch, "rat/input_done", nil)
+				if bus != nil {
+					bus.Publish(map[string]any{"kind": "run_input_done", "caller": caller, "caller_id": callerID, "run_id": runID})
+				}
 			}
 			waiting = nowWaiting
 		}

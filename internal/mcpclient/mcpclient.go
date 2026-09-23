@@ -9,6 +9,7 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,28 @@ type Status struct {
 type Session struct {
 	client *client.Client
 	url    string
+	trans  *transport.StreamableHTTP
+}
+
+// SessionID is this connection's MCP session id: the caller_id on the
+// kernel's events for the runs this session makes.
+func (s *Session) SessionID() string {
+	if s.trans == nil {
+		return ""
+	}
+	return s.trans.GetSessionId()
+}
+
+// CallerName is the name this client gives the kernel, which the kernel
+// puts on the events of every run it makes ("caller"). RAT_CALLER names
+// the person or program behind the runs ("Maxime (Chattering)", "Lilly's
+// agent"); a process started by an agent inherits it, so its runs carry
+// the agent's name. Default: "rat".
+func CallerName() string {
+	if name := strings.TrimSpace(os.Getenv("RAT_CALLER")); name != "" {
+		return name
+	}
+	return "rat"
 }
 
 // ConnectOpts configures optional MCP client capabilities.
@@ -49,14 +72,26 @@ type ConnectOpts struct {
 
 	// OnNotification is called for server notifications (e.g. rat/output streaming).
 	OnNotification func(mcp.JSONRPCNotification)
+
+	// ClientName overrides CallerName() (a follower such as `rat events`
+	// names itself, not the person).
+	ClientName string
 }
+
+type quietLogger struct{}
+
+func (quietLogger) Infof(string, ...any)  {}
+func (quietLogger) Errorf(string, ...any) {}
 
 // Connect connects to a kernel's MCP HTTP endpoint, initializes the
 // session, and returns a ready-to-use Session.
 func Connect(ctx context.Context, port int, opts ...ConnectOpts) (*Session, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
 
-	trans, err := transport.NewStreamableHTTP(url)
+	// The transport logs to stderr on its own (e.g. when a kernel that
+	// went away cannot be told the session ended); rat reports what
+	// matters itself.
+	trans, err := transport.NewStreamableHTTP(url, transport.WithLogger(quietLogger{}))
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", url, err)
 	}
@@ -90,8 +125,12 @@ func Connect(ctx context.Context, port int, opts ...ConnectOpts) (*Session, erro
 
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+	name := opt.ClientName
+	if name == "" {
+		name = CallerName()
+	}
 	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "rat",
+		Name:    name,
 		Version: "0.1.0",
 	}
 
@@ -100,12 +139,25 @@ func Connect(ctx context.Context, port int, opts ...ConnectOpts) (*Session, erro
 		return nil, fmt.Errorf("initialize MCP session on %s: %w", url, err)
 	}
 
-	return &Session{client: c, url: url}, nil
+	return &Session{client: c, url: url, trans: trans}, nil
 }
 
 // Run executes code on the kernel.
 func (s *Session) Run(ctx context.Context, code string) (*mcp.CallToolResult, error) {
 	return s.callTool(ctx, "run", map[string]any{"code": code})
+}
+
+// Events returns the kernel's events after `since` (format=events), and
+// the runs in progress when withActive — the raw JSON the kernel sends.
+func (s *Session) Events(ctx context.Context, since int64, withActive bool) (string, error) {
+	result, err := s.callTool(ctx, "tail", map[string]any{"format": "events", "since": since, "active": withActive})
+	if err != nil {
+		return "", err
+	}
+	if result.IsError {
+		return "", fmt.Errorf("%s", ExtractText(result))
+	}
+	return ExtractText(result), nil
 }
 
 // Look inspects kernel state.
