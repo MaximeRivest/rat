@@ -6,6 +6,7 @@ import inspect
 import io
 import json
 import keyword
+import linecache
 import os
 import pkgutil
 import queue
@@ -773,6 +774,22 @@ class _MatplotlibLoader(importlib.abc.Loader):
 sys.meta_path.insert(0, _MatplotlibFinder())
 
 
+_cell_count = 0
+
+
+def _remember_cell(code):
+    """A name for this cell's code, with the code kept where Python looks for
+    source (linecache), as IPython does: inspect.getsource() then works on
+    functions and classes defined in a cell, and tracebacks show its lines.
+    Libraries that read a function's source (docstrings, comments, bodies)
+    need it. Entries with no modification time are never evicted."""
+    global _cell_count
+    _cell_count += 1
+    name = f"<rat-cell-{_cell_count}>"
+    linecache.cache[name] = (len(code), None, code.splitlines(True), name)
+    return name
+
+
 def run_code(code, allow_stdin):
     # Normal stdout/stderr are now safe user-output streams. The Rat protocol
     # lives on _proto_in/_proto_out, so Python prints, os.write(1/2), native
@@ -837,19 +854,20 @@ def run_code(code, allow_stdin):
             pass
 
     try:
-        tree = ast.parse(code, mode="exec")
+        filename = _remember_cell(code)
+        tree = ast.parse(code, filename, mode="exec")
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             body = tree.body[:-1]
             if body:
                 module = ast.Module(body=body, type_ignores=[])
-                exec(compile(module, "<rat>", "exec"), namespace, namespace)
+                exec(compile(module, filename, "exec"), namespace, namespace)
             expr = ast.Expression(tree.body[-1].value)
-            result = eval(compile(expr, "<rat>", "eval"), namespace, namespace)
+            result = eval(compile(expr, filename, "eval"), namespace, namespace)
             namespace["_"] = result
             if result is not None:
                 print(repr(result))
         else:
-            exec(compile(tree, "<rat>", "exec"), namespace, namespace)
+            exec(compile(tree, filename, "exec"), namespace, namespace)
         _maybe_patch_matplotlib()
         sys.stdout.flush()
         sys.stderr.flush()

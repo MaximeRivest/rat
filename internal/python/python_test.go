@@ -138,6 +138,32 @@ func TestPythonStatePersistsAcrossRuns(t *testing.T) {
 	}
 }
 
+// A cell's code is kept where Python looks for source (linecache), as
+// IPython does: libraries that read a function's source work on functions
+// defined in a cell, and tracebacks show the cell's lines.
+func TestPythonCellSourceIsReadable(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r1 := p.Run("def f(x):\n    # a comment only the source has\n    return 1 / x")
+	if !r1.Success {
+		t.Fatalf("define f failed: %s", r1.Error)
+	}
+	r2 := p.Run("import inspect\nprint(inspect.getsource(f))")
+	if !r2.Success {
+		t.Fatalf("getsource failed: %s", r2.Error)
+	}
+	if !strings.Contains(r2.Output, "# a comment only the source has") {
+		t.Fatalf("output = %q, want the source of f", r2.Output)
+	}
+	r3 := p.Run("f(0)")
+	if r3.Success {
+		t.Fatal("expected ZeroDivisionError")
+	}
+	if !strings.Contains(r3.Error, "return 1 / x") {
+		t.Fatalf("traceback = %q, want the line that failed", r3.Error)
+	}
+}
+
 // ── RunResult fields ───────────────────────────────────────────
 
 func TestPythonRunResultFields(t *testing.T) {
