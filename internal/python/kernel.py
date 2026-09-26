@@ -17,17 +17,21 @@ import sys
 import threading
 import time
 import traceback
+import types
 
 try:
     import jedi  # type: ignore
 except Exception:
     jedi = None
 
-namespace = {
-    "__name__": "__main__",
-    "__package__": None,
-    "__builtins__": builtins,
-}
+# The user's namespace is a real module installed as __main__, as in IPython:
+# code that looks a cell's class up by its module (pickle, multiprocessing,
+# libraries reading a class's names) finds the user's definitions, not this
+# kernel script. The kernel's own functions keep their own globals.
+_user_main = types.ModuleType("__main__")
+_user_main.__dict__.update({"__package__": None, "__builtins__": builtins})
+sys.modules["__main__"] = _user_main
+namespace = _user_main.__dict__
 
 # ── Optional IPython (for %magic support in the kernel) ─────
 
@@ -51,6 +55,8 @@ def _init_ipython():
 
 
 _init_ipython()
+# IPython installs a __main__ of its own when the shell is made: the user's is the one
+sys.modules["__main__"] = _user_main
 
 
 def _open_protocol():

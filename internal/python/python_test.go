@@ -164,6 +164,21 @@ func TestPythonCellSourceIsReadable(t *testing.T) {
 	}
 }
 
+// The namespace is the real __main__ module, as in IPython: a class
+// defined in a cell is found through its module (pickle, libraries that
+// read the names a class uses).
+func TestPythonCellsRunInMain(t *testing.T) {
+	p := newPlainTestKernel(t, t.TempDir())
+
+	r1 := p.Run("class Point:\n    x: int = 1\n\nimport sys, pickle\nprint(sys.modules['__main__'].Point is Point)\nprint(pickle.loads(pickle.dumps(Point())).x)")
+	if !r1.Success {
+		t.Fatalf("run failed: %s", r1.Error)
+	}
+	if !strings.Contains(r1.Output, "True") || !strings.Contains(r1.Output, "1") {
+		t.Fatalf("output = %q, want True and 1", r1.Output)
+	}
+}
+
 // ── RunResult fields ───────────────────────────────────────────
 
 func TestPythonRunResultFields(t *testing.T) {
