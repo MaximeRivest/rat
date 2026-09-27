@@ -182,7 +182,11 @@ func New(name string, k kernel.Kernel, tracker *activity.Tracker) *server.MCPSer
 			})
 		}
 
-		return mcp.NewToolResultText(result.Text), nil
+		res := mcp.NewToolResultText(result.Text)
+		if result.Completion != nil {
+			res.StructuredContent = result.Completion
+		}
+		return res, nil
 	})
 
 	// ── tail ─────────────────────────────────────────────────
