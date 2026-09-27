@@ -4,6 +4,11 @@ display: Julia
 detect:
   commands: [julia]
   env: RAT_JULIA
+  # Where juliaup (the official installer) puts it.
+  paths:
+    - ~/.juliaup/bin/julia
+    - $LOCALAPPDATA/Microsoft/WindowsApps/julia
+    - $LOCALAPPDATA/Programs/Julia-*/bin/julia
 
 kernel:
   type: json

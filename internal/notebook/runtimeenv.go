@@ -229,6 +229,9 @@ func doctorEnv(store *state.Store, nb *Notebook, r *Report, opts *Options, key s
 			}
 		}
 	}
+	if binary == "" && opts.LookPath == nil {
+		binary = rt.cfg.KnownPath()
+	}
 	if binary == "" {
 		return nil // the tool check says the runtime is missing
 	}
@@ -420,3 +423,6 @@ func sortedEnvKeys(m map[string]*EnvState) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// HasGuide reports whether rat has a setup guide for lang (`rat guide`).
+func HasGuide(lang string) bool { return runtimes.HasGuide(lang) }

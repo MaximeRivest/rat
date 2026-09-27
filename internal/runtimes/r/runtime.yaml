@@ -4,6 +4,13 @@ display: R
 detect:
   commands: [Rscript, R]
   env: RAT_R
+  # Where R installers put it (the CRAN installers, rig, Homebrew).
+  paths:
+    - /usr/local/bin/Rscript
+    - /opt/homebrew/bin/Rscript
+    - /Library/Frameworks/R.framework/Resources/bin/Rscript
+    - $ProgramFiles/R/R-*/bin/Rscript
+    - $LOCALAPPDATA/Programs/R/R-*/bin/Rscript
 
 kernel:
   type: json

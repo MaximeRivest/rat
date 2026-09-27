@@ -1,7 +1,10 @@
 package generic
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +66,30 @@ func TestTmuxOptionStringQuotesValues(t *testing.T) {
 	want := "'--model' 'openai/gpt-4o mini'"
 	if got != want {
 		t.Fatalf("TmuxOptionString() = %q, want %q", got, want)
+	}
+}
+
+func TestKnownPathFindsWhereAnInstallerPutIt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+	bin := filepath.Join(home, ".juliaup", "bin", "julia")
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	for _, v := range []string{"1.9", "1.12"} {
+		p := filepath.Join(home, "R", "R-"+v, "bin", "Rscript")
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(""), 0o755)
+	}
+	cfg := &RuntimeConfig{Display: "Julia"}
+	cfg.Detect.Commands = []string{"julia"}
+	cfg.Detect.Paths = []string{"~/.juliaup/bin/julia"}
+	if got, err := cfg.DetectBinary(); err != nil || got != bin {
+		t.Fatalf("DetectBinary = %q, %v", got, err)
+	}
+	r := &RuntimeConfig{}
+	r.Detect.Paths = []string{"$HOME/R/R-*/bin/Rscript"}
+	if got := r.KnownPath(); !strings.HasSuffix(got, filepath.Join("R-1.12", "bin", "Rscript")) {
+		t.Fatalf("the newest is R-1.12, not R-1.9 — got %q", got)
 	}
 }

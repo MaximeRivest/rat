@@ -352,6 +352,8 @@ func toolCheck(lang string, opts *Options) (Check, bool) {
 	for _, b := range bins {
 		if p, err := opts.lookPath(b); err == nil {
 			found = append(found, p)
+		} else if cfg, _ := runtimeConfig(lang); cfg != nil && opts.LookPath == nil && cfg.KnownPath() != "" {
+			found = append(found, cfg.KnownPath()) // where an installer put it
 		} else {
 			missing = append(missing, b)
 		}
@@ -361,7 +363,10 @@ func toolCheck(lang string, opts *Options) (Check, bool) {
 		c.Detail = strings.Join(found, ", ")
 	} else {
 		c.Detail = "missing: " + strings.Join(missing, ", ")
-		c.Hint = "install " + strings.Join(missing, " and ") + " (rat does not install runtimes for " + lang + " yet)"
+		c.Hint = "install " + strings.Join(missing, " and ")
+		if HasGuide(lang) {
+			c.Hint += " — `rat guide " + lang + "` shows how, for a person or their AI"
+		}
 	}
 	return c, true
 }
@@ -424,7 +429,7 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 		if cmd == nil {
 			r.Checks = append(r.Checks, Check{ID: "venv", Label: "environment", OK: false,
 				Detail: "no venv and no way to create one",
-				Hint:   "install uv (https://docs.astral.sh/uv/) or a python3 on PATH"})
+				Hint:   "install uv — `rat guide py` shows how, for a person or their AI"})
 			r.Blocked = true
 			return nil
 		}

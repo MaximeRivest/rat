@@ -56,6 +56,11 @@ type RuntimeConfig struct {
 	Detect struct {
 		Commands []string `yaml:"commands"` // binaries to search PATH for
 		Env      string   `yaml:"env"`      // env var override (e.g. RAT_R)
+		// Paths are looked at after PATH: where installers put the
+		// runtime (juliaup's ~/.juliaup/bin, R's Program Files folder), so
+		// a runtime installed while rat's caller runs is found without
+		// restarting it. ~ and $VAR expand; globs pick the newest match.
+		Paths []string `yaml:"paths,omitempty"`
 	} `yaml:"detect"`
 
 	Kernel struct {
@@ -241,7 +246,34 @@ func (cfg *RuntimeConfig) DetectBinary() (string, error) {
 		}
 	}
 
+	// 3. Where installers put it
+	if p := cfg.KnownPath(); p != "" {
+		return p, nil
+	}
+
 	return "", fmt.Errorf("%s not found (tried: %s)", cfg.Display, strings.Join(cfg.Detect.Commands, ", "))
+}
+
+// KnownPath returns the newest existing file among Detect.Paths.
+func (cfg *RuntimeConfig) KnownPath() string {
+	home, _ := os.UserHomeDir()
+	for _, pattern := range cfg.Detect.Paths {
+		if strings.HasPrefix(pattern, "~/") || strings.HasPrefix(pattern, `~\`) {
+			pattern = filepath.Join(home, pattern[2:])
+		}
+		pattern = os.ExpandEnv(pattern)
+		if goruntime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(pattern), ".exe") {
+			pattern += ".exe"
+		}
+		matches, _ := filepath.Glob(pattern)
+		sort.Slice(matches, func(i, j int) bool { return naturalLess(matches[i], matches[j]) })
+		for i := len(matches) - 1; i >= 0; i-- {
+			if st, err := os.Stat(matches[i]); err == nil && !st.IsDir() {
+				return matches[i]
+			}
+		}
+	}
+	return ""
 }
 
 // KernelScriptPath returns the absolute path to the kernel script,
@@ -1487,4 +1519,36 @@ func shellQuote(s string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+// naturalLess orders names with their numbers as numbers: R-4.9 before
+// R-4.10.
+func naturalLess(a, b string) bool {
+	for a != "" && b != "" {
+		da, db := digitsPrefix(a), digitsPrefix(b)
+		if da != "" && db != "" {
+			na, nb := strings.TrimLeft(da, "0"), strings.TrimLeft(db, "0")
+			if len(na) != len(nb) {
+				return len(na) < len(nb)
+			}
+			if na != nb {
+				return na < nb
+			}
+			a, b = a[len(da):], b[len(db):]
+			continue
+		}
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		a, b = a[1:], b[1:]
+	}
+	return len(a) < len(b)
+}
+
+func digitsPrefix(s string) string {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return s[:i]
 }

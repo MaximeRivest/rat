@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -15,11 +17,31 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 }
 
+// NotebookAPI is the level of what rat offers notebook clients, raised
+// when they can rely on something new. Clients (Chattering) check it,
+// not version strings, which builds name differently.
+//
+//	1  notebooks: doctor/ensure/play, --doc, run --events (v0.4.0)
+//	2  R and Julia kernels, displays (__RAT_DISPLAY__), look --json with
+//	   exact completions, packages by the runtime's script, lock files,
+//	   rat guide (v0.5.0)
+const NotebookAPI = 2
+
+var versionJSON bool
+
+func init() {
+	versionCmd.Flags().BoolVar(&versionJSON, "json", false, `Print {"version", "os", "arch", "notebook_api"} as JSON`)
+}
+
 var versionCmd = &cobra.Command{
 	Use:     "version",
 	Short:   "Version info",
 	GroupID: "setup",
 	Run: func(cmd *cobra.Command, args []string) {
+		if versionJSON {
+			_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"version": Version, "os": runtime.GOOS, "arch": runtime.GOARCH, "notebook_api": NotebookAPI})
+			return
+		}
 		fmt.Printf("%s  %s/%s\n", s.Bold("rat "+Version), runtime.GOOS, runtime.GOARCH)
 		fmt.Println()
 		seen := map[string]bool{}
