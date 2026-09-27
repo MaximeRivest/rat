@@ -19,6 +19,7 @@ import (
 	"github.com/maximerivest/rat/internal/bash"
 	"github.com/maximerivest/rat/internal/daemon"
 	"github.com/maximerivest/rat/internal/generic"
+	"github.com/maximerivest/rat/internal/jupyter"
 	"github.com/maximerivest/rat/internal/kernel"
 	"github.com/maximerivest/rat/internal/mcpserver"
 	"github.com/maximerivest/rat/internal/python"
@@ -166,6 +167,12 @@ func loadGenericKernel(name, lang, cwd, runtimePath string, options map[string]s
 	switch cfg.KernelType() {
 	case "tmux":
 		return generic.NewTmux(name, cwd, cfg, configDir, runtimePath, options)
+	case "jupyter":
+		spec, err := jupyter.FindSpec(cfg.Kernel.Kernelspec)
+		if err != nil {
+			return nil, err
+		}
+		return jupyter.New(name, cwd, spec, jupyter.Options{Overview: cfg.Kernel.Overview})
 	default:
 		return generic.New(name, cwd, cfg, configDir, runtimePath, options)
 	}

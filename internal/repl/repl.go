@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -281,5 +282,11 @@ func runNativeFrontend(cfg Config) error {
 	proc.Stdin = os.Stdin
 	proc.Stdout = os.Stdout
 	proc.Stderr = os.Stderr
+	// Ctrl-C belongs to the frontend (it interrupts the kernel's code):
+	// rat, in the same terminal, must not die of it. Caught, not
+	// ignored — an ignored SIGINT would be inherited by the frontend.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
 	return proc.Run()
 }

@@ -61,8 +61,9 @@ type Report struct {
 	Languages      []string `json:"languages"`
 
 	Python *PythonState `json:"python,omitempty"`
-	R      *RState      `json:"r,omitempty"`
-	Julia  *JuliaState  `json:"julia,omitempty"`
+	// Envs: the packages of runtimes other than Python, by front-matter
+	// key; in JSON each is a top-level field of its key ("r", "julia").
+	Envs map[string]*EnvState `json:"-"`
 	// After lists the notebooks this one declares as prerequisites, in run
 	// order, with whether each has already run in the current kernels.
 	After []AfterState `json:"after"`
@@ -99,6 +100,11 @@ type PythonState struct {
 	KernelRunning bool              `json:"kernel_running"`
 	KernelVenv    string            `json:"kernel_venv,omitempty"` // live binding when running
 	PEP723        bool              `json:"pep723,omitempty"`
+	// Lock: .rat/python.lock, the environment's versions as `pip freeze`
+	// wrote them after the last ensure (editable installs aside: they are
+	// declared). Its pins are wanted like declared lines.
+	Lock   string `json:"lock,omitempty"`
+	Relock bool   `json:"relock,omitempty"`
 }
 
 // EditableInstall is one local package installed editable in the venv.
@@ -151,6 +157,9 @@ type Options struct {
 	// Recreate allows Ensure to delete and rebuild a venv whose interpreter
 	// does not satisfy `requires`. Destructive; never implied.
 	Recreate bool
+	// Update resolves the declarations again instead of reproducing the
+	// lock files, and writes new locks.
+	Update bool
 	// Progress receives each step as it completes (Ensure only).
 	Progress func(Step)
 	// LookPath and Getenv are injectable for tests.
@@ -211,8 +220,7 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 		return r, nil
 	}
 	var chainPython []*PythonSpec
-	var chainR []*RSpec
-	var chainJulia []*JuliaSpec
+	var chainDeps []map[string]*DepsSpec
 	for _, dep := range chain {
 		depRoot, pinned := dep.ProjectRoot()
 		if !pinned {
@@ -229,11 +237,8 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 		if dep.Python != nil {
 			chainPython = append(chainPython, dep.Python)
 		}
-		if dep.R != nil {
-			chainR = append(chainR, dep.R)
-		}
-		if dep.Julia != nil {
-			chainJulia = append(chainJulia, dep.Julia)
+		if dep.Deps != nil {
+			chainDeps = append(chainDeps, dep.Deps)
 		}
 		for _, l := range dep.Languages() {
 			if !containsString(r.Languages, l) {
@@ -261,15 +266,16 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	for i := len(chainPython) - 1; i >= 0; i-- {
 		effective = mergePython(chainPython[i], effective)
 	}
-	effectiveR := nb.R
-	for i := len(chainR) - 1; i >= 0; i-- {
-		effectiveR = mergeR(chainR[i], effectiveR)
+	effectiveDeps := map[string]*DepsSpec{}
+	for k, v := range nb.Deps {
+		effectiveDeps[k] = v
 	}
-	effectiveJulia := nb.Julia
-	for i := len(chainJulia) - 1; i >= 0; i-- {
-		effectiveJulia = mergeJulia(chainJulia[i], effectiveJulia)
+	for i := len(chainDeps) - 1; i >= 0; i-- {
+		for k, v := range chainDeps[i] {
+			effectiveDeps[k] = mergeDeps(v, effectiveDeps[k])
+		}
 	}
-	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723, R: effectiveR, Julia: effectiveJulia}
+	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723, Deps: effectiveDeps}
 
 	// Tools for non-Python cells. Rat does not install the runtimes
 	// themselves: report them, but do not let a missing R or tmux stop the
@@ -286,13 +292,29 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 			return nil, err
 		}
 	}
-	if nb.R != nil || containsString(r.Languages, "r") {
-		if err := doctorR(store, nb, r, &opts); err != nil {
-			return nil, err
+	// Every other runtime's packages, through its own script.
+	r.Envs = map[string]*EnvState{}
+	runtimesByKey := packagedRuntimes()
+	var keys []string
+	for key := range nb.Deps {
+		keys = append(keys, key)
+	}
+	for key, rt := range runtimesByKey {
+		if nb.Deps[key] == nil && containsString(r.Languages, rt.lang) {
+			keys = append(keys, key)
 		}
 	}
-	if nb.Julia != nil || containsString(r.Languages, "jl") {
-		if err := doctorJulia(store, nb, r, &opts); err != nil {
+	sort.Strings(keys)
+	for _, key := range keys {
+		rt, ok := runtimesByKey[key]
+		if !ok {
+			r.Checks = append(r.Checks, Check{ID: "packages-" + key, Label: "rat." + key,
+				Detail: "no runtime declares packages under rat." + key,
+				Hint:   "known keys: python, " + strings.Join(PackageKeys(), ", ")})
+			r.Blocked = true
+			continue
+		}
+		if err := doctorEnv(store, nb, r, &opts, key, rt, nb.Deps[key]); err != nil {
 			return nil, err
 		}
 	}
@@ -455,9 +477,15 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 	// ── requirements ──
 	if len(ps.Requirements) > 0 {
 		var missing []string
+		ps.Lock = filepath.Join(r.Project, ".rat", "python.lock")
+		var pins []string
+		if !opts.Update {
+			pins = readPythonLock(ps.Lock)
+		}
 		switch {
 		case opts.Force, !ps.VenvExists, hasAction(r.Actions, "recreate-venv"):
 			missing = append(missing, ps.Requirements...)
+			missing = append(missing, pins...)
 		default:
 			receipt := readReceipt(ps.Venv, ps.Python, ps.Version)
 			installed, err := installedDistributions(ps.Python)
@@ -474,6 +502,12 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 				}
 				if !ok {
 					missing = append(missing, line)
+				}
+			}
+			for _, pin := range pins {
+				name, version, _ := strings.Cut(pin, "==")
+				if d, ok := installed[normalizeName(strings.TrimSpace(name))]; !ok || d.Version != strings.TrimSpace(version) {
+					missing = append(missing, pin)
 				}
 			}
 			if len(problems) > 0 {
@@ -494,6 +528,7 @@ func doctorPython(store *state.Store, nb *Notebook, r *Report, opts *Options) er
 			}
 		}
 		ps.Missing = missing
+		ps.Relock = len(missing) == 0 && (opts.Update || !fileExists(ps.Lock))
 		if len(missing) == 0 {
 			r.Checks = append(r.Checks, Check{ID: "requirements", Label: "requirements", OK: true,
 				Detail: fmt.Sprintf("%d satisfied", len(ps.Requirements))})
@@ -545,14 +580,51 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	if plan.Blocked || len(plan.Actions) == 0 {
+	if plan.Blocked {
 		return plan, nil
 	}
+	// Locks come with ensure: what runs is recorded, also when every
+	// package was installed already (by Nix, by hand, by an older rat).
+	var lockSteps []Step
+	if ps := plan.Python; ps != nil && ps.Relock && ps.VenvExists && !hasAction(plan.Actions, "install") {
+		t0 := time.Now()
+		out, err := writePythonLock(ps, plan.Project, &opts)
+		step := Step{Action: Action{ID: "lock:python", Label: "write " + rel(plan.Project, ps.Lock)}, OK: err == nil, Output: out, Seconds: time.Since(t0).Seconds()}
+		if err != nil {
+			step.Output = err.Error()
+		}
+		lockSteps = append(lockSteps, step)
+		if opts.Progress != nil {
+			opts.Progress(step)
+		}
+	}
+	for _, key := range sortedEnvKeys(plan.Envs) {
+		es := plan.Envs[key]
+		if !es.Relock || hasAction(plan.Actions, "install:"+key) {
+			continue
+		}
+		t0 := time.Now()
+		out, err := lockEnv(es, plan.Project, &opts)
+		step := Step{Action: Action{ID: "lock:" + key, Label: "write " + rel(plan.Project, es.Lock)}, OK: err == nil,
+			Output: strings.TrimSpace(out), Seconds: time.Since(t0).Seconds()}
+		if err != nil {
+			step.Output = strings.TrimSpace(step.Output + "\n" + err.Error())
+		}
+		lockSteps = append(lockSteps, step)
+		if opts.Progress != nil {
+			opts.Progress(step)
+		}
+	}
+	if len(plan.Actions) == 0 {
+		if len(lockSteps) == 0 {
+			return plan, nil
+		}
+		return finish(store, nb, opts, lockSteps)
+	}
 	ps := plan.Python
-	var steps []Step
+	steps := lockSteps
 	restartKernel := false
-	restartR := false
-	restartJulia := false
+	var restartLangs []*EnvState
 	for _, a := range plan.Actions {
 		t0 := time.Now()
 		var out string
@@ -587,20 +659,25 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 				if err := recordReceipt(ps.Venv, ps.Python, ver.String(), ps.Missing); err != nil {
 					out += "\n(could not write receipt: " + err.Error() + ")"
 				}
+				if lockOut, err := writePythonLock(ps, plan.Project, &opts); err != nil {
+					out += "\n(could not write " + rel(plan.Project, ps.Lock) + ": " + err.Error() + ")"
+				} else {
+					out += "\n" + lockOut
+				}
 				if anyEditable(ps.Missing) && ps.KernelRunning {
 					restartKernel = true
 				}
 			}
 		case "restart-kernel":
 			restartKernel = true
-		case "r-install":
-			var restart bool
-			out, restart, runErr = ensureR(plan.R)
-			restartR = restartR || restart
-		case "julia-install":
-			var restart bool
-			out, restart, runErr = ensureJulia(plan.Julia)
-			restartJulia = restartJulia || restart
+		default:
+			if key, ok := strings.CutPrefix(a.ID, "install:"); ok && plan.Envs[key] != nil {
+				var restart bool
+				out, restart, runErr = ensureEnv(plan.Envs[key], plan.Project, &opts)
+				if restart {
+					restartLangs = append(restartLangs, plan.Envs[key])
+				}
+			}
 		}
 		step := Step{Action: a, OK: runErr == nil, Output: strings.TrimSpace(out), Seconds: time.Since(t0).Seconds()}
 		if runErr != nil {
@@ -617,11 +694,8 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	if restartKernel && ps != nil && ps.KernelRunning {
 		steps = append(steps, restartNotebookKernel(store, "py", ps.Kernel, nb, plan, opts))
 	}
-	if restartR && plan.R != nil {
-		steps = append(steps, restartNotebookKernel(store, "r", plan.R.Kernel, nb, plan, opts))
-	}
-	if restartJulia && plan.Julia != nil {
-		steps = append(steps, restartNotebookKernel(store, "jl", plan.Julia.Kernel, nb, plan, opts))
+	for _, es := range restartLangs {
+		steps = append(steps, restartNotebookKernel(store, es.Lang, es.Kernel, nb, plan, opts))
 	}
 	return finish(store, nb, opts, steps)
 }
@@ -1178,4 +1252,85 @@ func recordReceipt(venv, python, version string, lines []string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(venv, receiptFile), append(data, '\n'), 0644)
+}
+
+// MarshalJSON writes each runtime's packages as a top-level field of its
+// key ("r", "julia"), beside "python".
+func (r *Report) MarshalJSON() ([]byte, error) {
+	type plain Report
+	raw, err := json.Marshal((*plain)(r))
+	if err != nil {
+		return nil, err
+	}
+	if len(r.Envs) == 0 {
+		return raw, nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for key, es := range r.Envs {
+		if _, taken := m[key]; taken {
+			continue
+		}
+		b, err := json.Marshal(es)
+		if err != nil {
+			return nil, err
+		}
+		m[key] = b
+	}
+	return json.Marshal(m)
+}
+
+// readPythonLock returns the pinned lines of .rat/python.lock (nil when
+// there is none).
+func readPythonLock(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var pins []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+			continue
+		}
+		pins = append(pins, line)
+	}
+	return pins
+}
+
+// writePythonLock records the environment's versions: `pip freeze`
+// without the editable installs (the notebook declares those, with paths
+// that mean something on another machine).
+func writePythonLock(ps *PythonState, project string, opts *Options) (string, error) {
+	var argv []string
+	if ps.UV != "" {
+		argv = []string{ps.UV, "pip", "freeze", "--python", ps.Python, "--exclude-editable"}
+	} else {
+		argv = []string{ps.Python, "-m", "pip", "freeze", "--exclude-editable"}
+	}
+	out, err := runCommand(argv, project, 2*time.Minute)
+	if err != nil {
+		return out, err
+	}
+	var kept []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "-e ") && !strings.HasPrefix(line, "#") {
+			kept = append(kept, line)
+		}
+	}
+	if err := writeRatGitignore(project); err != nil {
+		return "", err
+	}
+	body := "# Written by `rat ensure`: the versions this project's notebooks run with.\n# `rat ensure` reproduces them; `rat ensure --update` resolves again.\n" + strings.Join(kept, "\n") + "\n"
+	if err := os.WriteFile(ps.Lock, []byte(body), 0o644); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("wrote %s (%d packages)", rel(project, ps.Lock), len(kept)), nil
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }

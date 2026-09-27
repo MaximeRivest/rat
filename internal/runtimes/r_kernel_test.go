@@ -1,6 +1,7 @@
 package runtimes_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -162,5 +163,21 @@ func TestRKernelCompletesExactlyAndHarmlessly(t *testing.T) {
 	}
 	if r := k.Look(kernel.LookRequest{At: "file.remove('x')"}); !strings.HasSuffix(r.Text, "not found") {
 		t.Fatalf("look ran a call: %q", r.Text)
+	}
+}
+
+func TestRKernelWidgetIsAnInteractiveDisplay(t *testing.T) {
+	k := newRKernel(t)
+	if exec.Command("Rscript", "-e", "library(DT)").Run() != nil {
+		t.Skip("R package DT not available")
+	}
+	r := run(t, k, "library(DT)\ncat('before\\n')\ndatatable(head(iris))\ncat('after\\n')")
+	m := regexp.MustCompile(`(?s)^before\n__RAT_DISPLAY__:(\S+\.json)\nafter$`).FindStringSubmatch(r.Output)
+	if !r.Success || m == nil {
+		t.Fatalf("widget = %+v", r)
+	}
+	raw, _ := os.ReadFile(m[1])
+	if !strings.Contains(string(raw), `<script>`) || !strings.Contains(string(raw), "datatables") {
+		t.Fatalf("the widget page is not self-contained: %.300s", raw)
 	}
 }

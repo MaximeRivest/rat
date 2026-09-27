@@ -19,170 +19,12 @@
 module RatKernel
 
 using Sockets
+using Base64: base64encode
 import REPL
 import REPL.REPLCompletions
 
-# ── JSON (the protocol's subset) ─────────────────────────────
-
-function json(io::IO, x)
-    if x === nothing
-        print(io, "null")
-    elseif x isa Bool
-        print(io, x ? "true" : "false")
-    elseif x isa Integer
-        print(io, x)
-    elseif x isa AbstractFloat
-        isfinite(x) ? print(io, x) : print(io, "null")
-    elseif x isa AbstractString || x isa Symbol
-        s = isvalid(String(x)) ? String(x) : String(map(c -> isvalid(c) ? c : '\ufffd', String(x)))
-        print(io, '"')
-        for c in s
-            if c == '"'
-                print(io, "\\\"")
-            elseif c == '\\'
-                print(io, "\\\\")
-            elseif c == '\n'
-                print(io, "\\n")
-            elseif c == '\r'
-                print(io, "\\r")
-            elseif c == '\t'
-                print(io, "\\t")
-            elseif c < ' '
-                print(io, "\\u", string(UInt16(c), base = 16, pad = 4))
-            else
-                print(io, c)
-            end
-        end
-        print(io, '"')
-    elseif x isa AbstractDict
-        print(io, '{')
-        first = true
-        for (k, v) in x
-            first || print(io, ',')
-            first = false
-            json(io, string(k))
-            print(io, ':')
-            json(io, v)
-        end
-        print(io, '}')
-    elseif x isa AbstractVector || x isa Tuple
-        print(io, '[')
-        for (i, v) in enumerate(x)
-            i > 1 && print(io, ',')
-            json(io, v)
-        end
-        print(io, ']')
-    else
-        json(io, string(x))
-    end
-end
-
-mutable struct Reader
-    s::String
-    i::Int
-end
-
-function skipws(r::Reader)
-    while r.i <= ncodeunits(r.s) && r.s[r.i] in (' ', '\t', '\n', '\r')
-        r.i = nextind(r.s, r.i)
-    end
-end
-
-function parse_value(r::Reader)
-    skipws(r)
-    c = r.s[r.i]
-    if c == '{'
-        d = Dict{String,Any}()
-        r.i += 1
-        skipws(r)
-        if r.s[r.i] == '}'
-            r.i += 1
-            return d
-        end
-        while true
-            skipws(r)
-            k = parse_value(r)::String
-            skipws(r)
-            r.s[r.i] == ':' || error("bad JSON")
-            r.i += 1
-            d[k] = parse_value(r)
-            skipws(r)
-            c = r.s[r.i]
-            r.i += 1
-            c == '}' && return d
-            c == ',' || error("bad JSON")
-        end
-    elseif c == '['
-        v = Any[]
-        r.i += 1
-        skipws(r)
-        if r.s[r.i] == ']'
-            r.i += 1
-            return v
-        end
-        while true
-            push!(v, parse_value(r))
-            skipws(r)
-            c = r.s[r.i]
-            r.i += 1
-            c == ']' && return v
-            c == ',' || error("bad JSON")
-        end
-    elseif c == '"'
-        io = IOBuffer()
-        r.i += 1
-        while true
-            c = r.s[r.i]
-            r.i = nextind(r.s, r.i)
-            c == '"' && break
-            if c == '\\'
-                e = r.s[r.i]
-                r.i += 1
-                if e == 'n'
-                    write(io, '\n')
-                elseif e == 't'
-                    write(io, '\t')
-                elseif e == 'r'
-                    write(io, '\r')
-                elseif e == 'b'
-                    write(io, '\b')
-                elseif e == 'f'
-                    write(io, '\f')
-                elseif e == 'u'
-                    u = parse(UInt32, r.s[r.i:r.i+3], base = 16)
-                    r.i += 4
-                    if 0xd800 <= u <= 0xdbff && r.s[r.i] == '\\'   # surrogate pair
-                        lo = parse(UInt32, r.s[r.i+2:r.i+5], base = 16)
-                        r.i += 6
-                        u = 0x10000 + ((u - 0xd800) << 10) + (lo - 0xdc00)
-                    end
-                    write(io, Char(u))
-                else
-                    write(io, e)
-                end
-            else
-                write(io, c)
-            end
-        end
-        return String(take!(io))
-    elseif startswith(SubString(r.s, r.i), "true")
-        r.i += 4
-        return true
-    elseif startswith(SubString(r.s, r.i), "false")
-        r.i += 5
-        return false
-    elseif startswith(SubString(r.s, r.i), "null")
-        r.i += 4
-        return nothing
-    else
-        m = match(r"-?\d+(\.\d+)?([eE][-+]?\d+)?", r.s, r.i)
-        m === nothing && error("bad JSON")
-        r.i += ncodeunits(m.match)
-        return m.captures[1] === nothing && m.captures[2] === nothing ? parse(Int, m.match) : parse(Float64, m.match)
-    end
-end
-
-parse_json(s::AbstractString) = parse_value(Reader(String(s), 1))
+# JSON (the protocol's subset), shared with the frontend.
+include(joinpath(@__DIR__, "json.jl"))
 
 # ── protocol connection ─────────────────────────────────────
 
@@ -257,15 +99,56 @@ function show_text(x)
     println(stdout)
 end
 
+# A display bundle (Jupyter's display_data: {data: {mime: content},
+# metadata}), saved next to the plots and announced as
+# __RAT_DISPLAY__:<bundle.json>. Clients choose what to keep: an image,
+# an interactive page (HTML with scripts), or the text.
+const DISPLAYS = Ref(0)
+function show_bundle(data::Dict{String,Any}, metadata = Dict{String,Any}())
+    mkpath(PLOT_DIR)
+    path = joinpath(PLOT_DIR, "jl-$(getpid())-$(RUN[])-display-$(DISPLAYS[] += 1).json")
+    io = IOBuffer()
+    json(io, Dict("data" => data, "metadata" => metadata))
+    write(path * ".tmp", take!(io))
+    mv(path * ".tmp", path; force = true)
+    println(stdout, "__RAT_DISPLAY__:", path)
+end
+
+plain_text(x) = sprint(show, MIME"text/plain"(), x; context = :limit => true)
+interactive_html(html) = occursin(r"<script"i, html)
+
 Base.displayable(::RatDisplay, ::MIME"image/png") = true
 Base.displayable(::RatDisplay, ::MIME"text/plain") = true
 Base.display(::RatDisplay, ::MIME"image/png", x) = show_png(x)
 Base.display(::RatDisplay, ::MIME"text/plain", x) = show_text(x)
+Base.displayable(::RatDisplay, ::MIME"text/html") = true
+Base.displayable(::RatDisplay, ::MIME"image/svg+xml") = true
+Base.display(::RatDisplay, ::MIME"text/html", x) =
+    show_bundle(Dict{String,Any}("text/html" => repr(MIME"text/html"(), x), "text/plain" => plain_text(x)))
+Base.display(::RatDisplay, ::MIME"image/svg+xml", x) =
+    show_bundle(Dict{String,Any}("image/svg+xml" => repr(MIME"image/svg+xml"(), x), "text/plain" => plain_text(x)))
+
+# What a value becomes, most useful first: an interactive page (HTML
+# with scripts: PlotlyJS, VegaLite), a PNG (Plots.jl, Makie, images), an
+# SVG, else text — static HTML such as a DataFrame's table stays text, the
+# form a document keeps well. Strings, numbers and arrays of numbers are
+# text even when some package taught them to be images.
 function Base.display(d::RatDisplay, x)
-    # Strings, numbers and arrays of numbers are text even when some
-    # package taught them to be images.
-    if !(x isa Union{AbstractString,Number,AbstractArray{<:Number}}) && showable(MIME"image/png"(), x)
+    if x isa Union{AbstractString,Number,Symbol,AbstractArray{<:Number}}
+        return show_text(x)
+    end
+    html = showable(MIME"text/html"(), x) ? try repr(MIME"text/html"(), x) catch; "" end : ""
+    if interactive_html(html)
+        data = Dict{String,Any}("text/html" => html, "text/plain" => plain_text(x))
+        if showable(MIME"image/png"(), x)
+            data["image/png"] = try base64encode(repr(MIME"image/png"(), x)) catch; nothing end
+            data["image/png"] === nothing && delete!(data, "image/png")
+        end
+        show_bundle(data)
+    elseif showable(MIME"image/png"(), x)
         show_png(x)
+    elseif showable(MIME"image/svg+xml"(), x)
+        display(d, MIME"image/svg+xml"(), x)
     else
         show_text(x)
     end
@@ -352,6 +235,7 @@ __repl_entry_eval_cell(code, name) = include_string(Main, code, name)
 function run_cell(code::String)
     RUN[] += 1
     PLOTS[] = 0
+    DISPLAYS[] = 0
     local value
     try
         # The latest world: what the cell defines, and the show methods of
@@ -505,6 +389,7 @@ function main()
     use_project_environment()
     while true
         op = nothing
+        id = nothing
         replied = false
         try
             # A cancel that arrives between requests (late) is dropped.
@@ -522,6 +407,7 @@ function main()
             end
             req isa Dict || continue
             op = get(req, "op", "")
+            id = get(req, "id", nothing)
             op == "shutdown" && break
             op == "input" && continue       # an answer that came after its prompt ended
             reply = try
@@ -529,6 +415,8 @@ function main()
             catch err
                 Dict("success" => false, "error" => error_text(err, catch_backtrace()))
             end
+            reply = Dict{String,Any}(reply)
+            id === nothing || (reply["id"] = id)
             disable_sigint(() -> send(reply))
             replied = true
         catch e
@@ -536,8 +424,10 @@ function main()
             # A cancel reached the kernel's own code: the request still
             # gets its one reply.
             if op !== nothing && op != "" && !replied
-                disable_sigint(() -> send(op == "run" ? Dict("success" => false, "output" => "", "error" => "InterruptException") :
-                                                     Dict("error" => "InterruptException")))
+                reply = op == "run" ? Dict{String,Any}("success" => false, "output" => "", "error" => "InterruptException") :
+                                      Dict{String,Any}("error" => "InterruptException")
+                id === nothing || (reply["id"] = id)
+                disable_sigint(() -> send(reply))
             end
         end
     end

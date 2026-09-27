@@ -1,4 +1,5 @@
 import ast
+import base64
 import builtins
 import contextlib
 import getpass as getpass_module
@@ -10,6 +11,7 @@ import linecache
 import os
 import pkgutil
 import queue
+import re
 import rlcompleter
 import signal
 import socket
@@ -706,6 +708,188 @@ def complete(code, cursor):
     return "\n".join(lines) if lines else "No completions."
 
 
+def complete_exact(code, cursor):
+    """Completions with the text they replace: {text, start, matches}.
+    Jedi says how much of each name is typed already; the fallback
+    replaces the identifier before the cursor."""
+    code = code[:cursor] if cursor >= 0 else code
+    matches, start = [], None
+    if jedi is not None:
+        try:
+            line = code.count("\n") + 1
+            column = len(code.rsplit("\n", 1)[-1])
+            for comp in jedi.Interpreter(code, [namespace]).complete(line, column):
+                typed = len(comp.name) - len(comp.complete or "")
+                if start is None:
+                    start = len(code) - typed
+                if len(code) - typed != start:
+                    continue
+                matches.append({"label": comp.name, "kind": getattr(comp, "type", None) or "value"})
+                if len(matches) == 100:
+                    break
+        except Exception:
+            matches, start = [], None
+    if not matches:
+        m = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", code)
+        start = len(code) - (len(m.group(0)) if m else 0)
+        matches = [{"label": label, "kind": kind} for label, kind in fallback_complete(code, len(code))]
+    text = "\n".join(f"{m['label']:<20} {m['kind']}" for m in matches[:50]) or "No completions."
+    return {"text": text, "start": start if start is not None else len(code), "matches": matches}
+
+
+# ── Rich displays ────────────────────────────────────────────
+# A value with a rich form — an interactive page (HTML with scripts:
+# plotly, altair, bokeh), an image, an SVG, or HTML that has no useful
+# text form (IPython.display.HTML) — becomes a display bundle (Jupyter's
+# display_data: {data: {mime: content}, metadata}) saved next to the
+# plots and announced as __RAT_DISPLAY__:<bundle.json>; a lone PNG keeps
+# the older __RAT_PLOT__:<png>. Static HTML with a real text form (a
+# pandas table) stays text: the form a document keeps well.
+
+_display_count = 0
+_DEFAULT_REPR = re.compile(r"^<[\w.]+(?: object)?(?: at 0x[0-9a-fA-F]+)?>$")
+
+
+def _mime_bundle(obj):
+    """(data, metadata) through IPython's formatters when there is a shell
+    (they know _repr_*_ methods and what libraries register), else the
+    _repr_*_ methods directly."""
+    if _ipython_shell is not None:
+        try:
+            data, metadata = _ipython_shell.display_formatter.format(obj)
+            return dict(data or {}), dict(metadata or {})
+        except Exception:
+            pass
+    data, metadata = {"text/plain": repr(obj)}, {}
+    bundle = getattr(obj, "_repr_mimebundle_", None)
+    if callable(bundle):
+        try:
+            got = bundle()
+            if isinstance(got, tuple):
+                data.update(got[0] or {})
+                metadata.update(got[1] or {})
+            elif isinstance(got, dict):
+                data.update(got)
+        except Exception:
+            pass
+    for mime, meth in (("text/html", "_repr_html_"), ("image/png", "_repr_png_"), ("image/svg+xml", "_repr_svg_"),
+                       ("image/jpeg", "_repr_jpeg_"), ("text/markdown", "_repr_markdown_"), ("text/latex", "_repr_latex_")):
+        fn = getattr(obj, meth, None)
+        if mime not in data and callable(fn):
+            try:
+                value = fn()
+                if isinstance(value, tuple):
+                    value = value[0]
+                if value is not None:
+                    data[mime] = value
+            except Exception:
+                pass
+    return data, metadata
+
+
+def _publish(data, metadata=None, fallback=None):
+    """Show one bundle: a display, a plot, or text."""
+    global _display_count
+    metadata = metadata or {}
+    text = data.get("text/plain", "")
+    html = data.get("text/html")
+    html = html if isinstance(html, str) else None
+    png = data.get("image/png")
+    rich = (html is not None and ("<script" in html.lower() or not text or _DEFAULT_REPR.match(text.strip())))
+    rich = rich or "image/svg+xml" in data or "image/jpeg" in data
+    if png is not None and not rich:
+        os.makedirs(_PLOT_DIR, exist_ok=True)
+        raw = png if isinstance(png, (bytes, bytearray)) else base64.b64decode(png)
+        filepath = os.path.join(_PLOT_DIR, f"fig-{int(time.time() * 1000)}-{_display_count}.png")
+        _display_count += 1
+        with open(filepath, "wb") as f:
+            f.write(raw)
+        print(f"__RAT_PLOT__:{filepath}")
+        return
+    if rich or png is not None:
+        clean = {}
+        for mime, value in data.items():
+            if isinstance(value, (bytes, bytearray)):
+                value = base64.b64encode(value).decode("ascii")
+            elif not isinstance(value, str):
+                try:
+                    json.dumps(value)
+                except Exception:
+                    continue
+            clean[mime] = value
+        os.makedirs(_PLOT_DIR, exist_ok=True)
+        filepath = os.path.join(_PLOT_DIR, f"py-{os.getpid()}-{int(time.time() * 1000)}-display-{_display_count}.json")
+        _display_count += 1
+        with open(filepath + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({"data": clean, "metadata": metadata}, f)
+        os.replace(filepath + ".tmp", filepath)
+        print(f"__RAT_DISPLAY__:{filepath}")
+        return
+    print(text if text else fallback if fallback is not None else "")
+
+
+def _show_value(value):
+    """A cell's last value: rich when it has a rich form, else repr()."""
+    try:
+        data, metadata = _mime_bundle(value)
+    except Exception:
+        data, metadata = {}, {}
+    if len(data) > 1 or (data and "text/plain" not in data):
+        _publish({**data, "text/plain": repr(value)}, metadata)
+    else:
+        print(repr(value))
+
+
+def rat_display(*objs, **kwargs):
+    """display(), as in Jupyter: each object shown in its richest form."""
+    for obj in objs:
+        data, metadata = _mime_bundle(obj)
+        _publish(data, metadata, fallback=repr(obj))
+
+
+_display_hooked = False
+
+
+def _hook_display_publisher():
+    """IPython.display.display(...) and the builtin display(): through
+    _publish, so they are shown where the cell's output is."""
+    global _display_hooked
+    if _display_hooked:
+        return
+    _display_hooked = True
+    builtins.display = rat_display
+    if _ipython_shell is not None:
+        try:
+            _ipython_shell.display_pub.publish = lambda data, metadata=None, **kw: _publish(dict(data or {}), metadata)
+        except Exception:
+            pass
+
+
+_plotly_patched = False
+
+
+def _patch_plotly():
+    """fig.show() in plotly opens a browser outside Jupyter: it becomes an
+    interactive display instead (plotly.js from its CDN)."""
+    global _plotly_patched
+    if _plotly_patched:
+        return
+    try:
+        import plotly.io as pio
+        from plotly.io._base_renderers import ExternalRenderer
+    except Exception:
+        return
+    _plotly_patched = True
+
+    class _RatRenderer(ExternalRenderer):
+        def render(self, fig_dict):
+            html = pio.to_html(fig_dict, include_plotlyjs="cdn", full_html=True, validate=False)
+            _publish({"text/html": html, "text/plain": "<plotly figure>"}, {"text/html": {"height": 520}})
+
+    pio.renderers["rat"] = _RatRenderer()
+    pio.renderers.default = "rat"
+
+
 # ── Plot capture ─────────────────────────────────────────────
 
 _PLOT_DIR = os.path.join(
@@ -852,6 +1036,10 @@ def run_code(code, allow_stdin):
     builtins.input = hooked_input
     getpass_module.getpass = hooked_getpass
 
+    if "plotly" in code:
+        _patch_plotly()
+    _hook_display_publisher()
+
     # Transform IPython magics (%timeit, %who, etc.) to executable Python
     if _ipython_shell is not None:
         try:
@@ -871,7 +1059,7 @@ def run_code(code, allow_stdin):
             result = eval(compile(expr, filename, "eval"), namespace, namespace)
             namespace["_"] = result
             if result is not None:
-                print(repr(result))
+                _show_value(result)
         else:
             exec(compile(tree, filename, "exec"), namespace, namespace)
         _maybe_patch_matplotlib()
@@ -908,6 +1096,14 @@ def reader_loop():
         op = req.get("op")
         if op == "input":
             mailbox.provide(req.get("text", ""))
+            continue
+        if op == "interrupt":
+            # Where rat cannot signal (Windows): the request arrives here,
+            # on the reader thread, and interrupts the running code as a
+            # SIGINT would. Between runs there is nothing to interrupt.
+            if state._executing:
+                import _thread
+                _thread.interrupt_main()
             continue
         if op == "shutdown":
             shutdown.set()
@@ -960,7 +1156,7 @@ def main():
             elif op == "look_at":
                 send({"text": look_at(req.get("at", ""), bool(req.get("full", False)))})
             elif op == "complete":
-                send({"text": complete(req.get("code", ""), int(req.get("cursor", -1)))})
+                send(complete_exact(req.get("code", ""), int(req.get("cursor", -1))))
             elif op == "status":
                 send({"state": state.status()})
             else:

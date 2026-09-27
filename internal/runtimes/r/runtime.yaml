@@ -25,3 +25,10 @@ install:
   smoke:
     run: "1 + 1"
     expect: "2"
+
+# rat.r.dependencies in a notebook: checked, installed and locked by
+# packages.R (see internal/notebook/runtimeenv.go for the contract).
+packages:
+  key: r
+  script: packages.R
+  args: ["--no-save", "--no-restore"]

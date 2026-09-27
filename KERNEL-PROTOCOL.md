@@ -69,9 +69,86 @@ request waits for its reply:
   in a terminal — and says that the variables are lost. rat
   starts the kernel with SIGINT at its default even when rat itself runs
   with it ignored (a background job does), so the language's own
-  handler is installed. On Windows `cancel` stops the process.
+  handler is installed.
+- **`message`**: `cancel` sends `{"op": "interrupt"}` on the protocol
+  connection. The kernel must read it while code runs (a reader
+  thread) and interrupt that code — rat's Python kernel calls
+  `_thread.interrupt_main()`. The same escalation applies.
+
+`kernel.interrupt_windows` says the same for Windows, which has no
+signals: `message`, or `kill` (the default). A kernel that cannot read
+its connection while code runs (R, Julia) is stopped there.
 
 A `run` has no time limit: it lasts until the code ends or is cancelled.
+
+## Request ids
+
+Every request that gets a reply carries an `"id"` (an integer). A kernel
+should echo it in its reply (`{"id": 7, "success": true, …}`); rat then
+matches replies to requests by id and drops a late reply to a request
+that stopped waiting. A kernel that does not echo ids still works:
+replies are matched by order, as before.
+
+## Displays
+
+A value with a richer form than text — a plot, an image, an interactive
+page (plotly, htmlwidgets) — is announced in the output, in its place
+among the printed lines, by a line of its own:
+
+    __RAT_PLOT__:/home/me/.cache/rat/plots/fig-….png      a PNG image
+    __RAT_DISPLAY__:/home/me/.cache/rat/plots/….json      a display bundle
+
+The file sits in rat's plot folder (`$XDG_CACHE_HOME/rat/plots`), and a
+bundle is Jupyter's `display_data` content: `{"data": {mime: content},
+"metadata": {…}}`, binary data in base64. Clients choose what to show
+and keep: an interactive page (HTML with scripts, or HTML without a
+useful text form) always sandboxed, an image, or the `text/plain`.
+rat's kernels print static HTML that has a real text form (a data frame's
+table) as text, and a lone PNG as `__RAT_PLOT__`, which clients older
+than displays understand.
+
+## Jupyter kernels
+
+`kernel.type: jupyter` with `kernel.kernelspec: <name>` runs any
+installed Jupyter kernel (ark, ir, julia-1.x, python3, …) as a rat
+kernel: rat speaks Jupyter's wire protocol over ZeroMQ itself. Output
+streams, displays become the lines above, input prompts, completion
+(with `cursor_start`), inspection and interrupts (the kernelspec's
+`interrupt_mode`) behave as for rat's own kernels. `kernel.overview` is
+code whose printed output is the variable overview (Jupyter has no
+request for it). An example, Posit's Ark kernel for R:
+
+```yaml
+name: ark
+display: R (Ark)
+detect:
+  commands: [ark]
+kernel:
+  type: jupyter
+  kernelspec: ark
+frontend:
+  type: repl
+  prompt: "ark> "
+```
+
+## Packages
+
+A runtime may manage the packages notebooks declare for it
+(`rat.<key>.dependencies`) with a script of its own language:
+
+```yaml
+packages:
+  key: r              # rat.r.dependencies
+  script: packages.R  # run as: <binary> <args> <script> check|install|lock <project> [--force] [--update] -- <line>...
+  args: [--no-save]
+```
+
+`check` prints facts, one per line, tab-separated (`requirement`,
+`missing`, `problem`, `restart`, `relock`, `detail`, `summary`, `info`,
+…); `install` and `lock` print their log and exit 0 when done. rat
+itself knows no language here: the contract is in
+`internal/notebook/runtimeenv.go`, and `internal/runtimes/r/packages.R`
+and `internal/runtimes/jl/packages.jl` implement it (with lock files).
 
 ---
 
@@ -359,6 +436,7 @@ Confirm that the input was received and execution resumed.
 | Go → kernel | `complete` | Code completions |
 | Go → kernel | `status` | Health check |
 | Go → kernel | `input` | Deliver stdin text |
+| Go → kernel | `interrupt` | Interrupt the running code (`interrupt: message`) |
 | Go → kernel | `shutdown` | Clean exit |
 | kernel → Go | `output_chunk` | Streaming stdout |
 | kernel → Go | `input_request` | Blocked on stdin |

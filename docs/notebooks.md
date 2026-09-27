@@ -84,7 +84,7 @@ rat installs with pak, which it keeps in its own cache
 (`~/.cache/rat/r-tools`), not in the project. On Linux without
 ready-made binaries (NixOS), pak builds from source and needs a C
 compiler and `make`; there, prefer R packages from Nix and let `ensure`
-see them as installed. `.rat/` carries its own `.gitignore`.
+see them as installed.
 
 `jsonlite` is added to every notebook with R cells: rat's R kernel needs
 it.
@@ -111,9 +111,31 @@ environment when it has one (so `using TheProject` works) and stacks
 `.rat/julia` on `LOAD_PATH` right after it — also when it appears while
 the kernel runs. The default environment (`~/.julia/environments/v1.x`)
 stays loadable, and a declared package found in any of these counts as
-installed (rat reads their `Manifest.toml`s; Julia is not started).
-`ensure` runs `Pkg.add`/`Pkg.develop` and precompiles. The Julia kernel
-itself needs no package.
+installed. `ensure` runs `Pkg.add`/`Pkg.develop` and precompiles. The
+Julia kernel itself needs no package.
+
+### Lock files: the same versions on the next machine
+
+`rat ensure` records the versions a project's notebooks run with, in
+files that belong in Git beside the notebooks:
+
+| | lock | what it records |
+|---|---|---|
+| Python | `.rat/python.lock` | `pip freeze` of the environment (editable installs aside: they are declared) |
+| R | `.rat/r.lock` | every declared package and everything it depends on: version, and how to get exactly that version again (`name@1.2.3`, `owner/repo@<sha>`, …) |
+| Julia | `.rat/julia/Manifest.toml` | Julia's own manifest of the notebook environment |
+
+With a lock, `doctor` wants its versions and `ensure` reproduces them
+(on a fresh clone: exactly what the author ran); a lock is written also
+when every package was already installed. `rat ensure --update` resolves
+the declarations again, newest versions allowed, and writes new locks.
+`.rat/` carries its own `.gitignore`: libraries and environments stay
+out of Git, the locks go in.
+
+Packages of runtimes other than Python are checked and installed by a
+script of the runtime's own language (`packages.R`, `packages.jl`, next
+to the runtime's `runtime.yaml`): rat's core knows no language, and a
+new runtime brings its own (see KERNEL-PROTOCOL.md, "Packages").
 
 ## Which project?
 
@@ -162,10 +184,8 @@ rat ensure docs/tutorial.md --json # the same report, for integrations
 REPL (`rat py`) is IPython and the kernel completes with jedi. This is the
 same contract `rat install py` establishes.
 
-For R, `ensure` installs what is missing (a GitHub, path or URL line
-once, then remembered in `.rat-receipt.json` inside the library; a
-`local::` package again whenever its DESCRIPTION version changes), and
-restarts the R kernel only when a package changes version.
+For R and Julia, `ensure` installs what is missing and restarts the
+kernel only when a package it may have loaded changes version.
 
 What `ensure` will **not** do without being told:
 
@@ -238,3 +258,29 @@ A failed `import` means the declaration is incomplete: add the line to
 `rat.python.dependencies`, `ensure`, rerun. In R, "there is no package
 called 'x'" means the same for `rat.r.dependencies`; in Julia, "Package X
 not found in current path" for `rat.julia.dependencies`.
+
+## Rich output
+
+A cell's result stays in the document in order, as it was printed:
+text in ```` ```output ```` blocks, plots as images, and interactive
+displays — a plotly figure, an htmlwidget (DT, leaflet, plotly for R), a
+PlotlyJS or VegaLite chart — as a page saved in `_assets/generated/` and
+embedded:
+
+```markdown
+<iframe class="rat-output" src="../_assets/generated/9b1e2c4d5f6a.html" sandbox="allow-scripts" loading="lazy" style="width:100%;height:440px;border:0"></iframe>
+```
+
+The page runs sandboxed (its scripts have an origin of their own), and
+the line is plain HTML, so any Markdown renderer that shows HTML shows
+it. A table that has a text form (a data frame) stays text: it diffs
+well in Git. See KERNEL-PROTOCOL.md, "Displays".
+
+## Other kernels
+
+Any installed Jupyter kernel can run notebook cells through rat: a
+runtime with `kernel.type: jupyter` names its kernelspec (see
+KERNEL-PROTOCOL.md, "Jupyter kernels"). rat's own R and Julia kernels
+stay the default: through Jupyter's protocol, Posit's Ark, for one, does
+not answer completion or inspection (Positron reaches those through
+channels of its own).

@@ -14,7 +14,7 @@ import (
 	"github.com/maximerivest/rat/internal/cachedir"
 )
 
-//go:embed frontend.py r/runtime.yaml r/kernel.R pi/runtime.yaml pi/bridge.ts slack/runtime.yaml slack/kernel-slack.py jupyter/runtime.yaml jupyter/kernel-jupyter.py jl/runtime.yaml jl/kernel.jl
+//go:embed frontend.py r/runtime.yaml r/kernel.R r/packages.R pi/runtime.yaml pi/bridge.ts slack/runtime.yaml slack/kernel-slack.py jupyter/runtime.yaml jupyter/kernel-jupyter.py jl/runtime.yaml jl/kernel.jl jl/packages.jl jl/json.jl jl/frontend.jl
 var embedded embed.FS
 
 // builtinLangs lists which languages have embedded runtimes.

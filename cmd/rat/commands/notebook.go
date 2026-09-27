@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,7 @@ var (
 	ensureJSON     bool
 	ensureForce    bool
 	ensureRecreate bool
+	ensureUpdate   bool
 	doctorJSON     bool
 
 	playJSON          bool
@@ -44,6 +46,8 @@ func init() {
 	ensureCmd.Flags().BoolVar(&ensureForce, "force", false, "Reinstall every requirement, ignoring the receipt")
 	ensureCmd.Flags().BoolVar(&ensureRecreate, "recreate", false,
 		"Delete and rebuild the environment when its interpreter does not satisfy `requires` (destructive)")
+	ensureCmd.Flags().BoolVar(&ensureUpdate, "update", false,
+		"Resolve the declarations again (newest versions allowed) instead of reproducing the lock files, and write new ones")
 	rootCmd.AddCommand(ensureCmd)
 
 	doctorCmd.Flags().BoolVar(&doctorJSON, "json", false, "Print a notebook report as JSON (notebook argument only)")
@@ -185,26 +189,18 @@ A notebook declares its needs like this:
         - -e .                # this project, editable
         - websockets
     r:
-      dependencies:           # pak package references
-        - dplyr               # CRAN; an installed copy anywhere will do
-        - ggplot2@3.5.1       # exactly this version
-        - tidyverse/dplyr@main  # GitHub
-        - local::.            # this project, as an R package
+      dependencies:           # pak references: dplyr, ggplot2@3.5.1, owner/repo@ref
+        - dplyr
+    julia:
+      dependencies:           # DataFrames, Plots@1.40, a Git URL#rev, ./LocalPkg
+        - DataFrames
   ---
 
-R packages go into the project's own library (.rat/r-library, first on
-the R kernel's library path), or through renv::install when the project
-uses renv. They are installed with pak, which rat keeps in its cache.
-
-    julia:
-      dependencies:           # Julia packages
-        - DataFrames          # registered; installed anywhere will do
-        - Plots@1.40          # any 1.40.x
-        - https://github.com/org/Foo.jl#main
-        - ./MyPkg             # a local package, developed in place
-
-Julia packages go into the environment .rat/julia, stacked on the Julia
-kernel's LOAD_PATH; a project's own Project.toml is never changed.
+R and Julia packages are checked and installed by the runtime's own
+script (packages.R, packages.jl). ensure writes lock files — .rat/
+python.lock, .rat/r.lock, .rat/julia/Manifest.toml — that belong in Git:
+on the next machine ensure reproduces their versions; --update resolves
+again.
 
 Without a declaration the notebook still runs on its project's
 environment; ensure then only makes sure that environment exists.
@@ -221,7 +217,7 @@ Examples:
 		if err != nil {
 			return err
 		}
-		opts := notebook.Options{Force: ensureForce, Recreate: ensureRecreate}
+		opts := notebook.Options{Force: ensureForce, Recreate: ensureRecreate, Update: ensureUpdate}
 		if !ensureJSON {
 			opts.Progress = func(step notebook.Step) {
 				mark := s.Green("✓")
@@ -411,11 +407,15 @@ func printReport(r *notebook.Report, applied bool) {
 	if r.Python != nil && len(r.Python.Requirements) > 0 {
 		fmt.Printf("  %s %s\n", s.Dim("requirements:"), s.Dim(strings.Join(r.Python.Requirements, ", ")))
 	}
-	if r.R != nil && len(r.R.Requirements) > 0 {
-		fmt.Printf("  %s %s\n", s.Dim("R packages:"), s.Dim(strings.Join(r.R.Requirements, ", ")))
+	var keys []string
+	for k := range r.Envs {
+		keys = append(keys, k)
 	}
-	if r.Julia != nil && len(r.Julia.Requirements) > 0 {
-		fmt.Printf("  %s %s\n", s.Dim("Julia packages:"), s.Dim(strings.Join(r.Julia.Requirements, ", ")))
+	sort.Strings(keys)
+	for _, k := range keys {
+		if es := r.Envs[k]; len(es.Requirements) > 0 {
+			fmt.Printf("  %s %s\n", s.Dim("rat."+k+":"), s.Dim(strings.Join(es.Requirements, ", ")))
+		}
 	}
 	if len(r.Actions) > 0 {
 		if applied {

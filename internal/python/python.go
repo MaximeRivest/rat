@@ -50,15 +50,17 @@ type request struct {
 }
 
 type response struct {
-	Op      string `json:"op,omitempty"`
-	Success bool   `json:"success,omitempty"`
-	Output  string `json:"output,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Text    string `json:"text,omitempty"`
-	OK      bool   `json:"ok,omitempty"`
-	Vars    int    `json:"vars,omitempty"`
-	Prompt  string `json:"prompt,omitempty"` // input_request: what the program asked
-	Secret  bool   `json:"secret,omitempty"` // input_request: a password-style read
+	Op      string         `json:"op,omitempty"`
+	Success bool           `json:"success,omitempty"`
+	Output  string         `json:"output,omitempty"`
+	Error   string         `json:"error,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	OK      bool           `json:"ok,omitempty"`
+	Vars    int            `json:"vars,omitempty"`
+	Prompt  string         `json:"prompt,omitempty"`  // input_request: what the program asked
+	Start   *int           `json:"start,omitempty"`   // complete: where the replaced text starts
+	Matches []kernel.Match `json:"matches,omitempty"` // complete: the exact matches
+	Secret  bool           `json:"secret,omitempty"`  // input_request: a password-style read
 }
 
 // partialBuf accumulates live output during execution so Ctl("output") can
@@ -304,6 +306,9 @@ func (p *Python) Look(req kernel.LookRequest) kernel.LookResult {
 	resp, err := p.readLocked()
 	if err != nil {
 		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
+	}
+	if req.Code != "" && resp.Start != nil && resp.Error == "" {
+		return kernel.LookResult{Text: resp.Text, Completion: &kernel.Completion{Start: *resp.Start, Matches: resp.Matches}}
 	}
 	if resp.Text != "" {
 		return kernel.LookResult{Text: resp.Text}
@@ -604,8 +609,17 @@ func (p *Python) interrupt() error {
 	if proc == nil {
 		return nil
 	}
-	if runtime.GOOS == "windows" {
-		return proc.Kill()
+	if runtime.GOOS == "windows" || os.Getenv("RAT_PY_INTERRUPT") == "message" {
+		// No signals on Windows: the kernel's reader thread interrupts
+		// the running code when asked on the protocol connection.
+		p.writeMu.Lock()
+		defer p.writeMu.Unlock()
+		if p.stdin == nil {
+			return nil
+		}
+		data, _ := json.Marshal(request{Op: "interrupt"})
+		_, err := p.stdin.Write(append(data, '\n'))
+		return err
 	}
 	return proc.Signal(syscall.SIGINT)
 }

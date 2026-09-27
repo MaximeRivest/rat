@@ -13,9 +13,14 @@ kernel:
   transport: socket
   interrupt: signal
 
+# rat jl: Julia's own REPL (modes, history, Unicode completion), its
+# code evaluated in the shared kernel (frontend.jl).
 frontend:
-  type: repl
-  prompt: "julia> "
+  type: native
+  command: "julia -i --startup-file=no --banner=no {config_dir}/frontend.jl {mcp_url} {name}"
+  fallback:
+    type: repl
+    prompt: "julia> "
 
 install:
   runtime:
@@ -23,3 +28,10 @@ install:
   smoke:
     run: "1 + 1"
     expect: "2"
+
+# rat.julia.dependencies in a notebook: checked, installed and locked by
+# packages.jl (see internal/notebook/runtimeenv.go for the contract).
+packages:
+  key: julia
+  script: packages.jl
+  args: ["--startup-file=no"]

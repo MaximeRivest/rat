@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -67,9 +68,19 @@ type RuntimeConfig struct {
 		// stdout/stderr are then the user's output, streamed live).
 		Transport string `yaml:"transport,omitempty"`
 		// json: what cancel does — "kill" (default: the process stops,
-		// variables are lost) or "signal" (SIGINT to the kernel's process
-		// group; the kernel stops the running code and stays up).
+		// variables are lost), "signal" (SIGINT to the kernel's process
+		// group; the kernel stops the running code and stays up) or
+		// "message" ({"op":"interrupt"} on the protocol connection, read by
+		// the kernel while it runs code).
 		Interrupt string `yaml:"interrupt,omitempty"`
+		// json: the same on Windows, where there are no signals: "message"
+		// or "kill" (default).
+		InterruptWindows string `yaml:"interrupt_windows,omitempty"`
+
+		// jupyter: the kernelspec to run (kernel.json in Jupyter's kernel
+		// folders), and code whose printed output is the variable overview.
+		Kernelspec string `yaml:"kernelspec,omitempty"`
+		Overview   string `yaml:"overview,omitempty"`
 
 		Command string `yaml:"command,omitempty"` // tmux: command to run in session
 		Bridge  string `yaml:"bridge,omitempty"`  // tmux: bridge script (relative to runtime.yaml)
@@ -87,6 +98,15 @@ type RuntimeConfig struct {
 
 	Options map[string]RuntimeOption `yaml:"options,omitempty"`
 	Install InstallConfig            `yaml:"install"`
+
+	// Packages a notebook declares for this runtime (rat.<key>.dependencies),
+	// checked and installed by a script of the runtime's own language —
+	// see internal/notebook/runtimeenv.go for the contract.
+	Packages struct {
+		Key    string   `yaml:"key,omitempty"`    // front-matter key: rat.<key>.dependencies
+		Script string   `yaml:"script,omitempty"` // relative to runtime.yaml
+		Args   []string `yaml:"args,omitempty"`   // before the script
+	} `yaml:"packages,omitempty"`
 }
 
 // FrontendFallback defines what to use when the primary frontend isn't available.
@@ -128,8 +148,9 @@ type InstallSmoke struct {
 
 // KernelType returns the kernel type, defaulting to "json".
 func (cfg *RuntimeConfig) KernelType() string {
-	if cfg.Kernel.Type == "tmux" {
-		return "tmux"
+	switch cfg.Kernel.Type {
+	case "tmux", "jupyter":
+		return cfg.Kernel.Type
 	}
 	return "json"
 }
@@ -366,6 +387,7 @@ func isTrue(value string) bool {
 
 // request/response match the kernel protocol JSON schema.
 type request struct {
+	ID         int64  `json:"id,omitempty"` // echoed in the reply (kernels that do: see KERNEL-PROTOCOL.md)
 	Op         string `json:"op"`
 	Code       string `json:"code,omitempty"`
 	At         string `json:"at,omitempty"`
@@ -377,6 +399,7 @@ type request struct {
 }
 
 type response struct {
+	ID      int64  `json:"id,omitempty"`
 	Op      string `json:"op,omitempty"`
 	Success bool   `json:"success,omitempty"`
 	Output  string `json:"output,omitempty"`
@@ -436,6 +459,10 @@ const (
 	// Ctrl-C in a terminal would; the kernel stops the running code and
 	// replies. Needs the kernel to catch it (R: tryCatch(interrupt=)).
 	InterruptSignal = "signal"
+	// InterruptMessage sends {"op":"interrupt"} on the protocol
+	// connection: the kernel reads it while code runs (a reader thread)
+	// and interrupts that code. Works where signals do not (Windows).
+	InterruptMessage = "message"
 )
 
 // Transport returns the configured transport, defaulting to stdio.
@@ -446,10 +473,19 @@ func (cfg *RuntimeConfig) Transport() string {
 	return TransportStdio
 }
 
-// InterruptMode returns the configured interrupt mode, defaulting to kill.
+// InterruptMode returns the interrupt mode on this operating system,
+// defaulting to kill.
 func (cfg *RuntimeConfig) InterruptMode() string {
-	if cfg.Kernel.Interrupt == InterruptSignal {
-		return InterruptSignal
+	mode := cfg.Kernel.Interrupt
+	if goruntime.GOOS == "windows" {
+		mode = cfg.Kernel.InterruptWindows
+		if mode == InterruptSignal {
+			mode = InterruptKill
+		}
+	}
+	switch mode {
+	case InterruptSignal, InterruptMessage:
+		return mode
 	}
 	return InterruptKill
 }
@@ -537,6 +573,8 @@ type Kernel struct {
 	link       *link         // the protocol reader of the running process
 	outputDone chan struct{} // closed when the kernel's stdout/stderr are both closed
 	stale      int           // replies owed to requests that stopped waiting
+	nextID     int64         // id of the last request sent
+	currentID  int64         // id of the request whose reply is awaited
 
 	procMu sync.Mutex
 	proc   *os.Process // for cancel, which must not wait for k.mu
@@ -811,7 +849,7 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 		if !k.pending.Load() {
 			return kernel.CtlResult{Text: "CANCELLED"}
 		}
-		if k.interrupt == InterruptSignal {
+		if k.interrupt == InterruptSignal || k.interrupt == InterruptMessage {
 			// Some code cannot be interrupted (a Julia loop that never
 			// allocates, R inside C code). As Ctrl-C again in a terminal: a
 			// second cancel, once the first had time to work, stops the
@@ -821,11 +859,17 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 				k.killProcess()
 				return kernel.CtlResult{Text: "CANCELLED | the code did not stop; kernel stopped, variables lost"}
 			}
-			k.procMu.Lock()
-			proc := k.proc
-			k.procMu.Unlock()
-			if err := procutil.InterruptGroup(proc); err != nil {
-				return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+			if k.interrupt == InterruptMessage {
+				if err := k.send(request{Op: "interrupt"}); err != nil {
+					return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+				}
+			} else {
+				k.procMu.Lock()
+				proc := k.proc
+				k.procMu.Unlock()
+				if err := procutil.InterruptGroup(proc); err != nil {
+					return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+				}
 			}
 			k.interruptedAt.CompareAndSwap(0, time.Now().UnixNano())
 			return kernel.CtlResult{Text: "CANCELLED"}
@@ -1229,6 +1273,11 @@ func (k *Kernel) send(req request) error {
 	if k.proto == nil {
 		return fmt.Errorf("%s kernel not started", k.display)
 	}
+	replied := req.Op != "input" && req.Op != "shutdown" && req.Op != "interrupt"
+	if replied {
+		k.nextID++
+		req.ID = k.nextID
+	}
 	data, err := json.Marshal(req)
 	if err != nil {
 		return err
@@ -1236,7 +1285,8 @@ func (k *Kernel) send(req request) error {
 	if _, err := k.proto.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write to %s kernel: %w", k.display, err)
 	}
-	if req.Op != "input" && req.Op != "shutdown" {
+	if replied {
+		k.currentID = req.ID
 		k.pending.Store(true)
 	}
 	return nil
@@ -1278,6 +1328,18 @@ func (k *Kernel) await(timeout time.Duration, isRun bool) (response, error) {
 		case "input_delivered":
 			k.waitingForInput.Store(false)
 			return resp, false, nil
+		}
+		// A kernel that echoes ids says whose reply this is; one that does
+		// not answers in order, and the replies owed to requests that
+		// stopped waiting come first.
+		if resp.ID != 0 {
+			if resp.ID != k.currentID {
+				if k.stale > 0 {
+					k.stale--
+				}
+				return resp, false, nil
+			}
+			return resp, true, nil
 		}
 		if k.stale > 0 {
 			k.stale--

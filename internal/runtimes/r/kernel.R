@@ -209,6 +209,70 @@ local({
     plots$prefix <- ""
   }
 
+  # ── rich displays: htmlwidgets ────────────────────────────
+  # A widget (plotly, leaflet, DT, …) prints as a self-contained HTML
+  # page — its JavaScript and CSS inlined — saved as a display bundle
+  # (Jupyter's display_data: {data: {mime: content}, metadata}) and
+  # announced as __RAT_DISPLAY__:<bundle.json>. Printing a widget no
+  # longer tries to open a browser.
+
+  inline_dependency <- function(dep) {
+    dir <- dep$src$file
+    if (!is.null(dir) && !is.null(dep$package)) dir <- system.file(dir, package = dep$package)
+    read_all <- function(f) paste(readLines(file.path(dir, f), warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+    out <- character()
+    for (css in dep$stylesheet) {
+      out <- c(out, if (is.null(dir)) sprintf('<link rel="stylesheet" href="%s/%s">', dep$src$href, css)
+                    else paste0("<style>", read_all(css), "</style>"))
+    }
+    for (js in dep$script) {
+      f <- if (is.list(js)) js$src else js
+      out <- c(out, if (is.null(dir)) sprintf('<script src="%s/%s"></script>', dep$src$href, f)
+                    else paste0("<script>", gsub("</script", "<\\/script", read_all(f), fixed = TRUE), "</script>"))
+    }
+    if (!is.null(dep$head)) out <- c(out, dep$head)
+    paste(out, collapse = "\n")
+  }
+
+  widget_page <- function(widget) {
+    rendered <- htmltools::renderTags(htmltools::as.tags(widget, standalone = TRUE))
+    deps <- htmltools::resolveDependencies(rendered$dependencies)
+    paste0("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n",
+           paste(vapply(deps, inline_dependency, ""), collapse = "\n"), "\n", rendered$head,
+           "\n</head><body style=\"margin:0\">\n", rendered$html, "\n</body></html>\n")
+  }
+
+  displays <- new.env()
+  displays$n <- 0L
+
+  show_display <- function(data, metadata = list()) {
+    displays$n <- displays$n + 1L
+    path <- file.path(plot_dir, sprintf("r-%d-%d-display-%d.json", Sys.getpid(), run_count, displays$n))
+    tmp <- paste0(path, ".tmp")
+    writeLines(as.character(toJSON(list(data = data, metadata = metadata), auto_unbox = TRUE, digits = NA)), tmp, useBytes = TRUE)
+    file.rename(tmp, path)
+    out("__RAT_DISPLAY__:", path, "\n")
+    invisible()
+  }
+
+  print_widget <- function(x, ...) {
+    page <- tryCatch(widget_page(x), error = function(e) NULL)
+    if (is.null(page)) {
+      out("<", class(x)[1], " widget: could not be rendered>\n")
+      return(invisible(x))
+    }
+    height <- suppressWarnings(as.numeric(x$height))
+    if (!length(height) || is.na(height)) height <- 420
+    show_display(list(`text/html` = page, `text/plain` = paste0("<", class(x)[1], ">")),
+                 list(`text/html` = list(height = height + 20)))
+    invisible(x)
+  }
+  register_widgets <- function(...) {
+    registerS3method("print", "htmlwidget", print_widget, envir = asNamespace("htmlwidgets"))
+  }
+  if ("htmlwidgets" %in% loadedNamespaces()) register_widgets()
+  setHook(packageEvent("htmlwidgets", "onLoad"), register_widgets)
+
   # ── input ──────────────────────────────────────────────────
   # readline() asks whoever runs the cell (Chattering, rat run, an agent)
   # through the protocol. The prompt and the answer stay in the output,
@@ -447,6 +511,7 @@ local({
     state <- new.env()
     state$replied <- FALSE
     state$op <- NULL
+    state$id <- NULL
     outcome <- tryCatch({
       line <- read_line()
       if (is.null(line)) "quit" else {
@@ -459,7 +524,9 @@ local({
           "skip" # an answer that came after its prompt ended
         } else {
           state$op <- req$op
+          state$id <- req$id
           reply <- tryCatch(handle(req), error = function(e) list(success = FALSE, error = conditionMessage(e)))
+          reply$id <- req$id
           suspendInterrupts(send(reply))
           state$replied <- TRUE
           "ok"
@@ -470,7 +537,9 @@ local({
     if (!is.null(state$op) && !state$replied) {
       # A cancel reached the kernel's own code: the request still gets
       # its one reply.
-      suspendInterrupts(send(if (state$op == "run") list(success = FALSE, output = "", error = "Interrupted") else list(error = "Interrupted")))
+      reply <- if (state$op == "run") list(success = FALSE, output = "", error = "Interrupted") else list(error = "Interrupted")
+      reply$id <- state$id
+      suspendInterrupts(send(reply))
     }
   }
   close(con)

@@ -12,19 +12,9 @@
 //	      - -e .                # this project, editable
 //	      - websockets
 //	      - lm15 @ git+https://github.com/example/lm15@main
-//	  r:
-//	    dependencies:           # pak package references
-//	      - dplyr               # CRAN (any version already installed will do)
-//	      - ggplot2@3.5.1       # an exact version
-//	      - tidyverse/dplyr@main  # GitHub
-//	      - bioc::DESeq2        # Bioconductor
-//	      - local::.            # this project, as an R package
-//	  julia:
-//	    dependencies:           # Julia packages
-//	      - DataFrames          # registered (any version already installed will do)
-//	      - Plots@1.40          # any 1.40.x
-//	      - https://github.com/org/Foo.jl#main   # Git
-//	      - ./MyPkg             # a local package, developed in place
+//	  r:                        # any runtime that declares packages.key (runtimeenv.go)
+//	    dependencies:
+//	      - dplyr
 //	---
 //
 // Python cells may also carry a PEP 723 block (`# /// script` ...
@@ -55,8 +45,9 @@ import (
 type Manifest struct {
 	Project string      `yaml:"project"`
 	Python  *PythonSpec `yaml:"python"`
-	R       *RSpec      `yaml:"r"`
-	Julia   *JuliaSpec  `yaml:"julia"`
+	// Deps holds rat.<key>.dependencies for the runtimes that declare a
+	// packages key (r, julia, …); filled by Parse, not by YAML.
+	Deps map[string]*DepsSpec `yaml:"-"`
 	// After lists notebooks (paths relative to this one) whose cells must
 	// have run in the same kernel before this notebook's cells make sense.
 	// A declared dependency, never an implicit one: `rat play` runs them
@@ -67,12 +58,6 @@ type Manifest struct {
 // PythonSpec declares the Python environment a notebook needs.
 type PythonSpec struct {
 	Requires     string   `yaml:"requires"`
-	Dependencies []string `yaml:"dependencies"`
-}
-
-// RSpec declares the R packages a notebook needs, as pak package
-// references (https://pak.r-lib.org/reference/pak_package_sources.html).
-type RSpec struct {
 	Dependencies []string `yaml:"dependencies"`
 }
 
@@ -98,10 +83,9 @@ type Notebook struct {
 	Python *PythonSpec
 	// PEP723 is true when at least one python cell carries inline metadata.
 	PEP723 bool
-	// R is the front matter's R specification (nil: nothing declared).
-	R *RSpec
-	// Julia is the front matter's Julia specification (nil: nothing declared).
-	Julia *JuliaSpec
+	// Deps is rat.<key>.dependencies by key, for runtimes other than
+	// Python (the front matter's; chains merge them in Doctor).
+	Deps map[string]*DepsSpec
 }
 
 // Load reads and parses a notebook file.
@@ -137,6 +121,31 @@ func Parse(data []byte) (*Notebook, error) {
 		if doc.Rat != nil {
 			nb.Declared = true
 			nb.Manifest = *doc.Rat
+			// Every other key is a runtime's package declaration.
+			var raw struct {
+				Rat map[string]yaml.Node `yaml:"rat"`
+			}
+			if err := yaml.Unmarshal(front, &raw); err == nil {
+				for key, node := range raw.Rat {
+					switch key {
+					case "project", "python", "after":
+						continue
+					}
+					var spec DepsSpec
+					if err := node.Decode(&spec); err != nil {
+						return nil, fmt.Errorf("rat.%s: %w", key, err)
+					}
+					for i, d := range spec.Dependencies {
+						if err := validateDependency(d); err != nil {
+							return nil, fmt.Errorf("rat.%s.dependencies[%d]: %w", key, i, err)
+						}
+					}
+					if nb.Manifest.Deps == nil {
+						nb.Manifest.Deps = map[string]*DepsSpec{}
+					}
+					nb.Manifest.Deps[key] = mergeDeps(&spec, nil)
+				}
+			}
 		}
 	}
 	nb.Cells = parseCells(body, bytes.Count(data, []byte("\n"))-bytes.Count(body, []byte("\n")))
@@ -160,8 +169,7 @@ func Parse(data []byte) (*Notebook, error) {
 		}
 	}
 	nb.Python = mergePython(nb.Manifest.Python, pep)
-	nb.R = mergeR(nb.Manifest.R, nil)
-	nb.Julia = mergeJulia(nb.Manifest.Julia, nil)
+	nb.Deps = nb.Manifest.Deps
 	return nb, nil
 }
 
@@ -268,20 +276,6 @@ func (m Manifest) validate() error {
 			}
 		}
 	}
-	if m.R != nil {
-		for i, dep := range m.R.Dependencies {
-			if _, err := ParseRRef(dep); err != nil {
-				return fmt.Errorf("rat.r.dependencies[%d]: %w", i, err)
-			}
-		}
-	}
-	if m.Julia != nil {
-		for i, dep := range m.Julia.Dependencies {
-			if _, err := ParseJuliaRef(dep); err != nil {
-				return fmt.Errorf("rat.julia.dependencies[%d]: %w", i, err)
-			}
-		}
-	}
 	return nil
 }
 
@@ -324,24 +318,6 @@ func mergePython(a, b *PythonSpec) *PythonSpec {
 	}
 	for i := range out.Dependencies {
 		out.Dependencies[i] = strings.TrimSpace(out.Dependencies[i])
-	}
-	return out
-}
-
-func mergeR(a, b *RSpec) *RSpec {
-	if a == nil && b == nil {
-		return nil
-	}
-	out := &RSpec{}
-	for _, spec := range []*RSpec{a, b} {
-		if spec == nil {
-			continue
-		}
-		for _, d := range spec.Dependencies {
-			if d = strings.TrimSpace(d); !containsString(out.Dependencies, d) {
-				out.Dependencies = append(out.Dependencies, d)
-			}
-		}
 	}
 	return out
 }

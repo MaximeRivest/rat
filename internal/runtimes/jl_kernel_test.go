@@ -122,3 +122,16 @@ func TestJuliaKernelReadlineAndCompletionAndLook(t *testing.T) {
 		t.Fatalf("look ran a call: %q", r.Text)
 	}
 }
+
+func TestJuliaKernelInteractiveHTMLIsADisplay(t *testing.T) {
+	k := newJuliaKernel(t)
+	r := k.Run("struct Chart end\nBase.show(io::IO, ::MIME\"text/html\", ::Chart) = print(io, \"<div id=c></div><script>c.textContent=1</script>\")\nBase.show(io::IO, ::Chart) = print(io, \"Chart()\")\nprintln(\"before\"); display(Chart()); println(\"after\")\nChart()")
+	if !regexp.MustCompile(`^before\n__RAT_DISPLAY__:\S+\.json\nafter\n__RAT_DISPLAY__:\S+\.json$`).MatchString(r.Output) {
+		t.Fatalf("displays = %+v", r)
+	}
+	// Static HTML stays text.
+	r = k.Run("struct Table end\nBase.show(io::IO, ::MIME\"text/html\", ::Table) = print(io, \"<table></table>\")\nBase.show(io::IO, ::Table) = print(io, \"Table()\")\nTable()")
+	if r.Output != "Table()" {
+		t.Fatalf("static html = %+v", r)
+	}
+}
