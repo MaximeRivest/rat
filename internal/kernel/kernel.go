@@ -76,6 +76,26 @@ type LookRequest struct {
 // LookResult is what comes back from Look.
 type LookResult struct {
 	Text string // formatted text (same format as rat-py's output)
+
+	// Completion is set when the kernel describes its completions
+	// exactly: which text they replace, and matches that may contain
+	// spaces or punctuation (R's `na.rm = `, `df$col`). Text still
+	// lists them, one "label  kind" per line, for older clients.
+	Completion *Completion
+}
+
+// Completion is a kernel's exact answer to a completion request.
+type Completion struct {
+	// Start is where the replaced text begins, in characters of the
+	// code; it ends at the cursor. Each match replaces it whole.
+	Start   int     `json:"start"`
+	Matches []Match `json:"matches"`
+}
+
+// Match is one completion.
+type Match struct {
+	Label string `json:"label"`
+	Kind  string `json:"kind,omitempty"` // function, variable, module, argument, keyword, file, ...
 }
 
 // CtlResult is what comes back from a control operation.

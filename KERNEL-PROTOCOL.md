@@ -24,11 +24,50 @@ wraps it as a `kernel.Kernel`, and exposes it through MCP.
 
 ## Transport
 
+Two transports; `kernel.transport` in `runtime.yaml` picks one.
+
+**`stdio`** (default) — the simplest kernel:
+
 - **stdin →** kernel receives requests (one JSON object per line)
 - **stdout ←** kernel sends responses (one JSON object per line)
 - **stderr** is captured by the Go server for diagnostics only
 
+The kernel must keep whatever the user's code prints off stdout (capture
+it and return it in `output`), and the user's code cannot read stdin.
+
+**`socket`** — for language kernels (R): requests and responses travel on
+a private TCP connection. The kernel connects to `RAT_PROTOCOL_TCP_ADDR`
+(`host:port`) and first sends `{"op": "protocol_hello", "token": "…"}`
+with the value of `RAT_PROTOCOL_TOKEN`. The kernel's **stdout and stderr
+are the user's output**: whatever the code prints — including programs
+it starts and C code — reaches clients live, in order, with nothing to
+capture. The kernel's stdin is empty; prompts go through `input_request`.
+This is how rat's Python kernel runs.
+
 Lines are delimited by `\n`. Each line is a complete JSON object.
+
+Requests are answered **strictly in order**; there are no request ids.
+A host that stops waiting for a reply (a `look` that took too long)
+still expects it and drops it when it comes, so every request must get
+exactly one reply — including a request interrupted by `cancel`.
+
+## Interrupts
+
+`kernel.interrupt` in `runtime.yaml` says what `cancel` does while a
+request waits for its reply:
+
+- **`kill`** (default): the kernel process is stopped; the next request
+  starts a fresh one. Every variable is lost.
+- **`signal`**: the kernel runs in its own process group and `cancel`
+  sends it SIGINT, as Ctrl-C in a terminal would (programs the code is
+  waiting on get it too). The kernel stops the running code, replies
+  (`{"success": false, "error": "Interrupted"}` for a run) and keeps its
+  state. A SIGINT that arrives between requests must be ignored. rat
+  starts the kernel with SIGINT at its default even when rat itself runs
+  with it ignored (a background job does), so the language's own
+  handler is installed. On Windows `cancel` stops the process.
+
+A `run` has no time limit: it lasts until the code ends or is cancelled.
 
 ---
 
@@ -165,6 +204,25 @@ Response:
 Each line: `label  kind`. Kinds: `function`, `variable`, `module`,
 `keyword`, `value`. Return up to 50 completions.
 
+A kernel that knows which text its completions replace says so — this
+is what makes completion right for names with dots (`data.frame`), `$`,
+`::` or non-ASCII letters, without clients guessing each language's
+rules:
+
+```json
+{"text": "df$col1              variable",
+ "start": 5,
+ "matches": [{"label": "df$col1", "kind": "variable"}]}
+```
+
+- `start` — where the replaced text begins, in characters of `code`; it
+  ends at the cursor. Each `label` replaces it whole.
+- `matches` — the completions; a label may contain spaces or punctuation.
+
+The host passes these on as the MCP result's structured content, and
+`rat look <runtime> --code … --json` prints `{"start", "matches"}`
+(`start` is `null` for a kernel that only sends `text`).
+
 If none:
 
 ```json
@@ -203,14 +261,11 @@ Python's `input()`). This is sent while a `run` is in progress.
 {"op": "input", "text": "Alice\n"}
 ```
 
-The recommended response is:
-
-```json
-{"ok": true}
-```
-
-Today some built-in kernels treat this as fire-and-forget, but generic
-runtimes should reply so the host can confirm delivery cleanly.
+No reply of its own: the `run` in progress announces
+`{"op": "input_delivered"}` once the code has the answer. (Older kernels
+replied `{"ok": true}`; during a run the host takes only a message with
+a `success` field as the run's reply, so such an acknowledgement is
+harmless.) An `input` that arrives when nothing waits is ignored.
 
 ### `shutdown`
 
@@ -233,6 +288,8 @@ the final response:
 
 Stream partial stdout while code is still running. Useful for
 long-running code, progress bars, etc.
+
+(A `socket` kernel does not need it: its stdout already streams.)
 
 ```json
 {"op": "output_chunk", "text": "Processing row 500/1000\n"}

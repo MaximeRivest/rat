@@ -68,3 +68,31 @@ func Interrupt(proc *os.Process) error {
 	}
 	return nil
 }
+
+// OwnProcessGroup starts cmd in a process group of its own.
+func OwnProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP
+}
+
+// InterruptGroup cannot deliver Ctrl-C to a program without a console on
+// Windows: the program is stopped instead.
+func InterruptGroup(proc *os.Process) error {
+	if proc == nil {
+		return nil
+	}
+	return proc.Kill()
+}
+
+// KillGroup kills proc.
+func KillGroup(proc *os.Process) error {
+	if proc == nil {
+		return nil
+	}
+	return proc.Kill()
+}
+
+// ChildrenReceiveInterrupts is a no-op on Windows.
+func ChildrenReceiveInterrupts() {}

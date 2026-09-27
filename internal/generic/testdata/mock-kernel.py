@@ -54,6 +54,20 @@ for raw in sys.stdin:
             send({"op": "output_chunk", "text": "chunk2\n"})
             send({"success": True, "output": "chunk1\nchunk2\n", "error": "", "vars": len(visible_items())})
             continue
+        # Special: ask for input during the run, acknowledging the answer
+        # the way older kernels do ({"ok": true}) before input_delivered.
+        if code == "__ask__":
+            send({"op": "input_request", "prompt": "name: "})
+            answer = ""
+            for raw_in in sys.stdin:
+                msg = json.loads(raw_in)
+                if msg.get("op") == "input":
+                    answer = msg.get("text", "").strip()
+                    break
+            send({"ok": True})
+            send({"op": "input_delivered"})
+            send({"success": True, "output": "hello " + answer, "error": "", "vars": 0})
+            continue
         # Special: slow (emit output_chunk, then result)
         if code == "__input_test__":
             send({"op": "input_request", "prompt": "name: "})
@@ -92,6 +106,11 @@ for raw in sys.stdin:
             for name, kind, preview in items:
                 lines.append(f"{name}  {kind}  {preview}")
             send({"text": "\n".join(lines)})
+
+    elif op == "look_at" and req.get("at") == "__slow__":
+        import time
+        time.sleep(0.5)
+        send({"text": "slow reply"})
 
     elif op == "look_at":
         at = req.get("at", "")

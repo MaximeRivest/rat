@@ -1,0 +1,11 @@
+name: mocksock
+display: MockSocket
+
+detect:
+  commands: [python3, python]
+
+kernel:
+  type: json
+  script: mock-socket-kernel.py
+  transport: socket
+  interrupt: signal

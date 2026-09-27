@@ -526,8 +526,9 @@ def reader_loop():
             continue
         op = req.get("op")
         if op == "input":
+            # No reply of its own: the run announces input_delivered once
+            # the answer reached the Jupyter kernel.
             mailbox.provide(req.get("text", ""))
-            send({"ok": True})
             continue
         _commands.put(req)
         if op == "shutdown":

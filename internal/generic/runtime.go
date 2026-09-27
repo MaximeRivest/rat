@@ -13,9 +13,12 @@ package generic
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +61,15 @@ type RuntimeConfig struct {
 		Type   string   `yaml:"type"`             // "json" (default) or "tmux"
 		Script string   `yaml:"script,omitempty"` // json: kernel script path
 		Args   []string `yaml:"args,omitempty"`   // json: extra args before script
+
+		// json: how rat and the kernel talk — "stdio" (default: requests
+		// on stdin, replies on stdout) or "socket" (a private connection;
+		// stdout/stderr are then the user's output, streamed live).
+		Transport string `yaml:"transport,omitempty"`
+		// json: what cancel does — "kill" (default: the process stops,
+		// variables are lost) or "signal" (SIGINT to the kernel's process
+		// group; the kernel stops the running code and stays up).
+		Interrupt string `yaml:"interrupt,omitempty"`
 
 		Command string `yaml:"command,omitempty"` // tmux: command to run in session
 		Bridge  string `yaml:"bridge,omitempty"`  // tmux: bridge script (relative to runtime.yaml)
@@ -354,11 +366,14 @@ func isTrue(value string) bool {
 
 // request/response match the kernel protocol JSON schema.
 type request struct {
-	Op     string `json:"op"`
-	Code   string `json:"code,omitempty"`
-	At     string `json:"at,omitempty"`
-	Cursor int    `json:"cursor,omitempty"`
-	Text   string `json:"text,omitempty"`
+	Op         string `json:"op"`
+	Code       string `json:"code,omitempty"`
+	At         string `json:"at,omitempty"`
+	Cursor     *int   `json:"cursor,omitempty"`
+	Text       string `json:"text,omitempty"`
+	Full       bool   `json:"full,omitempty"`
+	AllowStdin bool   `json:"allow_stdin,omitempty"`
+	Token      string `json:"token,omitempty"`
 }
 
 type response struct {
@@ -370,6 +385,15 @@ type response struct {
 	State   string `json:"state,omitempty"`
 	OK      bool   `json:"ok,omitempty"`
 	Vars    int    `json:"vars,omitempty"`
+	Prompt  string `json:"prompt,omitempty"` // input_request: what the program asked
+	Secret  bool   `json:"secret,omitempty"` // input_request: a password-style read
+	Token   string `json:"token,omitempty"`  // protocol_hello
+
+	// complete: where the replaced text starts, and the exact matches.
+	Start   *int           `json:"start,omitempty"`
+	Matches []kernel.Match `json:"matches,omitempty"`
+
+	hasSuccess bool // the message carried a "success" field (a run's reply does)
 }
 
 // activityEntry is a JSON line written to the activity log so that
@@ -389,29 +413,140 @@ type Event struct {
 	Data map[string]interface{} `json:"data,omitempty"`
 }
 
+// Transports between rat and a json kernel.
+const (
+	// TransportStdio: requests on the kernel's stdin, replies on its
+	// stdout. Simple, but whatever the user's code prints must be kept
+	// off stdout by the kernel, and the code cannot read stdin.
+	TransportStdio = "stdio"
+	// TransportSocket: requests and replies on a private TCP connection
+	// the kernel opens to rat (RAT_PROTOCOL_TCP_ADDR, first line
+	// {"op":"protocol_hello","token":RAT_PROTOCOL_TOKEN}). The kernel's
+	// stdout and stderr are the user's output, streamed live as the
+	// Python kernel's are; its stdin is empty.
+	TransportSocket = "socket"
+)
+
+// Interrupt modes: what `cancel` does to a running request.
+const (
+	// InterruptKill stops the kernel process: every variable is lost.
+	// The default, for kernels that cannot survive a signal.
+	InterruptKill = "kill"
+	// InterruptSignal sends SIGINT to the kernel's process group, as
+	// Ctrl-C in a terminal would; the kernel stops the running code and
+	// replies. Needs the kernel to catch it (R: tryCatch(interrupt=)).
+	InterruptSignal = "signal"
+)
+
+// Transport returns the configured transport, defaulting to stdio.
+func (cfg *RuntimeConfig) Transport() string {
+	if cfg.Kernel.Transport == TransportSocket {
+		return TransportSocket
+	}
+	return TransportStdio
+}
+
+// InterruptMode returns the configured interrupt mode, defaulting to kill.
+func (cfg *RuntimeConfig) InterruptMode() string {
+	if cfg.Kernel.Interrupt == InterruptSignal {
+		return InterruptSignal
+	}
+	return InterruptKill
+}
+
+// How long a kernel may take to start and answer its first ping. Long on
+// purpose: a first start may compile packages (Julia precompiles for
+// minutes). A kernel that dies while starting is noticed at once.
+const startTimeout = 5 * time.Minute
+
+// How long look (variables, completion) waits for its reply. The reply
+// is still taken off the stream when it comes (see Kernel.stale).
+var lookTimeout = 30 * time.Second
+
+// link is the protocol reader of one kernel process.
+type link struct {
+	ch   chan []byte   // non-event messages (replies, streaming)
+	done chan struct{} // closed when the reader exits
+	quit chan struct{} // closed by kill: stop delivering
+	err  error         // why the reader exited; read after done
+}
+
+// outputBuf is a lock-protected text buffer, read while it is written.
+type outputBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+	max int // keep at most the last max bytes (0: no limit)
+}
+
+func (b *outputBuf) Append(s string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.WriteString(s)
+	if b.max > 0 && b.buf.Len() > b.max {
+		tail := b.buf.String()[b.buf.Len()-b.max:]
+		b.buf.Reset()
+		b.buf.WriteString(tail)
+	}
+}
+
+func (b *outputBuf) Get() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *outputBuf) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *outputBuf) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
 // Kernel is a language-agnostic kernel driven by a runtime.yaml config.
 // It implements kernel.Kernel.
 //
-// I/O model: a background goroutine reads stdout continuously. Lines with
-// op "event" are dispatched to the event handler immediately. All other
-// lines (responses, streaming) go to a channel consumed by the active
-// request (Run, Look, Ctl). This lets the kernel push events at any time
-// — between requests, during execution, or while idle.
+// I/O model: a background goroutine reads the protocol stream
+// continuously. Lines with op "event" are dispatched to the event handler
+// immediately. All other lines (replies, streaming) go to a channel
+// consumed by the active request (Run, Look, Ctl). This lets the kernel
+// push events at any time — between requests, during execution, or while
+// idle.
+//
+// Requests are answered strictly in order and carry no id. A request
+// that stops waiting (Look after 30 s) still gets its reply later; the
+// kernel owes it, and it is dropped when it comes (stale), so the next
+// request never reads an answer meant for another.
 type Kernel struct {
 	name    string
 	display string
 
-	mu             sync.Mutex
-	cmd            *exec.Cmd
-	stdin          io.WriteCloser
-	stderrBuf      bytes.Buffer
-	executionCount int
-	executing      atomic.Bool
+	mu      sync.Mutex // one request at a time
+	writeMu sync.Mutex // one writer on the protocol stream (SendInput runs during Run)
 
-	// Background reader routes stdout lines here.
-	responseCh chan []byte   // non-event messages (responses, streaming)
-	readerDone chan struct{} // closed when reader goroutine exits
-	readerErr  error         // set by reader goroutine before closing readerDone
+	cmd        *exec.Cmd
+	proto      io.WriteCloser
+	link       *link         // the protocol reader of the running process
+	outputDone chan struct{} // closed when the kernel's stdout/stderr are both closed
+	stale      int           // replies owed to requests that stopped waiting
+
+	procMu sync.Mutex
+	proc   *os.Process // for cancel, which must not wait for k.mu
+
+	executionCount  int
+	executing       atomic.Bool
+	pending         atomic.Bool // a request is waiting for its reply
+	waitingForInput atomic.Bool
+	inputPrompt     atomic.Value // kernel.InputPrompt of the read in progress
+	inputSeq        atomic.Uint64
+
+	partial    outputBuf // live output of the run in progress (Ctl "output")
+	userOutput outputBuf // what the program printed during the run (socket transport)
+	diag       outputBuf // what the kernel printed outside runs, for error messages
 
 	// How to start the subprocess.
 	binaryPath   string
@@ -420,6 +555,8 @@ type Kernel struct {
 	cwd          string
 	extraEnv     map[string]string
 	activityPath string // path to activity.jsonl for frontend sharing
+	transport    string
+	interrupt    string
 }
 
 // New creates a generic kernel from a runtime config.
@@ -476,6 +613,9 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 		activityPath: activityPath,
 		scriptPath:   scriptPath,
 		cwd:          cwd,
+		transport:    cfg.Transport(),
+		interrupt:    cfg.InterruptMode(),
+		diag:         outputBuf{max: 64 << 10},
 	}
 
 	if err := k.ensureStarted(); err != nil {
@@ -484,42 +624,48 @@ func New(name, cwd string, cfg *RuntimeConfig, configDir string, runtimePath str
 	return k, nil
 }
 
-// Run executes code in the kernel subprocess.
+// Run executes code in the kernel subprocess. It waits as long as the
+// code runs: stopping it is cancel's job, not a clock's.
 func (k *Kernel) Run(code string) kernel.RunResult {
 	start := time.Now()
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
 	if err := k.ensureStarted(); err != nil {
-		return kernel.RunResult{Success: false, Error: err.Error(), Duration: ms(start)}
+		return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: k.executionCount, Duration: ms(start)}
 	}
 
 	k.executionCount++
 	count := k.executionCount
+	k.partial.Reset()
+	k.userOutput.Reset()
 	k.executing.Store(true)
-	defer k.executing.Store(false)
+	defer func() {
+		k.waitingForInput.Store(false)
+		k.executing.Store(false)
+	}()
 
-	if err := k.send(request{Op: "run", Code: code}); err != nil {
+	if err := k.send(request{Op: "run", Code: code, AllowStdin: true}); err != nil {
 		return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: count, Duration: ms(start)}
 	}
-
-	// Read responses, skipping streaming messages.
-	// Events are handled by the background reader — they never arrive here.
-	var resp response
-	for {
-		var err error
-		resp, err = k.readResponse(5 * time.Minute)
-		if err != nil {
-			return kernel.RunResult{Success: false, Error: err.Error(), ExecCount: count, Duration: ms(start)}
+	resp, err := k.await(0, true)
+	if k.transport == TransportSocket {
+		k.waitForOutputQuiet()
+	}
+	output := strings.TrimSpace(resp.Output)
+	if k.transport == TransportSocket {
+		output = strings.TrimSpace(joinOutput(resp.Output, k.userOutput.Get()))
+	}
+	if err != nil {
+		errText := err.Error()
+		if output != "" {
+			errText = output + "\n" + errText
 		}
-		switch resp.Op {
-		case "output_chunk", "input_request", "input_delivered":
-			continue
-		}
-		break
+		r := kernel.RunResult{Success: false, Output: output, Error: errText, ExecCount: count, Duration: ms(start)}
+		k.logActivity(code, r)
+		return r
 	}
 
-	output := strings.TrimSpace(resp.Output)
 	if !resp.Success {
 		errText := strings.TrimSpace(resp.Error)
 		if output != "" {
@@ -574,16 +720,23 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-// SendInput writes text to a waiting input prompt.
+// SendInput delivers the answer to a prompt the running code waits on.
+// It does not take k.mu: the run holding it is the one waiting.
 func (k *Kernel) SendInput(text string) error {
-	k.mu.Lock()
-	defer k.mu.Unlock()
 	return k.send(request{Op: "input", Text: text})
 }
 
-// IsWaitingForInput returns whether the kernel is blocked on stdin.
+// IsWaitingForInput returns whether the running code is blocked on a read.
 func (k *Kernel) IsWaitingForInput() bool {
-	return false // generic kernel doesn't track this yet
+	return k.waitingForInput.Load()
+}
+
+// InputPrompt returns the prompt of the read the code is blocked on.
+func (k *Kernel) InputPrompt() kernel.InputPrompt {
+	if v, ok := k.inputPrompt.Load().(kernel.InputPrompt); ok {
+		return v
+	}
+	return kernel.InputPrompt{}
 }
 
 // Look inspects the runtime state.
@@ -598,9 +751,10 @@ func (k *Kernel) Look(req kernel.LookRequest) kernel.LookResult {
 	var err error
 	switch {
 	case req.Code != "":
-		err = k.send(request{Op: "complete", Code: req.Code, Cursor: req.Cursor})
+		cursor := req.Cursor
+		err = k.send(request{Op: "complete", Code: req.Code, Cursor: &cursor})
 	case req.At != "":
-		err = k.send(request{Op: "look_at", At: req.At})
+		err = k.send(request{Op: "look_at", At: req.At, Full: req.Full})
 	default:
 		err = k.send(request{Op: "look_overview"})
 	}
@@ -608,9 +762,12 @@ func (k *Kernel) Look(req kernel.LookRequest) kernel.LookResult {
 		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
 	}
 
-	resp, err := k.readResponse(30 * time.Second)
+	resp, err := k.await(lookTimeout, false)
 	if err != nil {
 		return kernel.LookResult{Text: fmt.Sprintf("ERROR: %v", err)}
+	}
+	if req.Code != "" && resp.Start != nil && resp.Error == "" {
+		return kernel.LookResult{Text: resp.Text, Completion: &kernel.Completion{Start: *resp.Start, Matches: resp.Matches}}
 	}
 	if resp.Text != "" {
 		return kernel.LookResult{Text: resp.Text}
@@ -625,6 +782,9 @@ func (k *Kernel) Look(req kernel.LookRequest) kernel.LookResult {
 func (k *Kernel) Ctl(op string) kernel.CtlResult {
 	switch op {
 	case "reset", "restart":
+		// Stop the process first, without waiting for k.mu: a run that
+		// never ends holds it, and restarting is how one gets out.
+		k.killProcess()
 		k.mu.Lock()
 		defer k.mu.Unlock()
 		k.kill()
@@ -641,15 +801,30 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 		}
 		return kernel.CtlResult{Text: "RESTARTED | fresh session"}
 	case "cancel":
-		if k.cmd != nil && k.cmd.Process != nil {
-			_ = k.cmd.Process.Kill()
+		// Nothing to stop when no request waits: a kernel between
+		// requests keeps its variables.
+		if !k.pending.Load() {
+			return kernel.CtlResult{Text: "CANCELLED"}
 		}
-		return kernel.CtlResult{Text: "CANCELLED"}
+		if k.interrupt == InterruptSignal {
+			k.procMu.Lock()
+			proc := k.proc
+			k.procMu.Unlock()
+			if err := procutil.InterruptGroup(proc); err != nil {
+				return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
+			}
+			return kernel.CtlResult{Text: "CANCELLED"}
+		}
+		k.killProcess()
+		return kernel.CtlResult{Text: "CANCELLED | kernel stopped, variables lost"}
 	case "output":
-		// No streaming output buffer for generic kernels.
-		return kernel.CtlResult{Text: ""}
+		// Output of the run in progress, lock-free so Run is not blocked.
+		return kernel.CtlResult{Text: k.partial.Get()}
 	case "status":
 		if k.executing.Load() {
+			if k.waitingForInput.Load() {
+				return kernel.CtlResult{Text: "waiting_for_input"}
+			}
 			return kernel.CtlResult{Text: "busy"}
 		}
 		k.mu.Lock()
@@ -660,7 +835,7 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 		if err := k.send(request{Op: "status"}); err != nil {
 			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
 		}
-		resp, err := k.readResponse(5 * time.Second)
+		resp, err := k.await(5*time.Second, false)
 		if err != nil {
 			return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
 		}
@@ -679,21 +854,43 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 	}
 }
 
-// Shutdown tears down the kernel subprocess.
+// Shutdown tears down the kernel subprocess, giving it a moment to exit
+// on its own first.
 func (k *Kernel) Shutdown() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	_ = k.send(request{Op: "shutdown"})
+	if k.alive() && k.send(request{Op: "shutdown"}) == nil {
+		select {
+		case <-k.link.done:
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 	k.kill()
 	return nil
 }
 
 // ── internal ────────────────────────────────────────────────
 
+// alive reports whether the kernel process is up and its protocol stream
+// open. A kernel that died (a crash, or a cancel that stopped it) is not,
+// and the next request starts a fresh one.
+func (k *Kernel) alive() bool {
+	if k.cmd == nil || k.link == nil {
+		return false
+	}
+	select {
+	case <-k.link.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (k *Kernel) ensureStarted() error {
-	if k.cmd != nil && k.cmd.Process != nil && k.cmd.ProcessState == nil {
+	if k.alive() {
 		return nil
 	}
+	k.kill()
 
 	args := append(append([]string{}, k.binaryArgs...), k.scriptPath)
 	cmd := exec.Command(k.binaryPath, args...)
@@ -703,44 +900,124 @@ func (k *Kernel) ensureStarted() error {
 	for key, value := range k.extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return fmt.Errorf("stdout: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return fmt.Errorf("stderr: %w", err)
+	if k.interrupt == InterruptSignal {
+		procutil.OwnProcessGroup(cmd)
+		procutil.ChildrenReceiveInterrupts()
 	}
 
-	k.stderrBuf.Reset()
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
+	var listener net.Listener
+	var token string
+	var stdin io.WriteCloser
+	if k.transport == TransportSocket {
+		var err error
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return fmt.Errorf("%s kernel: listen: %w", k.display, err)
+		}
+		defer listener.Close()
+		token = randomToken()
+		cmd.Env = append(cmd.Env,
+			"RAT_PROTOCOL_TCP_ADDR="+listener.Addr().String(),
+			"RAT_PROTOCOL_TOKEN="+token,
+		)
+		// The user's code reads an empty stdin; prompts go through the
+		// protocol (input_request).
+		cmd.Stdin = nil
+	} else {
+		var err error
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("stdin: %w", err)
+		}
+	}
+
+	var outputs []io.Reader
+	var protoOut io.Reader
+	var outWrite *os.File // socket: the one pipe for stdout and stderr, closed here once started
+	if k.transport == TransportSocket {
+		// stdout and stderr share one pipe, as in a terminal: a warning
+		// stays where it was written among the printed lines.
+		r, w, err := os.Pipe()
+		if err != nil {
+			return fmt.Errorf("output pipe: %w", err)
+		}
+		cmd.Stdout, cmd.Stderr = w, w
+		outWrite = w
+		outputs = append(outputs, r)
+	} else {
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			_ = stdin.Close()
+			return fmt.Errorf("stdout: %w", err)
+		}
+		protoOut = stdout
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			_ = stdin.Close()
+			return fmt.Errorf("stderr: %w", err)
+		}
+		outputs = append(outputs, stderr)
+	}
+
+	k.diag.Reset()
+	err := cmd.Start()
+	if outWrite != nil {
+		_ = outWrite.Close()
+	}
+	if err != nil {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+		for _, r := range outputs {
+			if c, ok := r.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
 		return fmt.Errorf("start %s kernel: %w", k.display, err)
 	}
-	go func() { _, _ = io.Copy(&k.stderrBuf, stderr) }()
-
 	k.cmd = cmd
-	k.stdin = stdin
-	k.responseCh = make(chan []byte, 32)
-	k.readerDone = make(chan struct{})
-	k.readerErr = nil
+	k.procMu.Lock()
+	k.proc = cmd.Process
+	k.procMu.Unlock()
 
-	// Start background reader that routes stdout lines.
-	go k.readerLoop(bufio.NewReader(stdout))
+	var wg sync.WaitGroup
+	for _, r := range outputs {
+		wg.Add(1)
+		go func(r io.Reader) {
+			defer wg.Done()
+			k.consumeOutput(r)
+			if f, ok := r.(*os.File); ok {
+				_ = f.Close()
+			}
+		}(r)
+	}
+	k.outputDone = make(chan struct{})
+	go func(done chan struct{}) { wg.Wait(); close(done) }(k.outputDone)
+
+	var reader *bufio.Reader
+	if k.transport == TransportSocket {
+		conn, r, err := k.acceptProtocol(listener, token)
+		if err != nil {
+			k.kill()
+			return err
+		}
+		k.proto = conn
+		reader = r
+	} else {
+		k.proto = stdin
+		reader = bufio.NewReader(protoOut)
+	}
+
+	k.link = &link{ch: make(chan []byte, 64), done: make(chan struct{}), quit: make(chan struct{})}
+	k.stale = 0
+	go k.readerLoop(reader, k.link)
 
 	// Ping to verify the kernel is alive.
 	if err := k.send(request{Op: "ping"}); err != nil {
 		k.kill()
 		return err
 	}
-	resp, err := k.readResponse(10 * time.Second)
+	resp, err := k.await(startTimeout, false)
 	if err != nil {
 		k.kill()
 		return err
@@ -752,16 +1029,120 @@ func (k *Kernel) ensureStarted() error {
 	return nil
 }
 
-// readerLoop runs in a background goroutine. It reads every line from
-// the kernel's stdout and routes it:
+// acceptProtocol waits for the kernel to connect and prove it is the
+// process rat started (the token). It gives up at once if the process
+// exits first.
+func (k *Kernel) acceptProtocol(listener net.Listener, token string) (net.Conn, *bufio.Reader, error) {
+	type accepted struct {
+		conn   net.Conn
+		reader *bufio.Reader
+		err    error
+	}
+	ch := make(chan accepted, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			ch <- accepted{err: err}
+			return
+		}
+		reader := bufio.NewReader(conn)
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		line, err := reader.ReadBytes('\n')
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			_ = conn.Close()
+			ch <- accepted{err: fmt.Errorf("read protocol hello: %w", err)}
+			return
+		}
+		var hello response
+		if json.Unmarshal(bytes.TrimSpace(line), &hello) != nil || hello.Op != "protocol_hello" || hello.Token != token {
+			_ = conn.Close()
+			ch <- accepted{err: fmt.Errorf("invalid protocol hello")}
+			return
+		}
+		ch <- accepted{conn: conn, reader: reader}
+	}()
+	select {
+	case a := <-ch:
+		if a.err != nil {
+			return nil, nil, fmt.Errorf("%s kernel: %w", k.display, a.err)
+		}
+		return a.conn, a.reader, nil
+	case <-k.outputDone:
+		_ = listener.Close()
+		return nil, nil, k.exitError(fmt.Errorf("exited before connecting"))
+	case <-time.After(startTimeout):
+		_ = listener.Close()
+		return nil, nil, fmt.Errorf("%s kernel did not connect within %s", k.display, startTimeout)
+	}
+}
+
+// consumeOutput reads one of the kernel's output streams. During a run
+// it is the user's output (socket transport); otherwise it is kept for
+// error messages.
+func (k *Kernel) consumeOutput(r io.Reader) {
+	user := k.transport == TransportSocket
+	buf := make([]byte, 8192)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			text := string(buf[:n])
+			if user && k.executing.Load() {
+				k.partial.Append(text)
+				k.userOutput.Append(text)
+			} else {
+				k.diag.Append(text)
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// waitForOutputQuiet lets output written just before the reply arrive:
+// the reply and the output travel on different streams.
+func (k *Kernel) waitForOutputQuiet() {
+	deadline := time.Now().Add(200 * time.Millisecond)
+	quietSince := time.Now()
+	lastLen := k.userOutput.Len()
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+		n := k.userOutput.Len()
+		if n != lastLen {
+			lastLen = n
+			quietSince = time.Now()
+			continue
+		}
+		if time.Since(quietSince) >= 20*time.Millisecond {
+			return
+		}
+	}
+}
+
+func joinOutput(primary, external string) string {
+	if primary == "" {
+		return external
+	}
+	if external == "" {
+		return primary
+	}
+	if strings.HasSuffix(primary, "\n") || strings.HasPrefix(external, "\n") {
+		return primary + external
+	}
+	return primary + "\n" + external
+}
+
+// readerLoop runs in a background goroutine. It reads every line of the
+// protocol stream and routes it:
 //   - op "event" → dispatched immediately (activity log + callback)
-//   - everything else → responseCh for the active request to consume
-func (k *Kernel) readerLoop(reader *bufio.Reader) {
-	defer close(k.readerDone)
+//   - everything else → l.ch for the active request to consume
+func (k *Kernel) readerLoop(reader *bufio.Reader, l *link) {
+	defer close(l.done)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
-			k.readerErr = err
+			l.err = err
 			return
 		}
 		line = bytes.TrimSpace(line)
@@ -779,16 +1160,15 @@ func (k *Kernel) readerLoop(reader *bufio.Reader) {
 
 		if peek.Op == "event" {
 			k.dispatchEvent(line)
-		} else {
-			// Copy because bufio may reuse the buffer.
-			msg := make([]byte, len(line))
-			copy(msg, line)
-			select {
-			case k.responseCh <- msg:
-			case <-time.After(30 * time.Second):
-				// Response channel full for 30s — something is very wrong.
-				// Drop the message to avoid blocking the reader forever.
-			}
+			continue
+		}
+		// Copy because bufio may reuse the buffer.
+		msg := make([]byte, len(line))
+		copy(msg, line)
+		select {
+		case l.ch <- msg:
+		case <-l.quit:
+			return
 		}
 	}
 }
@@ -829,93 +1209,186 @@ func (k *Kernel) logEvent(evtType string, data map[string]interface{}) {
 }
 
 func (k *Kernel) send(req request) error {
-	if k.stdin == nil {
+	k.writeMu.Lock()
+	defer k.writeMu.Unlock()
+	if k.proto == nil {
 		return fmt.Errorf("%s kernel not started", k.display)
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	if _, err := k.stdin.Write(append(data, '\n')); err != nil {
-		k.kill()
+	if _, err := k.proto.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write to %s kernel: %w", k.display, err)
+	}
+	if req.Op != "input" && req.Op != "shutdown" {
+		k.pending.Store(true)
 	}
 	return nil
 }
 
-// readResponse waits for the next non-event response from the kernel.
-// Events arriving while waiting are dispatched automatically by the
-// background reader — they never appear here.
-func (k *Kernel) readResponse(timeout time.Duration) (response, error) {
-	select {
-	case raw, ok := <-k.responseCh:
-		if !ok {
-			stderr := strings.TrimSpace(k.stderrBuf.String())
-			if stderr != "" {
-				return response{}, fmt.Errorf("%s kernel exited: %s", k.display, stderr)
-			}
-			return response{}, fmt.Errorf("%s kernel exited: %v", k.display, k.readerErr)
+// await returns the kernel's reply to the request just sent. A run's
+// streaming messages (output, input prompts) are handled on the way, and
+// replies owed to requests that stopped waiting are dropped. timeout 0
+// waits as long as the kernel lives. For a run (isRun), only a message
+// with a "success" field is the reply: older kernels acknowledge an
+// answered prompt with {"ok": true}.
+func (k *Kernel) await(timeout time.Duration, isRun bool) (response, error) {
+	var deadline <-chan time.Time
+	if timeout > 0 {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		deadline = t.C
+	}
+	if k.link == nil {
+		return response{}, fmt.Errorf("%s kernel not started", k.display)
+	}
+	l := k.link
+	// handle routes one message; it reports whether it is the reply.
+	handle := func(raw []byte) (response, bool, error) {
+		resp, err := decodeResponse(raw)
+		if err != nil {
+			return response{}, true, fmt.Errorf("decode %s kernel reply: %w", k.display, err)
 		}
-		var resp response
-		if err := json.Unmarshal(raw, &resp); err != nil {
-			return response{}, fmt.Errorf("decode %s kernel response: %w", k.display, err)
+		switch resp.Op {
+		case "output_chunk":
+			k.partial.Append(resp.Text)
+			return resp, false, nil
+		case "input_request":
+			// Store the prompt before the flag: a reader that sees the
+			// flag must also see what the program asked.
+			k.inputPrompt.Store(kernel.InputPrompt{Text: resp.Prompt, Secret: resp.Secret, Seq: k.inputSeq.Add(1)})
+			k.waitingForInput.Store(true)
+			return resp, false, nil
+		case "input_delivered":
+			k.waitingForInput.Store(false)
+			return resp, false, nil
 		}
-		return resp, nil
-
-	case <-k.readerDone:
-		// Reader exited — drain any remaining responses.
+		if k.stale > 0 {
+			k.stale--
+			return resp, false, nil
+		}
+		if isRun && !resp.hasSuccess {
+			return resp, false, nil
+		}
+		return resp, true, nil
+	}
+	for {
 		select {
-		case raw := <-k.responseCh:
-			var resp response
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				return response{}, fmt.Errorf("decode %s kernel response: %w", k.display, err)
+		case raw := <-l.ch:
+			resp, final, err := handle(raw)
+			if final {
+				k.pending.Store(false)
+				return resp, err
 			}
-			return resp, nil
-		default:
+		case <-l.done:
+			// The reader stopped: take what it delivered before.
+			for drained := false; !drained; {
+				select {
+				case raw := <-l.ch:
+					if resp, final, err := handle(raw); final {
+						k.pending.Store(false)
+						return resp, err
+					}
+				default:
+					drained = true
+				}
+			}
+			k.pending.Store(false)
+			return response{}, k.exitError(l.err)
+		case <-deadline:
+			// The reply is still owed; the next request must not take it.
+			k.stale++
+			return response{}, fmt.Errorf("%s kernel: no reply after %s", k.display, timeout)
 		}
-		stderr := strings.TrimSpace(k.stderrBuf.String())
-		if stderr != "" {
-			return response{}, fmt.Errorf("%s kernel exited: %s", k.display, stderr)
-		}
-		return response{}, fmt.Errorf("%s kernel exited: %v", k.display, k.readerErr)
-
-	case <-time.After(timeout):
-		return response{}, fmt.Errorf("%s kernel: timeout after %s", k.display, timeout)
 	}
 }
 
-func (k *Kernel) kill() {
-	if k.stdin != nil {
-		_ = k.stdin.Close()
-		k.stdin = nil
+func decodeResponse(raw []byte) (response, error) {
+	var resp response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return response{}, err
 	}
-	if k.cmd != nil {
-		if k.cmd.Process != nil {
-			_ = k.cmd.Process.Kill()
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		_, resp.hasSuccess = fields["success"]
+	}
+	return resp, nil
+}
+
+// exitError describes a kernel that stopped, with what it printed.
+func (k *Kernel) exitError(cause error) error {
+	if k.outputDone != nil {
+		select {
+		case <-k.outputDone:
+		case <-time.After(200 * time.Millisecond):
 		}
+	}
+	diag := strings.TrimSpace(k.diag.Get())
+	if diag != "" {
+		lines := strings.Split(diag, "\n")
+		if len(lines) > 20 {
+			lines = lines[len(lines)-20:]
+		}
+		return fmt.Errorf("%s kernel exited: %s", k.display, strings.Join(lines, "\n"))
+	}
+	if cause == nil || cause == io.EOF {
+		return fmt.Errorf("%s kernel exited", k.display)
+	}
+	return fmt.Errorf("%s kernel exited: %v", k.display, cause)
+}
+
+// killProcess stops the kernel process without k.mu. The request waiting
+// on it sees the protocol stream close and returns.
+func (k *Kernel) killProcess() {
+	k.procMu.Lock()
+	proc := k.proc
+	k.procMu.Unlock()
+	if proc == nil {
+		return
+	}
+	if k.interrupt == InterruptSignal {
+		_ = procutil.KillGroup(proc)
+	} else {
+		_ = proc.Kill()
+	}
+}
+
+// kill stops the kernel and releases everything it held. Holds k.mu.
+func (k *Kernel) kill() {
+	k.writeMu.Lock()
+	if k.proto != nil {
+		_ = k.proto.Close()
+		k.proto = nil
+	}
+	k.writeMu.Unlock()
+	if k.cmd != nil {
+		k.killProcess()
 		_ = k.cmd.Wait()
 		k.cmd = nil
 	}
-	// Wait for reader goroutine to finish.
-	if k.readerDone != nil {
+	k.procMu.Lock()
+	k.proc = nil
+	k.procMu.Unlock()
+	// Stop the reader goroutine.
+	if k.link != nil {
+		close(k.link.quit)
 		select {
-		case <-k.readerDone:
+		case <-k.link.done:
 		case <-time.After(2 * time.Second):
 		}
-		k.readerDone = nil
+		k.link = nil
 	}
-	// Drain response channel.
-	if k.responseCh != nil {
-		for {
-			select {
-			case <-k.responseCh:
-			default:
-				goto drained
-			}
-		}
-	drained:
-		k.responseCh = nil
+	k.pending.Store(false)
+	k.waitingForInput.Store(false)
+}
+
+func randomToken() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
+	return hex.EncodeToString(b)
 }
 
 func ms(start time.Time) int {
