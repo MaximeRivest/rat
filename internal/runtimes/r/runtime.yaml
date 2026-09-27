@@ -9,6 +9,10 @@ kernel:
   type: json
   script: kernel.R
   args: ["--no-save", "--no-restore"]
+  # Output streams live on the kernel's stdout/stderr; cancel interrupts
+  # the running code and keeps the session.
+  transport: socket
+  interrupt: signal
 
 frontend:
   type: repl
