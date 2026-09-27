@@ -459,6 +459,10 @@ func (cfg *RuntimeConfig) InterruptMode() string {
 // minutes). A kernel that dies while starting is noticed at once.
 const startTimeout = 5 * time.Minute
 
+// How long after a first cancel a second one stops the kernel instead of
+// interrupting again (interrupt: signal).
+var forceAfter = 3 * time.Second
+
 // How long look (variables, completion) waits for its reply. The reply
 // is still taken off the stream when it comes (see Kernel.stale).
 var lookTimeout = 30 * time.Second
@@ -539,7 +543,8 @@ type Kernel struct {
 
 	executionCount  int
 	executing       atomic.Bool
-	pending         atomic.Bool // a request is waiting for its reply
+	pending         atomic.Bool  // a request is waiting for its reply
+	interruptedAt   atomic.Int64 // when cancel first interrupted the pending request (unix ns; 0: not yet)
 	waitingForInput atomic.Bool
 	inputPrompt     atomic.Value // kernel.InputPrompt of the read in progress
 	inputSeq        atomic.Uint64
@@ -807,12 +812,22 @@ func (k *Kernel) Ctl(op string) kernel.CtlResult {
 			return kernel.CtlResult{Text: "CANCELLED"}
 		}
 		if k.interrupt == InterruptSignal {
+			// Some code cannot be interrupted (a Julia loop that never
+			// allocates, R inside C code). As Ctrl-C again in a terminal: a
+			// second cancel, once the first had time to work, stops the
+			// kernel.
+			first := k.interruptedAt.Load()
+			if first != 0 && time.Since(time.Unix(0, first)) >= forceAfter {
+				k.killProcess()
+				return kernel.CtlResult{Text: "CANCELLED | the code did not stop; kernel stopped, variables lost"}
+			}
 			k.procMu.Lock()
 			proc := k.proc
 			k.procMu.Unlock()
 			if err := procutil.InterruptGroup(proc); err != nil {
 				return kernel.CtlResult{Text: fmt.Sprintf("ERROR: %v", err)}
 			}
+			k.interruptedAt.CompareAndSwap(0, time.Now().UnixNano())
 			return kernel.CtlResult{Text: "CANCELLED"}
 		}
 		k.killProcess()
@@ -1278,7 +1293,7 @@ func (k *Kernel) await(timeout time.Duration, isRun bool) (response, error) {
 		case raw := <-l.ch:
 			resp, final, err := handle(raw)
 			if final {
-				k.pending.Store(false)
+				k.requestDone()
 				return resp, err
 			}
 		case <-l.done:
@@ -1287,14 +1302,14 @@ func (k *Kernel) await(timeout time.Duration, isRun bool) (response, error) {
 				select {
 				case raw := <-l.ch:
 					if resp, final, err := handle(raw); final {
-						k.pending.Store(false)
+						k.requestDone()
 						return resp, err
 					}
 				default:
 					drained = true
 				}
 			}
-			k.pending.Store(false)
+			k.requestDone()
 			return response{}, k.exitError(l.err)
 		case <-deadline:
 			// The reply is still owed; the next request must not take it.
@@ -1379,8 +1394,14 @@ func (k *Kernel) kill() {
 		}
 		k.link = nil
 	}
-	k.pending.Store(false)
+	k.requestDone()
 	k.waitingForInput.Store(false)
+}
+
+// requestDone marks the end of the request a cancel may act on.
+func (k *Kernel) requestDone() {
+	k.pending.Store(false)
+	k.interruptedAt.Store(0)
 }
 
 func randomToken() string {

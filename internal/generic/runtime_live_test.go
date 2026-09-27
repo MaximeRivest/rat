@@ -212,3 +212,43 @@ func TestSocketKernelThatDiesSaysWhy(t *testing.T) {
 		t.Fatalf("no fresh kernel after a crash: %+v", r)
 	}
 }
+
+func TestSecondCancelStopsCodeThatIgnoresInterrupts(t *testing.T) {
+	old := forceAfter
+	forceAfter = 300 * time.Millisecond
+	defer func() { forceAfter = old }()
+	k := newSocketKernel(t)
+	// Python code that swallows KeyboardInterrupt, as a Julia loop that
+	// never allocates cannot be interrupted.
+	done := runAsync(k, "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n    except KeyboardInterrupt:\n        pass")
+	waitFor(t, "the run", func() bool { return k.Ctl("status").Text == "busy" })
+	if c := k.Ctl("cancel").Text; c != "CANCELLED" {
+		t.Fatalf("first cancel = %q", c)
+	}
+	// Too soon: interrupts again.
+	if c := k.Ctl("cancel").Text; c != "CANCELLED" {
+		t.Fatalf("quick second cancel = %q", c)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if c := k.Ctl("cancel").Text; !strings.Contains(c, "kernel stopped") {
+		t.Fatalf("late second cancel = %q", c)
+	}
+	select {
+	case r := <-done:
+		if r.Success {
+			t.Fatalf("run = %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the kernel was not stopped")
+	}
+	// The next request starts fresh, and a new run starts a new count.
+	if r := k.Run("1 + 1"); r.Output != "2" {
+		t.Fatalf("after = %+v", r)
+	}
+	done = runAsync(k, "import time\ntime.sleep(30)")
+	waitFor(t, "the run", func() bool { return k.Ctl("status").Text == "busy" })
+	if c := k.Ctl("cancel").Text; c != "CANCELLED" {
+		t.Fatalf("a new run's first cancel = %q", c)
+	}
+	<-done
+}

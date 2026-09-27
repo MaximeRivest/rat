@@ -62,7 +62,11 @@ request waits for its reply:
   sends it SIGINT, as Ctrl-C in a terminal would (programs the code is
   waiting on get it too). The kernel stops the running code, replies
   (`{"success": false, "error": "Interrupted"}` for a run) and keeps its
-  state. A SIGINT that arrives between requests must be ignored. rat
+  state. A SIGINT that arrives between requests must be ignored. Some
+  code cannot be interrupted (a Julia loop that never allocates, R deep
+  in C code): a second `cancel`, 3 s or more after the first while the
+  same request still waits, stops the kernel instead — as Ctrl-C again
+  in a terminal — and says that the variables are lost. rat
   starts the kernel with SIGINT at its default even when rat itself runs
   with it ignored (a background job does), so the language's own
   handler is installed. On Windows `cancel` stops the process.
