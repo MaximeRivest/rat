@@ -19,7 +19,7 @@
 
 local({
   if (!requireNamespace("jsonlite", quietly = TRUE)) {
-    stop("the R package 'jsonlite' is required: run `rat install r`, or install.packages(\"jsonlite\")")
+    stop("rat's R kernel needs the R package jsonlite: for a notebook, `rat ensure <notebook>` (Chattering: \"make it run\") installs it; otherwise `rat install r`")
   }
 
   toJSON <- jsonlite::toJSON

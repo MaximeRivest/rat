@@ -358,7 +358,8 @@ func toolCheck(lang string, opts *Options) (Check, bool) {
 			missing = append(missing, b)
 		}
 	}
-	c := Check{ID: "tool-" + lang, Label: lang + " cells", OK: len(missing) == 0}
+	label := map[string]string{"sh": "shell", "r": "R", "jl": "Julia", "js": "JavaScript", "pi": "pi"}[lang]
+	c := Check{ID: "tool-" + lang, Label: label + " cells", OK: len(missing) == 0}
 	if c.OK {
 		c.Detail = strings.Join(found, ", ")
 	} else {
