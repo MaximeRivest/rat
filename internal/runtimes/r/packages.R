@@ -94,6 +94,10 @@ parse_ref <- function(ref) {
 
 installed_version <- function(pkg) tryCatch(as.character(utils::packageVersion(pkg)), error = function(e) "")
 
+# R writes versions with dashes (1.1-3) and packageVersion() with dots
+# (1.1.3): the same version.
+same_version <- function(a, b) nzchar(a) && nzchar(b) && utils::compareVersion(a, b) == 0
+
 version_ok <- function(have, want) {
   if (!nzchar(want)) return(TRUE)
   if (startsWith(want, ">=")) return(utils::compareVersion(have, substring(want, 3)) >= 0)
@@ -126,7 +130,7 @@ inspect <- function() {
     have <- installed_version(r$package)
     row <- locked_row(r$package)
     if (!is.null(row) && row[["Declared"]] == r$ref) {
-      ok <- have == row[["Version"]]
+      ok <- same_version(have, row[["Version"]])
       if (ok && r$remote && is.na(r$local)) {
         sha <- sub("^.*@", "", row[["Ref"]])
         got <- tryCatch(utils::packageDescription(r$package)$RemoteSha, error = function(e) NULL)
@@ -140,7 +144,7 @@ inspect <- function() {
       desc <- tryCatch(utils::packageDescription(r$package), error = function(e) NULL)
       ok <- !is.null(desc) && !is.null(desc$RemoteType)
     }
-    if (ok && !is.na(r$local)) ok <- have == r$version
+    if (ok && !is.na(r$local)) ok <- same_version(have, r$version)
     if (force || !ok) want_missing(r$ref, r$package)
   }
   # What the declared packages depend on, as locked.
@@ -149,7 +153,7 @@ inspect <- function() {
     for (i in seq_len(nrow(lock))) {
       pkg <- lock[i, "Package"]
       if (pkg %in% declared_pkgs) next
-      if (force || installed_version(pkg) != lock[i, "Version"]) want_missing(lock[i, "Ref"], pkg)
+      if (force || !same_version(installed_version(pkg), lock[i, "Version"])) want_missing(lock[i, "Ref"], pkg)
     }
   }
   locked_decl <- if (is.null(lock)) character() else lock[nzchar(lock[, "Declared"]), "Declared"]

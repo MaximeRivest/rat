@@ -45,7 +45,8 @@ func TestRPackagesAreCheckedInstalledAndLocked(t *testing.T) {
 		t.Fatalf("a bad line: blocked=%v %+v", r.Blocked, r.Checks)
 	}
 
-	nb := writeNotebook(t, dir, "nb.md", "---\nrat:\n  r:\n    dependencies: [jsonlite]\n---\n\n```r\n1\n```\n")
+	// MASS: a version with a dash (7.3-65), which packageVersion() writes 7.3.65.
+	nb := writeNotebook(t, dir, "nb.md", "---\nrat:\n  r:\n    dependencies: [jsonlite, MASS]\n---\n\n```r\n1\n```\n")
 	r, err = Doctor(store, nb, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +66,8 @@ func TestRPackagesAreCheckedInstalledAndLocked(t *testing.T) {
 	if ignore, _ := os.ReadFile(filepath.Join(dir, ".rat", ".gitignore")); !strings.Contains(string(ignore), "!r.lock") {
 		t.Fatalf(".gitignore = %s", ignore)
 	}
-	if r, _ = Doctor(store, nb, Options{}); r.Envs["r"].Relock {
-		t.Fatal("the lock was written again for nothing")
+	if r, _ = Doctor(store, nb, Options{}); r.Envs["r"].Relock || len(r.Envs["r"].Missing) != 0 {
+		t.Fatalf("after the lock: %+v", r.Envs["r"])
 	}
 
 	// The lock wants its version: another one installed is missing.
