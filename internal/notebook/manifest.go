@@ -12,6 +12,13 @@
 //	      - -e .                # this project, editable
 //	      - websockets
 //	      - lm15 @ git+https://github.com/example/lm15@main
+//	  r:
+//	    dependencies:           # pak package references
+//	      - dplyr               # CRAN (any version already installed will do)
+//	      - ggplot2@3.5.1       # an exact version
+//	      - tidyverse/dplyr@main  # GitHub
+//	      - bioc::DESeq2        # Bioconductor
+//	      - local::.            # this project, as an R package
 //	---
 //
 // Python cells may also carry a PEP 723 block (`# /// script` ...
@@ -42,6 +49,7 @@ import (
 type Manifest struct {
 	Project string      `yaml:"project"`
 	Python  *PythonSpec `yaml:"python"`
+	R       *RSpec      `yaml:"r"`
 	// After lists notebooks (paths relative to this one) whose cells must
 	// have run in the same kernel before this notebook's cells make sense.
 	// A declared dependency, never an implicit one: `rat play` runs them
@@ -52,6 +60,12 @@ type Manifest struct {
 // PythonSpec declares the Python environment a notebook needs.
 type PythonSpec struct {
 	Requires     string   `yaml:"requires"`
+	Dependencies []string `yaml:"dependencies"`
+}
+
+// RSpec declares the R packages a notebook needs, as pak package
+// references (https://pak.r-lib.org/reference/pak_package_sources.html).
+type RSpec struct {
 	Dependencies []string `yaml:"dependencies"`
 }
 
@@ -77,6 +91,8 @@ type Notebook struct {
 	Python *PythonSpec
 	// PEP723 is true when at least one python cell carries inline metadata.
 	PEP723 bool
+	// R is the front matter's R specification (nil: nothing declared).
+	R *RSpec
 }
 
 // Load reads and parses a notebook file.
@@ -135,6 +151,7 @@ func Parse(data []byte) (*Notebook, error) {
 		}
 	}
 	nb.Python = mergePython(nb.Manifest.Python, pep)
+	nb.R = mergeR(nb.Manifest.R, nil)
 	return nb, nil
 }
 
@@ -241,6 +258,13 @@ func (m Manifest) validate() error {
 			}
 		}
 	}
+	if m.R != nil {
+		for i, dep := range m.R.Dependencies {
+			if _, err := ParseRRef(dep); err != nil {
+				return fmt.Errorf("rat.r.dependencies[%d]: %w", i, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -283,6 +307,24 @@ func mergePython(a, b *PythonSpec) *PythonSpec {
 	}
 	for i := range out.Dependencies {
 		out.Dependencies[i] = strings.TrimSpace(out.Dependencies[i])
+	}
+	return out
+}
+
+func mergeR(a, b *RSpec) *RSpec {
+	if a == nil && b == nil {
+		return nil
+	}
+	out := &RSpec{}
+	for _, spec := range []*RSpec{a, b} {
+		if spec == nil {
+			continue
+		}
+		for _, d := range spec.Dependencies {
+			if d = strings.TrimSpace(d); !containsString(out.Dependencies, d) {
+				out.Dependencies = append(out.Dependencies, d)
+			}
+		}
 	}
 	return out
 }

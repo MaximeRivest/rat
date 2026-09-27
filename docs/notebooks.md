@@ -53,6 +53,42 @@ Front matter and PEP 723 merge; front matter wins for `requires`.
 A notebook with no declaration still runs — on its project's environment.
 `ensure` then only makes sure that environment exists.
 
+### R packages
+
+```markdown
+---
+rat:
+  r:
+    dependencies:           # pak package references
+      - dplyr               # CRAN; an installed copy anywhere will do
+      - ggplot2@3.5.1       # exactly this version (@>=3.5 for at least)
+      - tidyverse/dplyr@main   # GitHub (owner/repo[@ref])
+      - bioc::DESeq2        # Bioconductor
+      - local::.            # this project, as an R package
+      - thing=url::https://example.org/thing_1.0.tar.gz   # name what a URL installs
+---
+```
+
+Each line is a [pak package reference](https://pak.r-lib.org/reference/pak_package_sources.html).
+Packages go into the project's own library,
+`<project>/.rat/r-library/<platform>/R-<x.y>` (one per R minor version:
+packages built for R 4.5 do not load in 4.6), which the R kernel puts
+first on `.libPaths()` — including when it appears while the kernel
+runs, so a package just installed loads without a restart. Packages
+installed elsewhere (the site library, Nix, your user library) stay
+visible, and a plain name found there counts as installed. A project
+that uses renv keeps its renv library, and rat installs with
+`renv::install()`.
+
+rat installs with pak, which it keeps in its own cache
+(`~/.cache/rat/r-tools`), not in the project. On Linux without
+ready-made binaries (NixOS), pak builds from source and needs a C
+compiler and `make`; there, prefer R packages from Nix and let `ensure`
+see them as installed. `.rat/` carries its own `.gitignore`.
+
+`jsonlite` is added to every notebook with R cells: rat's R kernel needs
+it.
+
 ## Which project?
 
 Without `rat.project`, rat walks up from the notebook's folder and picks
@@ -100,13 +136,18 @@ rat ensure docs/tutorial.md --json # the same report, for integrations
 REPL (`rat py`) is IPython and the kernel completes with jedi. This is the
 same contract `rat install py` establishes.
 
+For R, `ensure` installs what is missing (a GitHub, path or URL line
+once, then remembered in `.rat-receipt.json` inside the library; a
+`local::` package again whenever its DESCRIPTION version changes), and
+restarts the R kernel only when a package changes version.
+
 What `ensure` will **not** do without being told:
 
 - delete an environment whose interpreter does not satisfy `requires` —
   `rat ensure --recreate` does, and says what is lost;
 - reinstall everything — `rat ensure --force`;
-- install tools for other languages (tmux for shell cells, Rscript, julia,
-  node). `doctor` reports them as missing; the Python plan still proceeds.
+- install runtimes (tmux for shell cells, R itself, julia, node). `doctor`
+  reports them as missing; the rest of the plan still proceeds.
 
 ## Notebooks that build on other notebooks
 
@@ -168,4 +209,5 @@ When asked to write a notebook someone will run:
 4. Run the cells: `rat run --doc <notebook> py '<code>'`.
 
 A failed `import` means the declaration is incomplete: add the line to
-`rat.python.dependencies`, `ensure`, rerun.
+`rat.python.dependencies`, `ensure`, rerun. In R, "there is no package
+called 'x'" means the same for `rat.r.dependencies`.

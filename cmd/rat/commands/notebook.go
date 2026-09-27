@@ -184,7 +184,17 @@ A notebook declares its needs like this:
       dependencies:           # requirements.txt lines
         - -e .                # this project, editable
         - websockets
+    r:
+      dependencies:           # pak package references
+        - dplyr               # CRAN; an installed copy anywhere will do
+        - ggplot2@3.5.1       # exactly this version
+        - tidyverse/dplyr@main  # GitHub
+        - local::.            # this project, as an R package
   ---
+
+R packages go into the project's own library (.rat/r-library, first on
+the R kernel's library path), or through renv::install when the project
+uses renv. They are installed with pak, which rat keeps in its cache.
 
 Without a declaration the notebook still runs on its project's
 environment; ensure then only makes sure that environment exists.
@@ -390,6 +400,9 @@ func printReport(r *notebook.Report, applied bool) {
 	}
 	if r.Python != nil && len(r.Python.Requirements) > 0 {
 		fmt.Printf("  %s %s\n", s.Dim("requirements:"), s.Dim(strings.Join(r.Python.Requirements, ", ")))
+	}
+	if r.R != nil && len(r.R.Requirements) > 0 {
+		fmt.Printf("  %s %s\n", s.Dim("R packages:"), s.Dim(strings.Join(r.R.Requirements, ", ")))
 	}
 	if len(r.Actions) > 0 {
 		if applied {

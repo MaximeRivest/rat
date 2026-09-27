@@ -64,6 +64,21 @@ local({
 
   send(list(op = "protocol_hello", token = token))
 
+  # ── the project's R library ────────────────────────────────
+  # `rat ensure` installs a notebook's declared packages into
+  # <project>/.rat/r-library/<platform>/R-<x.y> (unless the project uses
+  # renv). It goes first on the library path, also when it appears while
+  # the kernel runs: a package just installed loads without a restart.
+
+  project_library <- file.path(getwd(), ".rat", "r-library", R.version$platform,
+                               paste0("R-", R.version$major, ".", sub("[.].*", "", R.version$minor)))
+  use_project_library <- function() {
+    if (nzchar(Sys.getenv("RENV_PROJECT")) || !dir.exists(project_library)) return(invisible())
+    if (!normalizePath(project_library) %in% normalizePath(.libPaths())) .libPaths(c(project_library, .libPaths()))
+    invisible()
+  }
+  use_project_library()
+
   # ── output helpers ─────────────────────────────────────────
 
   out <- function(...) cat(..., sep = "", file = stdout())
@@ -417,6 +432,7 @@ local({
 
   handle <- function(req) {
     op <- req$op
+    use_project_library()
     switch(op,
       ping = list(ok = TRUE),
       run = run_cell(if (is.null(req$code)) "" else req$code),

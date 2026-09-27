@@ -61,6 +61,7 @@ type Report struct {
 	Languages      []string `json:"languages"`
 
 	Python *PythonState `json:"python,omitempty"`
+	R      *RState      `json:"r,omitempty"`
 	// After lists the notebooks this one declares as prerequisites, in run
 	// order, with whether each has already run in the current kernels.
 	After []AfterState `json:"after"`
@@ -209,6 +210,7 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 		return r, nil
 	}
 	var chainPython []*PythonSpec
+	var chainR []*RSpec
 	for _, dep := range chain {
 		depRoot, pinned := dep.ProjectRoot()
 		if !pinned {
@@ -224,6 +226,9 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 		r.After = append(r.After, AfterState{Path: dep.Path, Played: playedIn(store, dep, depRoot)})
 		if dep.Python != nil {
 			chainPython = append(chainPython, dep.Python)
+		}
+		if dep.R != nil {
+			chainR = append(chainR, dep.R)
 		}
 		for _, l := range dep.Languages() {
 			if !containsString(r.Languages, l) {
@@ -251,10 +256,15 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	for i := len(chainPython) - 1; i >= 0; i-- {
 		effective = mergePython(chainPython[i], effective)
 	}
-	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723}
+	effectiveR := nb.R
+	for i := len(chainR) - 1; i >= 0; i-- {
+		effectiveR = mergeR(chainR[i], effectiveR)
+	}
+	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723, R: effectiveR}
 
-	// Tools for non-Python cells. Rat does not install these yet: report
-	// them, but do not let a missing R or tmux stop the Python work.
+	// Tools for non-Python cells. Rat does not install the runtimes
+	// themselves: report them, but do not let a missing R or tmux stop the
+	// Python work.
 	for _, l := range r.Languages {
 		if c, ok := toolCheck(l, &opts); ok {
 			r.Checks = append(r.Checks, c)
@@ -264,6 +274,11 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	needsPython := nb.Python != nil || containsString(r.Languages, "py")
 	if needsPython {
 		if err := doctorPython(store, nb, r, &opts); err != nil {
+			return nil, err
+		}
+	}
+	if nb.R != nil || containsString(r.Languages, "r") {
+		if err := doctorR(store, nb, r, &opts); err != nil {
 			return nil, err
 		}
 	}
@@ -522,6 +537,7 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	ps := plan.Python
 	var steps []Step
 	restartKernel := false
+	restartR := false
 	for _, a := range plan.Actions {
 		t0 := time.Now()
 		var out string
@@ -562,6 +578,10 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 			}
 		case "restart-kernel":
 			restartKernel = true
+		case "r-install":
+			var restart bool
+			out, restart, runErr = ensureR(plan.R)
+			restartR = restartR || restart
 		}
 		step := Step{Action: a, OK: runErr == nil, Output: strings.TrimSpace(out), Seconds: time.Since(t0).Seconds()}
 		if runErr != nil {
@@ -575,28 +595,36 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 			return finish(store, nb, opts, steps)
 		}
 	}
-	if restartKernel && ps.KernelRunning {
-		t0 := time.Now()
-		res, err := resolver.ResolveWith(store, "py", resolver.Options{Cwd: nb.Dir, ProjectRoot: plan.Project})
-		step := Step{Action: Action{ID: "restart-kernel", Label: "restart " + ps.Kernel, Effect: "variables reset"}}
-		if err == nil {
-			err = daemon.Stop(store, res.Name)
-		}
-		if err == nil {
-			_, err = daemon.Start(store, daemon.StartOpts{Name: res.Name, Lang: res.Lang, Cwd: res.Cwd, Venv: res.Venv,
-				RuntimePath: res.RuntimePath, Options: res.Options, Env: res.Env})
-		}
-		step.OK = err == nil
-		if err != nil {
-			step.Output = err.Error()
-		}
-		step.Seconds = time.Since(t0).Seconds()
-		steps = append(steps, step)
-		if opts.Progress != nil {
-			opts.Progress(step)
-		}
+	if restartKernel && ps != nil && ps.KernelRunning {
+		steps = append(steps, restartNotebookKernel(store, "py", ps.Kernel, nb, plan, opts))
+	}
+	if restartR && plan.R != nil {
+		steps = append(steps, restartNotebookKernel(store, "r", plan.R.Kernel, nb, plan, opts))
 	}
 	return finish(store, nb, opts, steps)
+}
+
+// restartNotebookKernel restarts the notebook's kernel for lang.
+func restartNotebookKernel(store *state.Store, lang, kernelName string, nb *Notebook, plan *Report, opts Options) Step {
+	t0 := time.Now()
+	res, err := resolver.ResolveWith(store, lang, resolver.Options{Cwd: nb.Dir, ProjectRoot: plan.Project})
+	step := Step{Action: Action{ID: "restart-kernel", Label: "restart " + kernelName, Effect: "variables reset"}}
+	if err == nil {
+		err = daemon.Stop(store, res.Name)
+	}
+	if err == nil {
+		_, err = daemon.Start(store, daemon.StartOpts{Name: res.Name, Lang: res.Lang, Cwd: res.Cwd, Venv: res.Venv,
+			RuntimePath: res.RuntimePath, Options: res.Options, Env: res.Env})
+	}
+	step.OK = err == nil
+	if err != nil {
+		step.Output = err.Error()
+	}
+	step.Seconds = time.Since(t0).Seconds()
+	if opts.Progress != nil {
+		opts.Progress(step)
+	}
+	return step
 }
 
 func finish(store *state.Store, nb *Notebook, opts Options, steps []Step) (*Report, error) {
