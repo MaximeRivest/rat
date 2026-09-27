@@ -62,6 +62,7 @@ type Report struct {
 
 	Python *PythonState `json:"python,omitempty"`
 	R      *RState      `json:"r,omitempty"`
+	Julia  *JuliaState  `json:"julia,omitempty"`
 	// After lists the notebooks this one declares as prerequisites, in run
 	// order, with whether each has already run in the current kernels.
 	After []AfterState `json:"after"`
@@ -211,6 +212,7 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	}
 	var chainPython []*PythonSpec
 	var chainR []*RSpec
+	var chainJulia []*JuliaSpec
 	for _, dep := range chain {
 		depRoot, pinned := dep.ProjectRoot()
 		if !pinned {
@@ -229,6 +231,9 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 		}
 		if dep.R != nil {
 			chainR = append(chainR, dep.R)
+		}
+		if dep.Julia != nil {
+			chainJulia = append(chainJulia, dep.Julia)
 		}
 		for _, l := range dep.Languages() {
 			if !containsString(r.Languages, l) {
@@ -260,7 +265,11 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	for i := len(chainR) - 1; i >= 0; i-- {
 		effectiveR = mergeR(chainR[i], effectiveR)
 	}
-	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723, R: effectiveR}
+	effectiveJulia := nb.Julia
+	for i := len(chainJulia) - 1; i >= 0; i-- {
+		effectiveJulia = mergeJulia(chainJulia[i], effectiveJulia)
+	}
+	nb = &Notebook{Path: nb.Path, Dir: nb.Dir, Manifest: nb.Manifest, Declared: nb.Declared, Cells: nb.Cells, Python: effective, PEP723: nb.PEP723, R: effectiveR, Julia: effectiveJulia}
 
 	// Tools for non-Python cells. Rat does not install the runtimes
 	// themselves: report them, but do not let a missing R or tmux stop the
@@ -279,6 +288,11 @@ func Doctor(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	}
 	if nb.R != nil || containsString(r.Languages, "r") {
 		if err := doctorR(store, nb, r, &opts); err != nil {
+			return nil, err
+		}
+	}
+	if nb.Julia != nil || containsString(r.Languages, "jl") {
+		if err := doctorJulia(store, nb, r, &opts); err != nil {
 			return nil, err
 		}
 	}
@@ -538,6 +552,7 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	var steps []Step
 	restartKernel := false
 	restartR := false
+	restartJulia := false
 	for _, a := range plan.Actions {
 		t0 := time.Now()
 		var out string
@@ -582,6 +597,10 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 			var restart bool
 			out, restart, runErr = ensureR(plan.R)
 			restartR = restartR || restart
+		case "julia-install":
+			var restart bool
+			out, restart, runErr = ensureJulia(plan.Julia)
+			restartJulia = restartJulia || restart
 		}
 		step := Step{Action: a, OK: runErr == nil, Output: strings.TrimSpace(out), Seconds: time.Since(t0).Seconds()}
 		if runErr != nil {
@@ -600,6 +619,9 @@ func Ensure(store *state.Store, nb *Notebook, opts Options) (*Report, error) {
 	}
 	if restartR && plan.R != nil {
 		steps = append(steps, restartNotebookKernel(store, "r", plan.R.Kernel, nb, plan, opts))
+	}
+	if restartJulia && plan.Julia != nil {
+		steps = append(steps, restartNotebookKernel(store, "jl", plan.Julia.Kernel, nb, plan, opts))
 	}
 	return finish(store, nb, opts, steps)
 }

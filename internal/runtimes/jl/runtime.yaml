@@ -1,0 +1,25 @@
+name: jl
+display: Julia
+
+detect:
+  commands: [julia]
+  env: RAT_JULIA
+
+kernel:
+  type: json
+  script: kernel.jl
+  # Output streams live on the kernel's stdout/stderr; cancel interrupts
+  # the running code and keeps the session.
+  transport: socket
+  interrupt: signal
+
+frontend:
+  type: repl
+  prompt: "julia> "
+
+install:
+  runtime:
+    manager: none
+  smoke:
+    run: "1 + 1"
+    expect: "2"

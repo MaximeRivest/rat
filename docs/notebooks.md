@@ -89,6 +89,32 @@ see them as installed. `.rat/` carries its own `.gitignore`.
 `jsonlite` is added to every notebook with R cells: rat's R kernel needs
 it.
 
+### Julia packages
+
+```markdown
+---
+rat:
+  julia:
+    dependencies:
+      - DataFrames          # registered; installed anywhere will do
+      - Plots@1.40          # any 1.40.x (@1.40.2: exactly)
+      - https://github.com/org/Foo.jl#main   # Git, at a branch/tag/commit
+      - Baz=https://example.org/repo          # name what a URL installs
+      - ./MyPkg             # a local package, developed in place (like -e)
+---
+```
+
+They go into `<project>/.rat/julia`, a Julia environment of rat's: a
+project that is itself a Julia package keeps its `Project.toml` as its
+authors wrote it. The Julia kernel activates the project's own
+environment when it has one (so `using TheProject` works) and stacks
+`.rat/julia` on `LOAD_PATH` right after it — also when it appears while
+the kernel runs. The default environment (`~/.julia/environments/v1.x`)
+stays loadable, and a declared package found in any of these counts as
+installed (rat reads their `Manifest.toml`s; Julia is not started).
+`ensure` runs `Pkg.add`/`Pkg.develop` and precompiles. The Julia kernel
+itself needs no package.
+
 ## Which project?
 
 Without `rat.project`, rat walks up from the notebook's folder and picks
@@ -210,4 +236,5 @@ When asked to write a notebook someone will run:
 
 A failed `import` means the declaration is incomplete: add the line to
 `rat.python.dependencies`, `ensure`, rerun. In R, "there is no package
-called 'x'" means the same for `rat.r.dependencies`.
+called 'x'" means the same for `rat.r.dependencies`; in Julia, "Package X
+not found in current path" for `rat.julia.dependencies`.

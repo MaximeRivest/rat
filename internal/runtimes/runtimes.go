@@ -14,11 +14,11 @@ import (
 	"github.com/maximerivest/rat/internal/cachedir"
 )
 
-//go:embed frontend.py r/runtime.yaml r/kernel.R pi/runtime.yaml pi/bridge.ts slack/runtime.yaml slack/kernel-slack.py jupyter/runtime.yaml jupyter/kernel-jupyter.py
+//go:embed frontend.py r/runtime.yaml r/kernel.R pi/runtime.yaml pi/bridge.ts slack/runtime.yaml slack/kernel-slack.py jupyter/runtime.yaml jupyter/kernel-jupyter.py jl/runtime.yaml jl/kernel.jl
 var embedded embed.FS
 
 // builtinLangs lists which languages have embedded runtimes.
-var builtinLangs = []string{"r", "pi", "slack", "jupyter"}
+var builtinLangs = []string{"r", "jl", "pi", "slack", "jupyter"}
 
 // IsBuiltin returns true if the language has a built-in runtime.
 func IsBuiltin(lang string) bool {

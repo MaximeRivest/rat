@@ -19,6 +19,12 @@
 //	      - tidyverse/dplyr@main  # GitHub
 //	      - bioc::DESeq2        # Bioconductor
 //	      - local::.            # this project, as an R package
+//	  julia:
+//	    dependencies:           # Julia packages
+//	      - DataFrames          # registered (any version already installed will do)
+//	      - Plots@1.40          # any 1.40.x
+//	      - https://github.com/org/Foo.jl#main   # Git
+//	      - ./MyPkg             # a local package, developed in place
 //	---
 //
 // Python cells may also carry a PEP 723 block (`# /// script` ...
@@ -50,6 +56,7 @@ type Manifest struct {
 	Project string      `yaml:"project"`
 	Python  *PythonSpec `yaml:"python"`
 	R       *RSpec      `yaml:"r"`
+	Julia   *JuliaSpec  `yaml:"julia"`
 	// After lists notebooks (paths relative to this one) whose cells must
 	// have run in the same kernel before this notebook's cells make sense.
 	// A declared dependency, never an implicit one: `rat play` runs them
@@ -93,6 +100,8 @@ type Notebook struct {
 	PEP723 bool
 	// R is the front matter's R specification (nil: nothing declared).
 	R *RSpec
+	// Julia is the front matter's Julia specification (nil: nothing declared).
+	Julia *JuliaSpec
 }
 
 // Load reads and parses a notebook file.
@@ -152,6 +161,7 @@ func Parse(data []byte) (*Notebook, error) {
 	}
 	nb.Python = mergePython(nb.Manifest.Python, pep)
 	nb.R = mergeR(nb.Manifest.R, nil)
+	nb.Julia = mergeJulia(nb.Manifest.Julia, nil)
 	return nb, nil
 }
 
@@ -262,6 +272,13 @@ func (m Manifest) validate() error {
 		for i, dep := range m.R.Dependencies {
 			if _, err := ParseRRef(dep); err != nil {
 				return fmt.Errorf("rat.r.dependencies[%d]: %w", i, err)
+			}
+		}
+	}
+	if m.Julia != nil {
+		for i, dep := range m.Julia.Dependencies {
+			if _, err := ParseJuliaRef(dep); err != nil {
+				return fmt.Errorf("rat.julia.dependencies[%d]: %w", i, err)
 			}
 		}
 	}

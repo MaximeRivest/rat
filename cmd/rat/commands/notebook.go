@@ -196,6 +196,16 @@ R packages go into the project's own library (.rat/r-library, first on
 the R kernel's library path), or through renv::install when the project
 uses renv. They are installed with pak, which rat keeps in its cache.
 
+    julia:
+      dependencies:           # Julia packages
+        - DataFrames          # registered; installed anywhere will do
+        - Plots@1.40          # any 1.40.x
+        - https://github.com/org/Foo.jl#main
+        - ./MyPkg             # a local package, developed in place
+
+Julia packages go into the environment .rat/julia, stacked on the Julia
+kernel's LOAD_PATH; a project's own Project.toml is never changed.
+
 Without a declaration the notebook still runs on its project's
 environment; ensure then only makes sure that environment exists.
 
@@ -403,6 +413,9 @@ func printReport(r *notebook.Report, applied bool) {
 	}
 	if r.R != nil && len(r.R.Requirements) > 0 {
 		fmt.Printf("  %s %s\n", s.Dim("R packages:"), s.Dim(strings.Join(r.R.Requirements, ", ")))
+	}
+	if r.Julia != nil && len(r.Julia.Requirements) > 0 {
+		fmt.Printf("  %s %s\n", s.Dim("Julia packages:"), s.Dim(strings.Join(r.Julia.Requirements, ", ")))
 	}
 	if len(r.Actions) > 0 {
 		if applied {
