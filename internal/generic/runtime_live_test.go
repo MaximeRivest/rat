@@ -99,8 +99,10 @@ func TestSocketKernelCancelKeepsVariables(t *testing.T) {
 	if r := k.Run("x = 7"); !r.Success {
 		t.Fatal(r.Error)
 	}
-	done := runAsync(k, "import time\nwhile True: time.sleep(0.05)")
-	waitFor(t, "the run", func() bool { return k.Ctl("status").Text == "busy" })
+	// Cancel once the code runs: a SIGINT that lands before the kernel
+	// starts the code is dropped (it would come between requests).
+	done := runAsync(k, "import time\nprint('running', flush=True)\nwhile True: time.sleep(0.05)")
+	waitFor(t, "the run", func() bool { return strings.Contains(k.Ctl("output").Text, "running") })
 	start := time.Now()
 	if c := k.Ctl("cancel").Text; c != "CANCELLED" {
 		t.Fatalf("cancel = %q", c)
